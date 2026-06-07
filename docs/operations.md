@@ -1,0 +1,158 @@
+# Operations — incident runbook: hijack & key rotation (self-host v1)
+
+> Ops companion to the canonical design doc (`../README.md`). Read the
+> **Security membrane** section there first — this runbook is the residual
+> detection + rotation layer that sits on top of the membrane.
+
+This runbook is short **because the membrane already bounds blast radius** (no
+standing creds, project-root FS, egress allowlist). Detection + rotation is the
+residual layer, not the primary defense.
+
+## Detection tripwires
+
+The egress log is the primary tripwire; these are the signals worth alerting on:
+
+- **egress** to a non-allowlisted destination (highest signal)
+- **cred-use without a matching HITL approval**, or a run requesting powers
+  inconsistent with its stated task
+- **shell fingerprints**: pipe-to-shell (`curl … | sh`), `base64 -d | sh`,
+  writes to `~/.ssh`, wholesale env dump
+- **injection fingerprint**: a `recall` result containing instruction-like text
+  immediately preceding a behavior change
+- **volume anomaly**: a sudden burst of tool calls or egress
+
+**Tiered response — a self-host operator has no on-call, so the highest-signal
+tripwires must act _without_ waiting for a human.** MTTR is dominated by "time
+until the operator reads the DM," so the design minimizes blast radius during
+that window rather than relying on fast human response:
+
+| Tier | Tripwire | Automatic action |
+|---|---|---|
+| **block** | non-allowlisted egress | denied at the proxy by default (never reaches the network) |
+| **contain** | cred-use without HITL approval · `curl \| sh` / `base64 \| sh` / `~/.ssh` write | SIGKILL container + freeze session + suspend new cred grants |
+| **notify** | volume anomaly · injection fingerprint | alert to cockpit DM; human decides |
+
+### Egress: one enforcing chokepoint
+
+"Logging egress" is not enough — over TLS the destination is invisible without
+SNI inspection, and logging alone does not stop exfiltration. v1 routes **all**
+container egress through a **single proxy**: the container has no direct internet
+route; only the proxy is reachable; the proxy does **default-deny + allowlist +
+structured logging** in one place (SNI-based for HTTPS; DNS via a controlled
+resolver). This proxy is simultaneously the membrane's egress control point and
+the primary detection tripwire. No SIEM needed for v1 — local structured logs +
+a rule that alerts on a non-allowlisted SNI is enough.
+
+> ⚠️ Even an allowlisted destination can be an exfil channel (push to an
+> attacker repo via an over-broad `gh` token, write to an allowed bucket). Pair
+> the allowlist with **minimum-scope leases** (e.g. `contents:write` on the
+> target repo only, no gist/repo-create) — see the launcher's `CredentialBroker`
+> in the README.
+
+## Response — contain → rotate → investigate → eradicate → recover
+
+1. **Contain** — cockpit SIGKILLs the container, freezes the session, suspends
+   the launcher from granting new creds.
+2. **Rotate** — revoke + reissue the scoped creds live during the suspect
+   window (per provider: aws / gcloud / cloudflare / gh). Because creds are
+   short-lived and per-task, the window is already bounded.
+3. **Investigate** — pull the run's event log + egress log + the exact `recall`
+   set that fed the run, to locate the injection source.
+4. **Eradicate** — `forget` / quarantine the poisoned memory; add a `prevents`
+   edge so it won't resurface; tighten the egress allowlist.
+5. **Recover** — resume the category only after review; **demote graduation**
+   if a graduated capability was abused.
+
+## Key rotation procedure
+
+The scoped-cred model makes routine rotation cheap and isolates the one thing
+that actually matters:
+
+- **Task creds** are minted per-run by the launcher and expire on their own —
+  "rotation" of a task cred is usually just letting it lapse / revoking a token,
+  no human action.
+- **The root credential** the cockpit holds to _mint_ task creds is the crown
+  jewel. It lives on the **host with the cockpit, never in a container**.
+  Rotating it is the real incident action — document the per-provider steps
+  (AWS role/key, GCP SA, Cloudflare token, GitHub app).
+- **Cadence**: routine root-cred rotation on a fixed schedule (e.g. quarterly)
+  **plus** immediate rotation on any suspected hijack.
+
+## Per-provider short-lived credential feasibility
+
+The launcher's per-task mint-and-expire model (README "The launcher") depends on
+each provider issuing short-lived, scoped creds. Verified feasibility:
+
+| Provider | Mechanism | TTL | Scoping | Verdict |
+|---|---|---|---|---|
+| **AWS** | STS `AssumeRole` (+ inline session policy) | 15 min – 12 h | IAM role + session policy | ✅ native, **stateless** signed call |
+| **GCP** | IAM Credentials `generateAccessToken` via SA impersonation | ≤ 1 h default (≤ 12 h org policy) | per-SA IAM roles | ✅ native |
+| **GitHub** | App installation access token (App JWT → token) | 1 h fixed | repos + permission set per installation | ✅ native |
+| **Cloudflare** | Tokens API: mint child token with `not_before` / `expires_on`, scoped permission groups | arbitrary (you set it) | per zone / account / user permission groups | ⚠️ workable, **stateful** |
+
+**Cloudflare is the rough edge, not a blocker.** Unlike AWS STS (a fast signed
+call with no server-side state), Cloudflare needs an API round-trip to *create* a
+scoped token and another to *delete/revoke* it — a mint→use→revoke lifecycle per
+task, with latency and a token to clean up. The parent token holding "Create
+Additional Tokens" is itself a root credential (treat as crown jewel, see Key
+rotation above). R2 specifically offers proper STS-like temporary credentials.
+
+> **Implication for the launcher design:** AWS / GCP / GitHub fit a stateless
+> "mint on the signed path" shape; Cloudflare needs an explicit
+> create→use→revoke lifecycle the launcher must track and **clean up on crash**.
+> Build the launcher's cred interface to allow both shapes — do not assume
+> STS-style statelessness everywhere.
+
+Sources: [Cloudflare — create tokens via API](https://developers.cloudflare.com/fundamentals/api/how-to/create-via-api/),
+[Cloudflare — restrict tokens (TTL)](https://developers.cloudflare.com/fundamentals/api/how-to/restrict-tokens/),
+[Cloudflare R2 — temporary credentials](https://developers.cloudflare.com/r2/api/tokens/).
+
+## Cockpit availability & recovery
+
+The cockpit is a single long-lived host process — a **single point of failure**.
+If it dies, running agent containers are orphaned: still executing, still holding
+leases, with no one routing their output or able to kill them.
+
+- **Supervise it.** Run under `systemd` (`Restart=always`) or
+  `docker run --restart=always`, plus an **external liveness ping** — if the
+  cockpit is down, alerting is down too ("who watches the watcher").
+- **Make the registry reconstructable from Docker alone.** Stamp each container
+  with labels `{thread_id, task_id, lease_ref}`. On restart the cockpit
+  `reconcile`s against `docker ps`: adopt survivors from their labels, mark
+  vanished ones `done/killed`. This removes the dependency on the in-memory
+  registry's freshness (memory-cloud checkpoints become a convenience, not the
+  source of truth).
+- **Fail closed on pending approvals.** A crash mid-HITL leaves a container
+  awaiting a decision that will never arrive — on restart, **time out and deny**
+  any pending `CapabilityRequest`.
+
+## Credential lifecycle operations
+
+The `CredentialBroker` / `Lease` model (README "The launcher") needs a durable
+backing store so a crash can't leak live cloud credentials:
+
+- **Lease ledger** — an append-only durable record
+  `{lease_id, provider, container_id, expires_at, revoke_handle}`. Written on
+  `acquire`, marked closed on `release`. Must survive a cockpit crash (not
+  in-memory).
+- **Sweeper** — on startup **and** periodically, list open leases and **revoke
+  any whose owning container is gone**. STS-style leases self-expire (sweep is a
+  no-op); Cloudflare leases need an explicit revoke call — this sweeper is the
+  cleanup the feasibility note above flags as required.
+- **Renewer death.** The budget-renew loop runs in the cockpit/launcher. If it
+  dies while a task keeps running, the task's lease lapses mid-flight — the agent
+  must **pause/retry gracefully on cred expiry, not crash-loop**. Define this
+  behavior in the brain↔launcher contract.
+
+## Minimal v1 ops tooling checklist
+
+1. `systemd` unit (`Restart=always`) for the cockpit + external liveness ping
+2. Egress proxy (default-deny + allowlist + structured log) as the single network chokepoint
+3. Durable lease ledger + startup/periodic sweeper
+4. Container labels `{thread_id, task_id, lease_ref}` → registry reconciles from Docker alone
+5. Tiered tripwire policy (block / contain / notify) wired to automatic actions
+6. Fail-closed timeout for pending HITL approvals on restart
+
+CI/CD is out of scope while the repo is a placeholder; at first code the image
+build ties to the README's digest/lockfile pinning and the "ship Dockerfiles,
+not prebuilt images" decision in `docs/legal.md`.
