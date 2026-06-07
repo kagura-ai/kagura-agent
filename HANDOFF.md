@@ -14,6 +14,17 @@
 | **UI** | **Slack/Discord = 操縦席（control surface）** | ⚠️ ingestion source ではない。`kagura-memory-ai-worker` の Slack（=会話を黙って memory 化）と役割が違う。**別ボット ID（`@kagura-agent`）で分離**。README の "NOT a chat interface"（L179）は「memory-cloud の chat front ではない／*エージェントの*操縦席である」と書き換える。self-host なら DM 1対1 で始められる。 |
 | **コンテナ自由度** | **コンテナ内は full freedom**（apt / 任意 CLI 自由・自己責任ベース） | 自由は「中」で。Linux ベース。 |
 
+## kagura-agent ↔ kagura-engineer 関係（2026-06-08 決定・別リポ）
+
+- **agent = 上位（umbrella）**：汎用 memory-backed actor（infra/クラウド hands・Slack 操縦席・membrane・capability graduation）。
+- **engineer = 最初の特化インスタンス（shipping）**：issue→reviewed PR のコーディングハーネス（doctor/setup/run/review）。`kagura-ai/kagura-engineer`（旧 kagura-agent repo を rename したもの）。**別リポで正**。
+- **kagura-code-reviewer**：engineer の `review` が起動するレビューア（green/yellow/red verdict）。agent の sub-agent dispatch の実例。
+- **価値の双方向**：
+  - engineer → agent（**参照実装**）：engineer の狭い `MemoryClient` Protocol（append+scoped read・admin なし）＋ `_TRUST_FILTER={"trust_tier":"trusted"}` recall は **agent 設計の "memory provenance"（CSO C1）の実装そのもの**。`LocalMemoryClient`(SQLite) は self-host memory backend。
+  - agent → engineer（**設計の天井**）：membrane・launcher(`CredentialBroker`/`Lease`)・cockpit・graduation は engineer が単一 trusted operator を超えて広がる時の行き先。
+- **境界ルール**：コーディング特化（issue→PR・review loop）は engineer、汎用 actor 共通（membrane・cred leasing・cockpit・multi-domain hands・graduation）は agent。共有 primitive（MemoryClient の形・trust-tier 規律・sub-agent dispatch）は**ここで設計し engineer が先に実装**、fork しない。
+- README 反映済み（"kagura-agent and kagura-engineer" 節 + Related repositories 表に engineer/code-reviewer 追加）。
+
 ## 「ブレイン差し替えの縫い目」（v1 で唯一守ること）
 
 Codex は作らないが**閉じ込めない**。
