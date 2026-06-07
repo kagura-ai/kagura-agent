@@ -14,10 +14,14 @@
 | **UI** | **Slack/Discord = 操縦席（control surface）** | ⚠️ ingestion source ではない。`kagura-memory-ai-worker` の Slack（=会話を黙って memory 化）と役割が違う。**別ボット ID（`@kagura-agent`）で分離**。README の "NOT a chat interface"（L179）は「memory-cloud の chat front ではない／*エージェントの*操縦席である」と書き換える。self-host なら DM 1対1 で始められる。 |
 | **コンテナ自由度** | **コンテナ内は full freedom**（apt / 任意 CLI 自由・自己責任ベース） | 自由は「中」で。Linux ベース。 |
 
-## kagura-agent ↔ kagura-engineer 関係（2026-06-08 決定・別リポ）
+## kagura-agent ↔ kagura-engineer 関係（2026-06-08 決定・独立2エージェント）
 
-- **agent = 上位（umbrella）**：汎用 memory-backed actor（infra/クラウド hands・Slack 操縦席・membrane・capability graduation）。
-- **engineer = 最初の特化インスタンス（shipping）**：issue→reviewed PR のコーディングハーネス（doctor/setup/run/review）。`kagura-ai/kagura-engineer`（旧 kagura-agent repo を rename したもの）。**別リポで正**。
+**結論: (a) 独立した兄弟エージェント。platform/instance ではない。**（option 1 の "umbrella/instance" から訂正）
+- **agent**：汎用・**Docker ベース高自由度** actor（infra/クラウド hands・Slack 操縦席・membrane・capability graduation）。**設計段階・コードなし**。
+- **engineer**：**独立した**特化エージェント（issue→reviewed PR：doctor/setup/run/review）。`kagura-ai/kagura-engineer`（旧 kagura-agent repo を rename）。**shipping 済み（CLI+tests）**。
+- engineer は agent のフレームワーク上で動かない。agent も engineer に block されない。**別リポ・別コードベースで正**。
+- **(b) platform 化は今やらない**：未完成の抽象に working code を載せ替え＝抽象化税の先払い（Codex 判断と同じ罠）。**2個目の特化 actor が出て seam が見えてから**再検討。
+- 共有は **thin library 経由・proven なものだけ**（framework 強制でなく fork でもなく）。最初は `MemoryClient` の形＋trust-tier 規律を **`kagura-memory-python-sdk`** 経由で。
 - **kagura-code-reviewer**：engineer の `review` が起動するレビューア（green/yellow/red verdict）。agent の sub-agent dispatch の実例。
 - **価値の双方向**：
   - engineer → agent（**参照実装**）：engineer の狭い `MemoryClient` Protocol（append+scoped read・admin なし）＋ `_TRUST_FILTER={"trust_tier":"trusted"}` recall は **agent 設計の "memory provenance"（CSO C1）の実装そのもの**。`LocalMemoryClient`(SQLite) は self-host memory backend。
