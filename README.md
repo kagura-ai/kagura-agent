@@ -44,7 +44,9 @@ platform and an app running on it.**
 
 - **kagura-agent** — a general, Docker-based, **high-freedom** autonomous actor:
   arbitrary domains, infra/cloud hands, a Slack/Discord cockpit, the security
-  membrane, capability graduation. _Design stage; no code yet._
+  membrane, capability graduation. _v0.1–v0.5 skeleton implemented (Python core
+  + tests); container/cloud/transport edges are protocol seams with the SDK
+  glue stubbed for deployment._
 - **kagura-engineer** — an independent, **coding-specialized** agent that drives
   a GitHub issue to a reviewed PR (`doctor` / `setup` / `run` / `review`).
   _Shipping today (CLI + tests)._
@@ -707,6 +709,26 @@ kagura-agent/
 ```
 
 Python, Claude Agent SDK Python, subprocess-wrapped Claude Code CLI.
+
+### Implementation status (v0.1–v0.5 skeleton)
+
+The pure-Python core of every milestone is implemented and tested; the
+infrastructure edges (real Docker, cloud STS/Cloudflare, Slack/Discord SDKs) sit
+behind protocol seams with their adapters stubbed for deployment. Run the suite
+with `pytest`; type-check with `mypy` (strict).
+
+| Milestone | What landed | Key modules | Tests |
+|---|---|---|---|
+| **v0.1** walking skeleton | brain seam, `ClaudeBrain`, MCP startup gate, per-provider auth, CLI transport, structural intent router, session + checkpoint, cockpit wiring | `core/brain/`, `core/session.py`, `cockpit/`, `patterns/checkpoint.py`, `mcp/memory_cloud.py` | `test_session`, `test_brain`, `test_transport`, `test_cockpit_v01`, `test_seam`, `test_memory`, `test_cli` |
+| **v0.2** membrane | mount guards (no docker.sock / host FS), baked hardening flags, default-deny egress, `CredentialBroker`/`Lease` (stateless + stateful), lease ledger + sweeper, launcher↔runtime | `membrane/launcher.py`, `membrane/egress.py`, `membrane/lease.py`, `membrane/runtime.py` | `test_membrane`, `test_lease`, `test_launcher` |
+| **v0.3** cockpit + HITL | HITL approval (fail-closed + graduation trail), session registry + restart reconcile, status/kill intents | `cockpit/hitl.py`, `cockpit/registry.py`, `cockpit/core.py`, `cockpit/intent.py` | `test_cockpit_v03`, `test_cockpit_control` |
+| **v0.4** graduation | per-category curve (verified successes, fail-closed, cooldown), input-trust gate, prevents-edge failure learning | `membrane/graduation.py`, `patterns/failure_learning.py` | `test_graduation`, `test_failure_learning` |
+| **v0.5** transports | Slack (Bolt) + Discord normalizers onto the shared `Event` — pure additions, no core change | `cockpit/transports/slack.py`, `cockpit/transports/discord.py` | `test_transports_v05` |
+
+The seam invariant is enforced as a test: `test_seam` fails if `core/session.py`
+ever imports the SDK. `deploy/images/` ships Dockerfile *recipes* (digest-pinned,
+no prebuilt image) and `deploy/compose.yml` provisions the egress proxy; the
+cockpit runs on the host and is the only side that speaks to Docker.
 
 ---
 

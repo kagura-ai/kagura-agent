@@ -1,0 +1,26 @@
+# Single-user self-hosted deployment.
+#
+# IMPORTANT: the cockpit runs on the HOST (trusted), not as a container service
+# here — it is the sole holder of the bot token and the only side that speaks to
+# Docker. Agent containers (untrusted) are launched per-run by the launcher with
+# the membrane's hardening flags; they are NOT defined here and NEVER receive
+# docker.sock. This file only provisions the supporting services.
+#
+# Run the cockpit with:  kagura-agent  (host process)
+
+services:
+  egress-proxy:
+    # Default-deny + allowlist + log. Agent containers attach to this network
+    # only; they have no host network access (launcher sets --network none and
+    # routes through the proxy sidecar).
+    image: ghcr.io/kagura-ai/egress-proxy:pinned-by-digest
+    networks: [agent-egress]
+    environment:
+      EGRESS_ALLOWLIST: "api.anthropic.com,memory.kagura-ai.com"
+    restart: unless-stopped
+
+networks:
+  agent-egress:
+    driver: bridge
+# No agent service: agent containers are ephemeral, launched by the trusted
+# host-side cockpit, and removed on completion (--rm).
