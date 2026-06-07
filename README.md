@@ -38,16 +38,30 @@ as a CLI, a daemon, or as a managed SaaS lane.
 
 ## kagura-agent and kagura-engineer
 
-kagura-agent is the **umbrella**: a general memory-backed autonomous actor —
-arbitrary domains, infra/cloud hands, a Slack/Discord cockpit, the security
-membrane, and capability graduation.
-[`kagura-engineer`](https://github.com/kagura-ai/kagura-engineer) is the **first
-concrete, coding-specialized instance** of that thesis — a shipping harness that
-drives a GitHub issue to a reviewed PR (`doctor` / `setup` / `run` / `review`).
+kagura-agent and [`kagura-engineer`](https://github.com/kagura-ai/kagura-engineer)
+are **two independent agents that share the same "memory + actor" thesis — not a
+platform and an app running on it.**
 
-They are **separate repositories on purpose**. The umbrella defines the
-patterns; the instance proves them narrowly and ships. The flow of value is
-two-way:
+- **kagura-agent** — a general, Docker-based, **high-freedom** autonomous actor:
+  arbitrary domains, infra/cloud hands, a Slack/Discord cockpit, the security
+  membrane, capability graduation. _Design stage; no code yet._
+- **kagura-engineer** — an independent, **coding-specialized** agent that drives
+  a GitHub issue to a reviewed PR (`doctor` / `setup` / `run` / `review`).
+  _Shipping today (CLI + tests)._
+
+They are **separate repositories, separate codebases, on purpose** — engineer
+does **not** run on agent's framework, and agent is not blocked on engineer.
+Coupling them now would mean re-architecting working, tested code onto an
+unbuilt abstraction (designing a platform from a single instance) — the
+"abstraction tax before the moat" this project deliberately avoids. Revisit a
+shared runtime only once a **second** specialized actor makes the real seams
+visible.
+
+What they share is kept **thin and proven, via libraries — not a framework**.
+The narrowest, most-proven primitive goes first: the `MemoryClient` shape +
+trust-tier discipline, shared through the existing
+[`kagura-memory-python-sdk`](https://github.com/kagura-ai/kagura-memory-python-sdk).
+Beyond that the relationship is informational, two-way:
 
 - **engineer → agent (reference implementation).** Things agent specs as design,
   engineer has already built in the small and can be lifted from:
@@ -64,9 +78,11 @@ two-way:
 
 **Boundary rule:** anything coding-task-specific (issue→PR, the review loop)
 lives in engineer; anything a *general* actor needs (membrane, cred leasing,
-cockpit, multi-domain hands, capability graduation) is agent's. Shared
-primitives (the `MemoryClient` shape, trust-tier discipline, sub-agent dispatch)
-are designed here and implemented there first — don't fork them.
+cockpit, multi-domain hands, capability graduation) is agent's. A shared
+primitive (the `MemoryClient` shape, trust-tier discipline, eventually sub-agent
+dispatch) should be **extracted into a shared library once it has proven out in
+one of them — not copy-pasted, and not turned into a platform either side must
+adopt.**
 
 ---
 
@@ -698,7 +714,7 @@ Python, Claude Agent SDK Python, subprocess-wrapped Claude Code CLI.
 
 | Repo | Role | Relationship to agent |
 |---|---|---|
-| [`kagura-ai/kagura-engineer`](https://github.com/kagura-ai/kagura-engineer) | Coding-specialized actor (shipping) | **The first concrete instance of this design** — see "kagura-agent and kagura-engineer" above. Reference implementation for the shared memory+actor primitives. |
+| [`kagura-ai/kagura-engineer`](https://github.com/kagura-ai/kagura-engineer) | Coding-specialized actor (shipping) | **Independent sibling agent** sharing the memory+actor thesis (not a platform/instance) — see "kagura-agent and kagura-engineer" above. Where shared primitives get proven first. |
 | [`kagura-ai/kagura-code-reviewer`](https://github.com/kagura-ai/kagura-code-reviewer) | Review subagent | Ollama-powered code reviewer with a green/yellow/red verdict; launched by kagura-engineer's `review`. A model for the agent's own sub-agent dispatch. |
 | [`kagura-ai/memory-cloud`](https://github.com/kagura-ai/memory-cloud) | Persistence + MCP server | **The backbone.** Agent's primary MCP. |
 | [`kagura-ai/kagura-memory-python-sdk`](https://github.com/kagura-ai/kagura-memory-python-sdk) | Primitive SDK | Used by the memory MCP client wrapper inside the agent. |
