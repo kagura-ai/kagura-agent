@@ -36,6 +36,40 @@ as a CLI, a daemon, or as a managed SaaS lane.
 
 ---
 
+## kagura-agent and kagura-engineer
+
+kagura-agent is the **umbrella**: a general memory-backed autonomous actor —
+arbitrary domains, infra/cloud hands, a Slack/Discord cockpit, the security
+membrane, and capability graduation.
+[`kagura-engineer`](https://github.com/kagura-ai/kagura-engineer) is the **first
+concrete, coding-specialized instance** of that thesis — a shipping harness that
+drives a GitHub issue to a reviewed PR (`doctor` / `setup` / `run` / `review`).
+
+They are **separate repositories on purpose**. The umbrella defines the
+patterns; the instance proves them narrowly and ships. The flow of value is
+two-way:
+
+- **engineer → agent (reference implementation).** Things agent specs as design,
+  engineer has already built in the small and can be lifted from:
+  - its narrow `MemoryClient` Protocol (append + scoped read, no admin) and the
+    `_TRUST_FILTER = {"trust_tier": "trusted"}` recall filter **are** the
+    "Memory provenance" membrane control (untrusted externally-ingested memories
+    excluded from behaviour-influencing reads);
+  - `LocalMemoryClient` (offline SQLite) is the self-host memory backend;
+  - launching [`kagura-code-reviewer`](https://github.com/kagura-ai/kagura-code-reviewer)
+    and gating on its verdict is a working model of sub-agent dispatch.
+- **agent → engineer (the design ceiling).** The membrane, launcher
+  (`CredentialBroker`/`Lease`), cockpit, and graduation curve are where engineer
+  goes as it widens beyond a single trusted operator.
+
+**Boundary rule:** anything coding-task-specific (issue→PR, the review loop)
+lives in engineer; anything a *general* actor needs (membrane, cred leasing,
+cockpit, multi-domain hands, capability graduation) is agent's. Shared
+primitives (the `MemoryClient` shape, trust-tier discipline, sub-agent dispatch)
+are designed here and implemented there first — don't fork them.
+
+---
+
 ## Architecture
 
 ```
@@ -664,6 +698,8 @@ Python, Claude Agent SDK Python, subprocess-wrapped Claude Code CLI.
 
 | Repo | Role | Relationship to agent |
 |---|---|---|
+| [`kagura-ai/kagura-engineer`](https://github.com/kagura-ai/kagura-engineer) | Coding-specialized actor (shipping) | **The first concrete instance of this design** — see "kagura-agent and kagura-engineer" above. Reference implementation for the shared memory+actor primitives. |
+| [`kagura-ai/kagura-code-reviewer`](https://github.com/kagura-ai/kagura-code-reviewer) | Review subagent | Ollama-powered code reviewer with a green/yellow/red verdict; launched by kagura-engineer's `review`. A model for the agent's own sub-agent dispatch. |
 | [`kagura-ai/memory-cloud`](https://github.com/kagura-ai/memory-cloud) | Persistence + MCP server | **The backbone.** Agent's primary MCP. |
 | [`kagura-ai/kagura-memory-python-sdk`](https://github.com/kagura-ai/kagura-memory-python-sdk) | Primitive SDK | Used by the memory MCP client wrapper inside the agent. |
 | [`kagura-ai/kagura-memory-ai-worker`](https://github.com/kagura-ai/kagura-memory-ai-worker) | Chat ingestion | Produces memories the agent later reads. Not in the agent's execution path. |
