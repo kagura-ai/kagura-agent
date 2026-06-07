@@ -1,0 +1,15 @@
+# L2 python variant — FROM base; + the python toolchain. v1 ships base + python.
+#
+# L3 (project-specific apt) happens *inside the live container* at run time, not
+# here — that is the capability-graduation escape hatch, gated by HITL.
+FROM kagura-agent:base
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-venv python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+USER agent
+
+# uv for fast, lockfile-pinned installs inside the container.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/home/agent/.local/bin:${PATH}"

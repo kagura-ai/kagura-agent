@@ -17,7 +17,7 @@
 ## kagura-agent ↔ kagura-engineer 関係（2026-06-08 決定・独立2エージェント）
 
 **結論: (a) 独立した兄弟エージェント。platform/instance ではない。**（option 1 の "umbrella/instance" から訂正）
-- **agent**：汎用・**Docker ベース高自由度** actor（infra/クラウド hands・Slack 操縦席・membrane・capability graduation）。**設計段階・コードなし**。
+- **agent**：汎用・**Docker ベース高自由度** actor（infra/クラウド hands・Slack 操縦席・membrane・capability graduation）。**v0.1〜v0.5 スケルトン実装済み**（Python core + tests・69 tests green・mypy strict）。infra/cloud/transport の縁は protocol seam で SDK glue は deployment 用に stub。
 - **engineer**：**独立した**特化エージェント（issue→reviewed PR：doctor/setup/run/review）。`kagura-ai/kagura-engineer`（旧 kagura-agent repo を rename）。**shipping 済み（CLI+tests）**。
 - engineer は agent のフレームワーク上で動かない。agent も engineer に block されない。**別リポ・別コードベースで正**。
 - **(b) platform 化は今やらない**：未完成の抽象に working code を載せ替え＝抽象化税の先払い（Codex 判断と同じ罠）。**2個目の特化 actor が出て seam が見えてから**再検討。

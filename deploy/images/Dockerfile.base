@@ -1,0 +1,19 @@
+# L1 base image — essentials + gh, ZERO credentials baked in.
+#
+# Distributed as a recipe (this Dockerfile), not a prebuilt image, to avoid the
+# redistribution terms of bundled tooling (CLO L-H1). Pin the digest below for
+# reproducibility; the launcher injects creds/mounts/egress per run.
+FROM debian:bookworm-slim@sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+# Tools are *baked*; credentials and first-party code are *injected* at run time.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl git gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root by construction (the launcher also enforces --user at run time).
+RUN useradd --create-home --uid 1000 agent
+USER agent
+WORKDIR /work
+
+# No ENTRYPOINT secrets, no ambient env. The membrane controls what crosses in.
