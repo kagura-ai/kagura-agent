@@ -163,12 +163,21 @@ memory-cloud and resumed cleanly in a fresh session:
 
 ```
 session 1 (interrupted):
-  remember(type="task-checkpoint", details={step: 4, pending: ["test", "deploy"]})
+  remember(type="task-checkpoint", details={
+    step: 4, pending: ["test", "deploy"],
+    granted_budget: {scope: ..., expires_at: ..., renewals_left: 2}  # NOT the live credential
+  })
 
 session 2 (resumed):
   recall("task-checkpoint", filters={task_id: ...}, k=1)
   → "continuing from step 4 of N — pending: [test, deploy]"
+  → launcher re-acquire()s a fresh short-lived lease under the remaining budget
 ```
+
+The checkpoint stores the **granted budget, never the live credential** (which
+was `release()`d at checkpoint) — see the launcher's `CredentialBroker` / `Lease`
+under "Security membrane". This is what lets a task be both long-running and
+credential-short-lived at the same time.
 
 ### 3. Failure-mode learning
 
@@ -225,6 +234,15 @@ Tightly scoped to validate the "memory + actor" thesis before broadening:
 The "surprisingly dangerous" note on `sudo apt install` reflects a real
 concern: package installation has the widest blast radius of any common
 ops action. It gets gated behind explicit Phase 2 review.
+
+> **Read this table as the _initial_ state of the graduation curve, not a fixed
+> wall.** The In/Out split is where each capability *starts*; the **Security
+> membrane** below governs how the "Out" / Phase-2 entries move (via HITL-gated
+> capability graduation, per-category, fail-closed). Inside the container the
+> agent already has full freedom — so an "Out" entry like DNS-write or
+> `apt install` means "not granted to a run by default yet," not "the binary is
+> absent." The membrane, not this table, is the source of truth for what a given
+> run is actually allowed to reach.
 
 ---
 
@@ -552,8 +570,11 @@ Two concerns live in dedicated docs to keep this file focused on design:
 
 To prevent scope creep, several adjacent things are explicitly out of scope:
 
-- **NOT a chat interface for memory-cloud.** That's covered by the existing
-  MCP server in memory-cloud + any MCP-capable client (Claude Desktop etc.).
+- **NOT a chat front-end for memory-cloud.** Querying memory-cloud as a chat is
+  covered by its existing MCP server + any MCP-capable client (Claude Desktop
+  etc.). The agent's Slack/Discord surface is a **cockpit for driving the agent**
+  (launch / steer / approve / kill tasks — see "Control surface internals"), not
+  a window onto memory-cloud. Different job, separate bot id (`@kagura-agent`).
 - **NOT a fine-tuned model.** It runs base Claude, not a customer-specific LLM.
   Custom-model concerns belong to `kagura-memory-dataset-worker` Layer 2.
 - **NOT an ingestion source.** Slack / Teams chat ingestion belongs to
