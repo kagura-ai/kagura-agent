@@ -47,7 +47,10 @@ class SessionRegistry:
         return self._records.get(thread_id)
 
     def sessions(self) -> Set[str]:
-        return frozenset(self._records)
+        # Only *running* sessions are resumable. A closed (/kill) or dead
+        # (reconcile) record must not route a follow-up reply to CONTINUE —
+        # otherwise the next message replays a stale checkpoint.
+        return frozenset(tid for tid, rec in self._records.items() if rec.status == "running")
 
     def close(self, thread_id: str) -> None:
         rec = self._records.get(thread_id)

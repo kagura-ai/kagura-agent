@@ -8,6 +8,7 @@ same evidence the graduation curve later reads.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from kagura_agent.cockpit.transports.base import Transport
@@ -35,17 +36,28 @@ class HitlGate:
         self._memory = memory
 
     async def review(self, request: CapabilityRequest) -> Decision:
+        failure: str | None = None
         try:
             answer = await self._transport.ask(
                 request.thread_id,
                 f"grant {request.capability}? ({request.reason})",
                 options=[_APPROVE, _DENY],
             )
-        except TimeoutError:
-            answer = _DENY  # timeout = deny
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise  # never swallow cancellation
+        except Exception as exc:
+            # Fail-closed for ANY transport failure (timeout, NotImplementedError
+            # from an unwired transport, API/network errors) — not just timeout.
+            answer = _DENY
+            failure = type(exc).__name__
 
         approved = answer.strip().lower() == _APPROVE
-        verb = "approved" if approved else "denied"
+        if approved:
+            verb = "approved"
+        elif failure:
+            verb = f"denied (transport_error: {failure})"
+        else:
+            verb = "denied"
         await self._memory.remember(
             f"HITL {verb} {request.capability}: {request.reason}",
             tags=("hitl", "graduation-trail"),

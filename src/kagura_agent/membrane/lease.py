@@ -14,9 +14,12 @@ The broker absorbs two provider shapes behind one interface:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Protocol
+
+log = logging.getLogger(__name__)
 
 
 class BudgetExhausted(RuntimeError):
@@ -120,6 +123,10 @@ class CredentialBroker:
             expires_at=self._clock() + ttl,
             handle=handle,
         )
+        # Symmetric with release(): a stateful old token must be revoked, or it
+        # leaks (still valid at the provider, no longer tracked for sweeping).
+        if lease.stateful and lease.handle is not None:
+            await p.revoke(lease.handle)
         self._ledger.forget(lease)
         self._ledger.record(renewed)
         return renewed
@@ -130,6 +137,15 @@ class CredentialBroker:
         self._ledger.forget(lease)
 
     async def sweep(self) -> None:
-        """Revoke every still-open stateful lease (orphan cleanup on restart)."""
+        """Revoke every still-open stateful lease (orphan cleanup on restart).
+
+        Resilient per lease: a single failing revoke (e.g. a handle revoked
+        out-of-band -> 404) must not abort the sweep or wedge the ledger on the
+        same poison handle. Log, forget, and continue.
+        """
         for lease in self._ledger.open_leases():
-            await self.release(lease)
+            try:
+                await self.release(lease)
+            except Exception:
+                log.exception("sweep failed to revoke lease %s:%s", lease.provider, lease.handle)
+                self._ledger.forget(lease)  # unwedge: do not re-hit this handle

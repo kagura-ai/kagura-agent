@@ -31,8 +31,9 @@ class GraduationPolicy:
 class _Stats:
     successes: int = 0
     distinct_tasks: set[str] = field(default_factory=set)
-    failures: int = 0
+    failures: int = 0  # lifetime counter (telemetry / trust score)
     last_proposed_at: float | None = None
+    demoted_until: float | None = None  # gate: blocked until this time
 
     def reset(self) -> None:
         self.successes = 0
@@ -56,10 +57,13 @@ class GraduationEngine:
         stats.distinct_tasks.add(task_id)
 
     def record_failure(self, category: str) -> None:
-        # fail-closed, per-category: wipe progress and increment the failure mark
+        # fail-closed, per-category: wipe progress AND demote for a cooldown window.
+        # Demotion is recoverable (README: "resets the counter") — after the window
+        # elapses, re-accruing verified successes re-qualifies the category.
         stats = self._stats(category)
         stats.failures += 1
         stats.reset()
+        stats.demoted_until = self._clock() + self._policy.cooldown_seconds
 
     def mark_proposed(self, category: str) -> None:
         self._stats(category).last_proposed_at = self._clock()
@@ -68,8 +72,8 @@ class GraduationEngine:
         if input_trust != "trusted":
             return False  # input-trust gate (CSO C1)
         stats = self._stats(category)
-        if stats.failures > 0:
-            return False  # fail-closed
+        if stats.demoted_until is not None and self._clock() < stats.demoted_until:
+            return False  # fail-closed: within the post-failure demotion window
         if stats.successes < self._policy.min_successes:
             return False
         if len(stats.distinct_tasks) < self._policy.min_distinct_tasks:

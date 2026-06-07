@@ -41,20 +41,26 @@ _DANGEROUS_SOURCES = ("docker.sock",)
 
 
 def _is_within(child: str, parent: str) -> bool:
-    child_p = PurePosixPath(os.path.normpath(child))
-    parent_p = PurePosixPath(os.path.normpath(parent))
+    child_p = PurePosixPath(os.path.realpath(child))
+    parent_p = PurePosixPath(os.path.realpath(parent))
     return child_p == parent_p or parent_p in child_p.parents
 
 
 def validate_spec(spec: LaunchSpec, *, project_root: str) -> None:
+    # Resolve symlinks before every check: `_is_within` and the docker.sock guard
+    # must judge where the kernel will actually bind-mount, not the lexical string.
+    # A symlink inside the project root pointing at /etc or docker.sock would
+    # otherwise pass a purely textual check and Docker would follow it at run time.
     for mount in spec.mounts:
-        if any(token in mount.source for token in _DANGEROUS_SOURCES):
+        resolved = os.path.realpath(mount.source)
+        if any(token in resolved for token in _DANGEROUS_SOURCES):
             raise MembraneViolation(
-                f"refusing to mount {mount.source!r}: docker.sock = host root"
+                f"refusing to mount {mount.source!r} (-> {resolved!r}): docker.sock = host root"
             )
         if not _is_within(mount.source, project_root):
             raise MembraneViolation(
-                f"refusing to mount {mount.source!r}: outside project root {project_root!r}"
+                f"refusing to mount {mount.source!r} (-> {resolved!r}): "
+                f"outside project root {project_root!r}"
             )
 
 
@@ -77,7 +83,10 @@ def docker_run_args(spec: LaunchSpec) -> list[str]:
     args += list(_HARDENING)
     for mount in spec.mounts:
         ro = ":ro" if mount.read_only else ""
-        args += ["-v", f"{mount.source}:{mount.target}{ro}"]
+        # Mount the resolved path, so a symlink swapped in after validate_spec
+        # cannot redirect the bind mount (TOCTOU).
+        source = os.path.realpath(mount.source)
+        args += ["-v", f"{source}:{mount.target}{ro}"]
     for key, value in spec.env.items():
         args += ["-e", f"{key}={value}"]
     args.append(spec.image)

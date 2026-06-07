@@ -36,10 +36,12 @@ class DiscordTransport:  # pragma: no cover - requires discord.py + a bot token
 
     async def listen(self) -> AsyncIterator[Event]:
         raise NotImplementedError("wired via discord.py's on_message in deployment")
+        yield  # unreachable — makes this an async generator, not a coroutine
 
     async def send(self, thread_id: str, text: str) -> None:
-        channel = await self._client.fetch_channel(int(thread_id))
-        await channel.send(text)
+        # `thread_id` is a channel/thread id here, so fetch_channel would work —
+        # but keep parity with listen/ask as an explicit deployment-wired stub.
+        raise NotImplementedError("wired via discord.py in deployment")
 
     async def ask(self, thread_id: str, question: str, options: list[str]) -> str:
         raise NotImplementedError("wired via discord.py view/button callbacks in deployment")

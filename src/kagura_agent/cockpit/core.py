@@ -8,6 +8,8 @@ bot token and (later) speak to Docker. Agent work happens behind the brain.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from typing import Protocol
 
 from kagura_agent.cockpit.intent import Intent, classify
@@ -16,6 +18,8 @@ from kagura_agent.cockpit.transports.base import Event, Transport
 from kagura_agent.core.brain.base import BrainProvider, Task
 from kagura_agent.core.session import Session
 from kagura_agent.patterns.checkpoint import CheckpointStore
+
+log = logging.getLogger(__name__)
 
 
 class _Killer(Protocol):
@@ -38,8 +42,16 @@ class Cockpit:
         self._launcher = launcher
 
     async def serve(self) -> None:
+        # Per-event isolation: the cockpit is the sole message consumer and the
+        # sole HITL surface, so one bad event must never silently kill the loop
+        # (which would strand every pending approval and drop all later messages).
         async for event in self._transport.listen():
-            await self.handle(event)
+            try:
+                await self.handle(event)
+            except Exception:
+                log.exception("cockpit failed to handle event on thread %s", event.thread_id)
+                with contextlib.suppress(Exception):
+                    await self._transport.send(event.thread_id, "internal error — see logs")
 
     async def handle(self, event: Event) -> None:
         intent = classify(event, known_sessions=self._registry.sessions())
@@ -48,6 +60,8 @@ class Cockpit:
             await self._handle_status(event)
         elif intent is Intent.KILL:
             await self._handle_kill(event)
+        elif intent is Intent.APPROVE:
+            await self._handle_approve(event)
         else:  # LAUNCH or CONTINUE — drive the brain
             await self._handle_task(event, intent)
 
@@ -64,6 +78,13 @@ class Cockpit:
         rec = self._registry.get(event.thread_id)
         status = rec.status if rec is not None else "unknown"
         await self._transport.send(event.thread_id, f"session {event.thread_id}: {status}")
+
+    async def _handle_approve(self, event: Event) -> None:
+        # A typed /approve resolves a *pending* HITL request; the gate-resolution
+        # wiring lands when HitlGate is connected to the cockpit. Until then, never
+        # fall through to LAUNCH (which would spin a brain run on the literal
+        # "/approve" and clobber the session record).
+        await self._transport.send(event.thread_id, "no pending approval")
 
     async def _handle_kill(self, event: Event) -> None:
         rec = self._registry.get(event.thread_id)
