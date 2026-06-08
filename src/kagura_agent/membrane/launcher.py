@@ -17,6 +17,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
+from kagura_agent.membrane.egress import EGRESS_NETWORK
+
 
 class MembraneViolation(RuntimeError):
     """A launch spec would breach the membrane; refuse to run it."""
@@ -65,6 +67,8 @@ def validate_spec(spec: LaunchSpec, *, project_root: str) -> None:
 
 
 # Hardening, baked in so no caller can forget it (README "Container hardening").
+# Network mode is intentionally NOT here: it is egress-dependent and added
+# per-spec in `docker_run_args` (sealed by default, proxy network when allowed).
 _HARDENING = [
     "--user", "1000:1000",          # non-root
     "--cap-drop", "ALL",
@@ -74,13 +78,22 @@ _HARDENING = [
     "--pids-limit", "512",
     "--memory", "2g",
     "--cpus", "2",
-    "--network", "none",            # egress only via the proxy sidecar, never host net
 ]
+
+
+def _network_args(spec: LaunchSpec) -> list[str]:
+    # Sealed by default. Only a non-empty egress allowlist attaches the container
+    # to the proxy network; the proxy (EgressPolicy.from_spec) then enforces the
+    # allowlist. Never host networking — that would bypass the proxy entirely.
+    if spec.egress_allow:
+        return ["--network", EGRESS_NETWORK]
+    return ["--network", "none"]
 
 
 def docker_run_args(spec: LaunchSpec) -> list[str]:
     args = ["docker", "run", "--rm"]
     args += list(_HARDENING)
+    args += _network_args(spec)
     for mount in spec.mounts:
         ro = ":ro" if mount.read_only else ""
         # Mount the resolved path, so a symlink swapped in after validate_spec

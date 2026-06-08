@@ -10,7 +10,7 @@ The membrane guards *reach*, not in-container freedom. Hard invariants:
 
 import pytest
 
-from kagura_agent.membrane.egress import EgressDecision, EgressPolicy
+from kagura_agent.membrane.egress import EGRESS_NETWORK, EgressDecision, EgressPolicy
 from kagura_agent.membrane.launcher import (
     LaunchSpec,
     MembraneViolation,
@@ -86,3 +86,30 @@ def test_egress_logs_every_decision() -> None:
         ("api.anthropic.com", EgressDecision.ALLOW),
         ("evil.example.com", EgressDecision.DENY),
     ]
+
+
+# --- egress wiring: the 4-tuple's `egress` element must be load-bearing -------
+# Without an allowlist the network is fully sealed (`--network none`). With one,
+# the container joins the egress proxy network so the sidecar brokers it against
+# the allowlist; it must NOT fall back to `none` (that would silently drop the
+# requested egress) nor to host networking (that would bypass the proxy).
+
+def test_no_egress_seals_the_network() -> None:
+    spec = LaunchSpec(image="kagura-agent:python", egress_allow=())
+    joined = " ".join(docker_run_args(spec))
+    assert "--network none" in joined
+
+
+def test_egress_allowlist_joins_proxy_network_not_none() -> None:
+    spec = LaunchSpec(image="kagura-agent:python", egress_allow=("api.anthropic.com",))
+    joined = " ".join(docker_run_args(spec))
+    assert f"--network {EGRESS_NETWORK}" in joined
+    assert "--network none" not in joined
+    assert "--network host" not in joined
+
+
+def test_egress_policy_derived_from_spec_matches_allowlist() -> None:
+    spec = LaunchSpec(image="x", egress_allow=("api.anthropic.com",))
+    policy = EgressPolicy.from_spec(spec)
+    assert policy.decide("api.anthropic.com") is EgressDecision.ALLOW
+    assert policy.decide("evil.example.com") is EgressDecision.DENY
