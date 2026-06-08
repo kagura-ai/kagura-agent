@@ -26,8 +26,10 @@ class Launcher:
         self._project_root = project_root
 
     async def launch(self, spec: LaunchSpec) -> str:
-        validate_spec(spec, project_root=self._project_root)  # fail-closed
-        return await self._runtime.run(docker_run_args(spec))
+        # validate_spec resolves the mounts once (fail-closed) and returns the
+        # spec with canonical paths; run mounts exactly what was validated.
+        resolved = validate_spec(spec, project_root=self._project_root)
+        return await self._runtime.run(docker_run_args(resolved))
 
     async def reconcile(self) -> list[str]:
         """Container ids currently alive (cockpit restart reconciliation)."""

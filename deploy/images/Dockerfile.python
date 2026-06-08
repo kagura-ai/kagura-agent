@@ -13,3 +13,10 @@ USER agent
 # uv for fast, lockfile-pinned installs inside the container.
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/home/agent/.local/bin:${PATH}"
+
+# Kagura Memory CLI — the agent's standard memory entry point (recall / remember
+# / ingest). Baked as a tool only; NO credentials are baked. At run time the
+# membrane injects a short-lived, read-scoped access token (the host holds the
+# `kagura auth login` refresh token; the container never sees it). Widening to
+# memory:write requires a device-flow re-approval, so write fails closed here.
+RUN uv tool install kagura-memory

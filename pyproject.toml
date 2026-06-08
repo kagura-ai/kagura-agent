@@ -15,7 +15,7 @@ claude = ["claude-agent-sdk>=0.1.0"]
 # Cockpit transports — pure additions on top of the Transport protocol.
 slack = ["slack-bolt>=1.18"]
 discord = ["discord.py>=2.3"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "anyio>=4", "ruff>=0.4", "mypy>=1.9"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-cov>=5", "anyio>=4", "ruff>=0.4", "mypy>=1.9"]
 
 [project.scripts]
 kagura-agent = "kagura_agent.cli.main:main"
@@ -43,3 +43,27 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.11"
 strict = true
 packages = ["kagura_agent"]
+
+[tool.coverage.run]
+source = ["src/kagura_agent"]
+branch = true
+omit = [
+    # The real Claude Agent SDK adapter — never imported in unit tests by design
+    # (needs the SDK + a subscription); exercised only by the live smoke path.
+    "src/kagura_agent/core/brain/sdk_engine.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+# Floor with margin below the current ~98%: a meaningful gate that won't flake on
+# small fluctuations, and catches a new untested module landing.
+fail_under = 95
+# Deployment-wired edges (real docker/SDK/network) and type-only / protocol
+# bodies are not unit-coverable; exclude them so the % reflects testable code.
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+    "@(abc\\.)?abstractmethod",
+]
