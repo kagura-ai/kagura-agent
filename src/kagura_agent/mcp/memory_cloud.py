@@ -82,9 +82,44 @@ class LocalMemoryClient:
         return list(self._edges.get(src_id, []))
 
 
-def mcp_available() -> bool:  # pragma: no cover - environment probe
-    """Whether the memory-cloud MCP server is reachable (startup gate input)."""
+class MemoryUnreachableError(RuntimeError):
+    """Memory-cloud cannot be reached/authenticated; refuse to start."""
 
-    import os
 
-    return bool(os.environ.get("KAGURA_MEMORY_MCP_URL"))
+def ensure_memory_reachable(*, reachable: bool) -> None:
+    """The redefined startup gate (v0.2-A6): memory must be reachable.
+
+    The old gate was "the brain requires MCP" — coupling memory to the brain.
+    Memory is now CLI-primary and brain-independent, so the gate asserts only
+    that memory is reachable + authenticated (via the CLI). It is fail-closed:
+    if memory cannot be reached, we refuse to start rather than silently run a
+    memory-less agent. The reachability *decision* is injected (so the gate is
+    unit-tested); the live probe is `memory_reachable()`.
+    """
+    if not reachable:
+        raise MemoryUnreachableError(
+            "memory-cloud is not reachable/authenticated via the kagura CLI; "
+            "refusing to start (no silent degrade). Run `kagura auth login` on the host."
+        )
+
+
+def memory_reachable() -> bool:  # pragma: no cover - shells out to the kagura CLI
+    """Whether memory is reachable: can the host mint a token via the CLI?
+
+    Asks the CLI for a short-lived access token (`kagura auth token`). Memory is
+    reachable only when the CLI exits zero AND actually prints a token — a zero
+    exit with empty stdout (e.g. a CLI that no-ops) is treated as unreachable, so
+    the gate stays fail-closed. This is the CLI-primary replacement for the old
+    `KAGURA_MEMORY_MCP_URL` env probe.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["kagura", "auth", "token"],
+            capture_output=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and bool(proc.stdout.strip())

@@ -16,7 +16,7 @@ from kagura_agent.patterns.checkpoint import InMemoryCheckpointStore
 class CountingBrain:
     """A brain whose loop increments a turn counter, honoring resume state."""
 
-    caps = BrainCaps(name="counting", requires_mcp=False)
+    caps = BrainCaps(name="counting")
 
     async def run(
         self, task: Task, *, resume: Checkpoint | None = None

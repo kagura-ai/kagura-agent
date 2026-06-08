@@ -6,7 +6,14 @@ would otherwise amplify into destructive writes. Trust-tier filtering keeps
 externally-ingested (untrusted) memories from steering behavior.
 """
 
-from kagura_agent.mcp.memory_cloud import LocalMemoryClient, MemoryClient
+import pytest
+
+from kagura_agent.mcp.memory_cloud import (
+    LocalMemoryClient,
+    MemoryClient,
+    MemoryUnreachableError,
+    ensure_memory_reachable,
+)
 
 
 async def test_remember_then_recall_roundtrip() -> None:
@@ -34,6 +41,19 @@ async def test_create_prevents_edge_links_memories() -> None:
     b = await mc.remember("apt install foo corrupted the container")
     await mc.create_edge(b, a, type="prevents")
     assert mc.edges_of(b) == [(a, "prevents")]
+
+
+# --- memory reachability gate (v0.2-A6) -----------------------------------
+# The startup gate is no longer "the brain requires MCP". It is "memory is
+# reachable + authenticated via the CLI" — brain-independent, fail-closed.
+
+def test_memory_gate_rejects_when_unreachable() -> None:
+    with pytest.raises(MemoryUnreachableError):
+        ensure_memory_reachable(reachable=False)
+
+
+def test_memory_gate_allows_when_reachable() -> None:
+    ensure_memory_reachable(reachable=True)  # must not raise
 
 
 def test_runtime_client_exposes_no_admin_methods() -> None:

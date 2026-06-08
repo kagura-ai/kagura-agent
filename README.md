@@ -31,7 +31,8 @@ the combination of **memory + actor**:
 | **Differentiation** | Anyone with Claude Desktop + memory MCP plugin matches it | Cost-aware planning + failure-mode learning + sub-agent dispatch with memory handoff |
 
 The agent is an **actor** in the topology — it lives entirely outside `memory-cloud`,
-which it treats as one of its MCP servers (the most important one). It can be run
+which it reaches CLI-first as its persistent backbone (the membrane leases a
+short-lived, read-scoped token in; the host keeps the refresh token). It can be run
 as a CLI, a daemon, or as a managed SaaS lane.
 
 ---
@@ -168,10 +169,15 @@ What crosses the seam vs what stays hidden behind an implementation:
 | checkpoint & session-state shape | how auth is inherited (subscription vs key) |
 | budget signal | model id, context-window quirks |
 
-**Hard constraint — MCP is non-negotiable.** memory-cloud is the backbone, and
-it is an MCP server. A brain that cannot drive MCP **cannot be a kagura brain**.
-So `capabilities().mcp` is a _startup gate_, not a feature flag: a provider that
-fails it is rejected, never degraded.
+**Hard constraint — memory must be reachable.** memory-cloud is the backbone,
+reached **CLI-first** (`kagura auth login` on the host; the membrane leases a
+short-lived, read-scoped access token into the container — the refresh token
+never crosses). The _startup gate_ is therefore "memory is reachable +
+authenticated via the CLI", **not** "the brain speaks MCP": a run where memory
+is unreachable is rejected, never degraded. This gate is brain-independent
+(`mcp/memory_cloud.py`), so memory does not couple to any one brain. MCP itself
+is orthogonal and optional — Claude Code's `--mcp-config` carries *other* MCP
+servers; memory does not depend on it.
 
 **Auth is per-provider.** Claude inherits the subscription via the CLI
 subprocess; a future Codex/OpenAI brain may only have API-key / BYOK. `auth.py`
@@ -719,7 +725,7 @@ with `pytest`; type-check with `mypy` (strict).
 
 | Milestone | What landed | Key modules | Tests |
 |---|---|---|---|
-| **v0.1** walking skeleton | brain seam, `ClaudeBrain`, MCP startup gate, per-provider auth, CLI transport, structural intent router, session + checkpoint, cockpit wiring | `core/brain/`, `core/session.py`, `cockpit/`, `patterns/checkpoint.py`, `mcp/memory_cloud.py` | `test_session`, `test_brain`, `test_transport`, `test_cockpit_v01`, `test_seam`, `test_memory`, `test_cli` |
+| **v0.1** walking skeleton | brain seam, `ClaudeBrain`, memory-reachability startup gate (CLI-primary, brain-independent as of v0.2-A6), per-provider auth, CLI transport, structural intent router, session + checkpoint, cockpit wiring | `core/brain/`, `core/session.py`, `cockpit/`, `patterns/checkpoint.py`, `mcp/memory_cloud.py` | `test_session`, `test_brain`, `test_transport`, `test_cockpit_v01`, `test_seam`, `test_memory`, `test_cli` |
 | **v0.2** membrane | mount guards (no docker.sock / host FS), baked hardening flags, default-deny egress, `CredentialBroker`/`Lease` (stateless + stateful), lease ledger + sweeper, launcher↔runtime | `membrane/launcher.py`, `membrane/egress.py`, `membrane/lease.py`, `membrane/runtime.py` | `test_membrane`, `test_lease`, `test_launcher` |
 | **v0.3** cockpit + HITL | HITL approval (fail-closed + graduation trail), session registry + restart reconcile, status/kill intents | `cockpit/hitl.py`, `cockpit/registry.py`, `cockpit/core.py`, `cockpit/intent.py` | `test_cockpit_v03`, `test_cockpit_control` |
 | **v0.4** graduation | per-category curve (verified successes, fail-closed, cooldown), input-trust gate, prevents-edge failure learning | `membrane/graduation.py`, `patterns/failure_learning.py` | `test_graduation`, `test_failure_learning` |

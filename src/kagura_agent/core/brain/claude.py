@@ -42,7 +42,6 @@ class ClaudeEngine(Protocol):
 class ClaudeBrain:
     caps = BrainCaps(
         name="claude",
-        requires_mcp=True,
         auth_modes=("subscription", "byok"),
     )
 
@@ -61,9 +60,19 @@ class ClaudeBrain:
             # unknown kinds are ignored — forward-compatible with new SDK turns
 
 
-def make_default_brain() -> ClaudeBrain:  # pragma: no cover - requires the SDK
-    """Construct ClaudeBrain over the real SDK engine (lazy import)."""
+def make_default_brain(  # pragma: no cover - requires the SDK
+    *,
+    mcp_servers: dict[str, Any] | None = None,
+    strict_mcp_config: bool = False,
+) -> ClaudeBrain:
+    """Construct ClaudeBrain over the real SDK engine (lazy import).
+
+    `mcp_servers` (from `--mcp-config`) is threaded into the SDK engine for
+    non-memory MCP servers; memory itself is reached via the CLI, not here.
+    """
 
     from kagura_agent.core.brain.sdk_engine import SdkEngine
 
-    return ClaudeBrain(engine=SdkEngine())
+    return ClaudeBrain(
+        engine=SdkEngine(mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
+    )
