@@ -12,12 +12,46 @@ from typing import Any
 from kagura_agent.core.brain.claude import RawTurn
 
 
+def _mcp_option_kwargs(
+    mcp_servers: dict[str, Any] | None, strict_mcp_config: bool
+) -> dict[str, Any]:
+    """Build the MCP-related kwargs for ClaudeAgentOptions (v0.2-A6).
+
+    Module-level and SDK-free (outside the no-cover SdkEngine) so the branch
+    logic is unit-tested without the SDK. Two independent rules:
+    - pass `mcp_servers` only when configured, so the default path is byte-for-byte
+      the pre-A6 options (memory needs no MCP server here);
+    - pass `strict_mcp_config` whenever requested — including WITHOUT --mcp-config,
+      a valid intent ("reject all ambient MCP servers") that must not be lost.
+    """
+    extra: dict[str, Any] = {}
+    if mcp_servers is not None:
+        extra["mcp_servers"] = mcp_servers
+    if strict_mcp_config:
+        extra["strict_mcp_config"] = True
+    return extra
+
+
 class SdkEngine:  # pragma: no cover - requires claude-agent-sdk + subscription
     """Adapter: translate Claude Agent SDK messages into `RawTurn`s.
 
     The SDK owns the agentic loop (tool calls, MCP, sub-agents); we only relay
     its messages. Resume state is threaded through the SDK's session id.
+
+    `mcp_servers` is orthogonal to memory (v0.2-A6): memory is CLI-primary, so
+    this carries *other* MCP servers through to the SDK's `mcp_servers` option
+    (the `--mcp-config` knob). `strict_mcp_config` maps to the SDK's strict flag
+    so unknown servers are rejected rather than silently ignored.
     """
+
+    def __init__(
+        self,
+        *,
+        mcp_servers: dict[str, Any] | None = None,
+        strict_mcp_config: bool = False,
+    ) -> None:
+        self._mcp_servers = mcp_servers
+        self._strict_mcp_config = strict_mcp_config
 
     async def query(
         self, prompt: str, *, resume_state: dict[str, Any] | None
@@ -27,6 +61,7 @@ class SdkEngine:  # pragma: no cover - requires claude-agent-sdk + subscription
         options = ClaudeAgentOptions(
             resume=(resume_state or {}).get("sdk_session_id"),
             permission_mode="default",
+            **_mcp_option_kwargs(self._mcp_servers, self._strict_mcp_config),
         )
 
         last_text = ""

@@ -36,7 +36,7 @@ class _Clock:
 
 
 class RecordingBrain:
-    caps = BrainCaps(name="rec", requires_mcp=False)
+    caps = BrainCaps(name="rec")
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
@@ -84,7 +84,7 @@ def test_failure_then_cooldown_then_resuccess_requalifies() -> None:
 # --- merged_006: closed session must not route as CONTINUE ----------------
 
 class LaunchOnlyBrain:
-    caps = BrainCaps(name="launchonly", requires_mcp=False)
+    caps = BrainCaps(name="launchonly")
 
     async def run(
         self, task: Task, *, resume: Checkpoint | None = None
@@ -152,7 +152,7 @@ async def test_hitl_transport_error_fails_closed_and_records() -> None:
 # --- bug_029: one bad event must not kill the cockpit loop ----------------
 
 class FlakyBrain:
-    caps = BrainCaps(name="flaky", requires_mcp=False)
+    caps = BrainCaps(name="flaky")
 
     async def run(
         self, task: Task, *, resume: Checkpoint | None = None

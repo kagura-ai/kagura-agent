@@ -1,11 +1,13 @@
-"""v0.1: the startup gate, per-provider auth, and ClaudeBrain translation.
+"""v0.1: per-provider auth and ClaudeBrain translation.
 
 Key invariants under test:
-- MCP is a *startup gate*: an MCP-requiring brain is rejected when MCP is
-  unavailable (we never silently degrade).
 - subscription auth injects **no secret** into the container.
 - ClaudeBrain owns its loop; it translates a `ClaudeEngine`'s raw turns into
   `BrainEvent`s without `session.py` ever seeing the SDK.
+
+The memory startup gate is no longer a brain concern (v0.2-A6): memory is
+brain-independent, so its reachability gate lives in `mcp/memory_cloud.py` and
+is exercised by `test_memory.py`.
 """
 
 from collections.abc import AsyncIterator
@@ -14,32 +16,12 @@ import pytest
 
 from kagura_agent.core.brain.auth import AuthError, resolve_auth
 from kagura_agent.core.brain.base import (
-    BrainCaps,
     Checkpoint,
     DoneEvent,
     MessageEvent,
     Task,
 )
 from kagura_agent.core.brain.claude import ClaudeBrain, RawTurn
-from kagura_agent.core.brain.startup import BrainStartupError, ensure_startable
-
-# --- startup gate ---------------------------------------------------------
-
-def test_startup_gate_rejects_mcp_brain_when_mcp_unavailable() -> None:
-    caps = BrainCaps(name="claude", requires_mcp=True)
-    with pytest.raises(BrainStartupError):
-        ensure_startable(caps, mcp_available=False)
-
-
-def test_startup_gate_allows_mcp_brain_when_mcp_available() -> None:
-    caps = BrainCaps(name="claude", requires_mcp=True)
-    ensure_startable(caps, mcp_available=True)  # must not raise
-
-
-def test_startup_gate_allows_non_mcp_brain_without_mcp() -> None:
-    caps = BrainCaps(name="fake", requires_mcp=False)
-    ensure_startable(caps, mcp_available=False)  # must not raise
-
 
 # --- per-provider auth ----------------------------------------------------
 
@@ -85,10 +67,10 @@ class FakeEngine:
         yield RawTurn(kind="result", text="all done", state={"turn": 1})
 
 
-def test_claude_brain_declares_mcp_and_subscription() -> None:
+def test_claude_brain_declares_subscription_auth() -> None:
     brain = ClaudeBrain(engine=FakeEngine())
-    assert brain.caps.requires_mcp is True
     assert "subscription" in brain.caps.auth_modes
+    assert not hasattr(brain.caps, "requires_mcp")  # memory decoupled from brain
 
 
 async def test_claude_brain_translates_engine_turns_to_events() -> None:

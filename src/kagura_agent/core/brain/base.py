@@ -19,12 +19,13 @@ from typing import Any, Protocol, runtime_checkable
 class BrainCaps:
     """What a brain declares about itself at startup.
 
-    `requires_mcp` is load-bearing: memory-cloud is an MCP server, so a brain
-    that cannot speak MCP is *rejected at startup* (we do not silently degrade).
+    Memory reachability is **not** declared here (v0.2-A6): memory access moved
+    to a CLI-primary, brain-independent path (`mcp/memory_cloud.py`), so a brain
+    no longer gates on MCP. The seam stays minimal — caps describe the brain, not
+    the memory backbone.
     """
 
     name: str
-    requires_mcp: bool = True
     auth_modes: tuple[str, ...] = ("subscription",)
 
 

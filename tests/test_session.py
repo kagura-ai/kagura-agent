@@ -22,7 +22,7 @@ from kagura_agent.patterns.checkpoint import InMemoryCheckpointStore
 class FakeBrain:
     """A brain that owns a trivial loop: one message, then done."""
 
-    caps = BrainCaps(name="fake", requires_mcp=False)
+    caps = BrainCaps(name="fake")
 
     def __init__(self) -> None:
         self.resumed_from: Checkpoint | None = None
