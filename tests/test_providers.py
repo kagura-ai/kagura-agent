@@ -217,3 +217,4 @@ async def test_stateless_providers_return_no_handle(provider: object) -> None:
     _, handle = await provider.mint("scope", 600)  # type: ignore[attr-defined]
     assert handle is None
     assert provider.stateful is False  # type: ignore[attr-defined]
+    await provider.revoke(None)  # type: ignore[attr-defined]  # no-op, must not raise

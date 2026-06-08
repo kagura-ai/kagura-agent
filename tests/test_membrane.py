@@ -47,6 +47,43 @@ def test_project_root_mount_is_allowed() -> None:
     validate_spec(spec, project_root="/work/project")  # must not raise
 
 
+def test_validate_spec_fails_closed_on_unexpected_resolve_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A guard must convert ANY error while resolving a mount path into a
+    # MembraneViolation (fail-closed) — never leak a raw OSError the caller might
+    # misread as a transient/system error and retry into a launch.
+    def boom(_path: str) -> str:
+        raise OSError("kernel says no")
+
+    monkeypatch.setattr("os.path.realpath", boom)
+    spec = LaunchSpec(image="x", mounts=(Mount(source="/work/project/src", target="/w"),))
+    with pytest.raises(MembraneViolation):
+        validate_spec(spec, project_root="/work/project")
+
+
+def test_docker_run_args_injects_leased_creds_as_env() -> None:
+    # Leased, time-boxed creds (e.g. the short-lived memory-cloud access token)
+    # reach the container only via -e env injection — never baked into the image.
+    spec = LaunchSpec(image="x", env={"KAGURA_TOKEN": "kmc-leased-1"})
+    args = docker_run_args(spec)
+    assert "-e" in args
+    assert "KAGURA_TOKEN=kmc-leased-1" in args
+
+
+def test_docker_run_args_mounts_source_verbatim(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # Resolution happens once in validate_spec; docker_run_args must NOT re-resolve
+    # (a second, independent resolution is exactly what a symlink swap between
+    # validate and run could redirect). It mounts the source it is handed.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    spec = LaunchSpec(image="x", mounts=(Mount(source=str(link), target="/w"),))
+
+    args = docker_run_args(spec)
+
+    assert f"{link}:/w:ro" in args  # verbatim, NOT resolved to `real`
+
+
 # --- hardening flags in the run args --------------------------------------
 
 def test_docker_run_args_bake_in_hardening() -> None:

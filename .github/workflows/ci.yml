@@ -1,0 +1,51 @@
+name: CI
+
+# Lint (ruff) + strict types (mypy) + the test suite with a coverage gate.
+# Modeled on kagura-memory-python-sdk's CI: a lint job and a py-matrix test job
+# that reports coverage (gated by `fail_under` in pyproject) and uploads to
+# Codecov. Until this landed, the suite did not run in CI at all.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dev deps
+        run: pip install -e ".[dev]"
+      - name: Lint (ruff)
+        run: ruff check src/ tests/
+      - name: Type check (mypy strict)
+        run: mypy
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dev deps
+        run: pip install -e ".[dev]"
+      - name: Test with coverage
+        # fail_under (pyproject [tool.coverage.report]) gates the percentage.
+        run: pytest --cov=src/kagura_agent --cov-report=xml --cov-report=term
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          fail_ci_if_error: false
