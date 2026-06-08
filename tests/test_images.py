@@ -26,6 +26,14 @@ def test_python_image_inherits_from_base() -> None:
     assert "FROM kagura-agent:base" in text
 
 
+def test_python_image_bakes_the_kagura_memory_cli() -> None:
+    # A6: the agent's memory entry point ships by default (recall/remember/ingest).
+    # The CLI is a baked tool; the membrane injects a short-lived, read-scoped
+    # access token at run time (the refresh token never enters the container).
+    text = (IMAGES / "Dockerfile.python").read_text()
+    assert "kagura-memory" in text
+
+
 def test_base_pins_the_upstream_by_digest() -> None:
     # Reproducibility: base must pin debian by @sha256 digest, not a floating tag.
     text = (IMAGES / "Dockerfile.base").read_text()

@@ -117,6 +117,38 @@ class GitHubAppProvider:
         return None
 
 
+class MemoryCloudProvider:
+    """memory-cloud scoped access token, leased from the host's auth-login session.
+
+    The trusted host runs ``kagura auth login`` once (OAuth2 device flow; the
+    refresh token is stored host-side at ~/.kagura/credentials.json). This
+    provider exchanges that session for a short-lived, **scoped** access token
+    (``kagura auth refresh --scope <scope>`` then ``kagura auth token``) that the
+    membrane leases into the agent container as env. The container only ever
+    holds the short-lived access token — never the refresh token.
+
+    Scope is read-only by default. Widening to ``memory:write`` triggers a device
+    flow (human re-approval) at the CLI, which fails closed in an unattended
+    container, so a hijacked agent cannot silently obtain write access to the
+    shared memory backbone (the dominant prompt-injection persistence risk).
+    """
+
+    stateful = False  # access tokens expire (auto-refreshed near expiry); none to revoke
+
+    READ_ONLY_SCOPE = "memory:read"
+
+    def __init__(self, *, exchange: Callable[[Json], Json]) -> None:
+        self._exchange = exchange
+
+    async def mint(self, scope: str, ttl: int) -> tuple[str, str | None]:
+        resp = self._exchange({"scope": scope, "ttl": ttl})
+        return str(resp["access_token"]), None
+
+    async def revoke(self, handle: str | None) -> None:
+        # Access tokens expire on their own; there is nothing to revoke.
+        return None
+
+
 class CloudflareTokenProvider:
     """Cloudflare API token: mint a scoped child token, revoke it by id on release.
 

@@ -19,6 +19,7 @@ from kagura_agent.membrane.providers import (
     CloudflareTokenProvider,
     GcpImpersonationProvider,
     GitHubAppProvider,
+    MemoryCloudProvider,
 )
 
 
@@ -158,6 +159,47 @@ async def test_cloudflare_orphan_swept_by_broker_on_restart() -> None:
     assert revoked == ["tok-1"]
 
 
+# --- memory-cloud (stateless, scoped, leased from the host auth-login session) --
+# The trusted host holds the `kagura auth login` refresh token; the provider
+# exchanges it for a short-lived, scoped access token (kagura auth refresh
+# --scope ... ; kagura auth token) that the membrane leases into the container.
+# The container only ever holds the access token — never the refresh token.
+
+async def test_memory_cloud_mints_scoped_short_lived_token() -> None:
+    seen: dict[str, object] = {}
+
+    def fake_exchange(req: dict[str, object]) -> dict[str, object]:
+        # The host's refresh session lives in this closure (host-side); only the
+        # access token is handed back for injection into the container.
+        seen.update(req)
+        return {"access_token": "kmc-access-1", "expires_in": req["ttl"]}
+
+    provider = MemoryCloudProvider(exchange=fake_exchange)
+    cred, handle = await provider.mint("memory:read", 300)
+
+    assert handle is None
+    assert provider.stateful is False
+    assert seen["scope"] == "memory:read"
+    assert seen["ttl"] == 300
+    assert cred == "kmc-access-1"
+
+
+async def test_memory_cloud_default_scope_is_read_only() -> None:
+    # Widening to memory:write triggers a device-flow re-approval (HITL) at the
+    # CLI, so the broker-driven path defaults to read-only and never silently
+    # grants write to the shared backbone.
+    assert MemoryCloudProvider.READ_ONLY_SCOPE == "memory:read"
+
+
+async def test_memory_cloud_drives_through_broker_as_leased_token() -> None:
+    provider = MemoryCloudProvider(exchange=lambda req: {"access_token": "kmc-1"})
+    broker = CredentialBroker({"memory": provider}, clock=_clock)
+    lease = await broker.acquire("memory", scope="memory:read", ttl=300, budget=Budget(3600))
+
+    assert lease.cred == "kmc-1"  # container gets only the short-lived leased token
+    assert lease.stateful is False
+
+
 @pytest.mark.parametrize(
     "provider",
     [
@@ -168,6 +210,7 @@ async def test_cloudflare_orphan_swept_by_broker_on_restart() -> None:
         ),
         GcpImpersonationProvider(generate_token=lambda req: {"accessToken": "t"}),
         GitHubAppProvider(create_token=lambda req: {"token": "t"}),
+        MemoryCloudProvider(exchange=lambda req: {"access_token": "t"}),
     ],
 )
 async def test_stateless_providers_return_no_handle(provider: object) -> None:
