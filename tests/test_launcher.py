@@ -39,6 +39,33 @@ async def test_launch_validates_then_runs() -> None:
     assert runtime.ran and runtime.ran[0][:2] == ["docker", "run"]
 
 
+async def test_launch_resolves_each_mount_once(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # validate -> run on the same resolved path: through the Launcher a symlink is
+    # resolved once, so the path validated is exactly the path mounted (no second
+    # resolution a swap could redirect = no validate->run TOCTOU).
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    runtime = FakeRuntime()
+    launcher = Launcher(runtime=runtime, project_root=str(tmp_path))
+    spec = LaunchSpec(image="x", mounts=(Mount(source=str(link), target="/w"),))
+
+    await launcher.launch(spec)
+
+    assert f"{real}:/w:ro" in runtime.ran[0]  # the validated, resolved path is mounted
+
+
+async def test_launcher_reconcile_and_kill_delegate_to_runtime() -> None:
+    runtime = FakeRuntime()
+    launcher = Launcher(runtime=runtime, project_root="/work/project")
+    await launcher.launch(LaunchSpec(image="x"))
+
+    assert await launcher.reconcile() == ["container-1"]  # cockpit restart reconciliation
+    await launcher.kill("container-1")
+    assert runtime.killed == ["container-1"]
+
+
 async def test_launch_rejects_bad_spec_without_touching_runtime() -> None:
     runtime = FakeRuntime()
     launcher = Launcher(runtime=runtime, project_root="/work/project")

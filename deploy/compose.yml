@@ -10,9 +10,11 @@
 
 services:
   egress-proxy:
-    # Default-deny + allowlist + log. Agent containers attach to this network
-    # only; they have no host network access (launcher sets --network none and
-    # routes through the proxy sidecar).
+    # Default-deny + allowlist + log. Agent containers have no host network
+    # access: the launcher sets --network none when no egress is granted, and
+    # attaches to this `agent-egress` network (whose only reachable peer is the
+    # proxy) when a run carries an egress allowlist. This network name MUST match
+    # membrane.egress.EGRESS_NETWORK.
     image: ghcr.io/kagura-ai/egress-proxy:pinned-by-digest
     networks: [agent-egress]
     environment:
