@@ -1,8 +1,15 @@
-"""v0.1: CLI argument parsing for `kagura-agent run "task"`."""
+"""v0.1: CLI argument parsing for `kagura-agent run "task"`.
+
+v0.2-A6 adds the orthogonal MCP knobs: `--mcp-config` (memory is CLI-primary;
+this flag is for *other* MCP servers, mirroring Claude Code's own flag) and
+`--strict-mcp-config`.
+"""
+
+import json
 
 import pytest
 
-from kagura_agent.cli.main import parse_args
+from kagura_agent.cli.main import load_mcp_config, parse_args
 
 
 def test_parse_run_with_task() -> None:
@@ -19,3 +26,53 @@ def test_parse_run_requires_task() -> None:
 def test_parse_no_command_exits() -> None:
     with pytest.raises(SystemExit):
         parse_args([])
+
+
+# --- v0.2-A6: --mcp-config / --strict-mcp-config --------------------------
+
+def test_parse_run_defaults_have_no_mcp_config() -> None:
+    ns = parse_args(["run", "t"])
+    assert ns.mcp_config is None
+    assert ns.strict_mcp_config is False
+
+
+def test_parse_run_accepts_mcp_config_path() -> None:
+    ns = parse_args(["run", "t", "--mcp-config", "/etc/mcp.json"])
+    assert ns.mcp_config == "/etc/mcp.json"
+    assert ns.strict_mcp_config is False
+
+
+def test_parse_run_accepts_strict_mcp_config() -> None:
+    ns = parse_args(["run", "t", "--mcp-config", "/etc/mcp.json", "--strict-mcp-config"])
+    assert ns.strict_mcp_config is True
+
+
+def test_load_mcp_config_none_returns_none() -> None:
+    assert load_mcp_config(None) is None
+
+
+def test_load_mcp_config_extracts_mcp_servers_wrapper(tmp_path) -> None:
+    # Claude Code convention: {"mcpServers": {...}}. The SDK wants the inner map.
+    p = tmp_path / "mcp.json"
+    p.write_text(json.dumps({"mcpServers": {"fs": {"command": "srv"}}}))
+    assert load_mcp_config(str(p)) == {"fs": {"command": "srv"}}
+
+
+def test_load_mcp_config_accepts_bare_server_map(tmp_path) -> None:
+    p = tmp_path / "mcp.json"
+    p.write_text(json.dumps({"fs": {"command": "srv"}}))
+    assert load_mcp_config(str(p)) == {"fs": {"command": "srv"}}
+
+
+def test_load_mcp_config_missing_file_raises(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        load_mcp_config(str(tmp_path / "nope.json"))
+
+
+def test_load_mcp_config_rejects_non_object_json(tmp_path) -> None:
+    # An operator typo like `{"mcpServers": null}` (or a bare array) must fail
+    # loud, not crash later with a cryptic TypeError on dict().
+    p = tmp_path / "mcp.json"
+    p.write_text(json.dumps({"mcpServers": None}))
+    with pytest.raises(ValueError, match="expected a JSON object"):
+        load_mcp_config(str(p))

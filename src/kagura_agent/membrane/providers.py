@@ -117,6 +117,10 @@ class GitHubAppProvider:
         return None
 
 
+class MemoryWriteLocked(RuntimeError):
+    """A read-locked MemoryCloudProvider was asked to mint a ``memory:write`` token."""
+
+
 class MemoryCloudProvider:
     """memory-cloud scoped access token, leased from the host's auth-login session.
 
@@ -131,22 +135,57 @@ class MemoryCloudProvider:
     flow (human re-approval) at the CLI, which fails closed in an unattended
     container, so a hijacked agent cannot silently obtain write access to the
     shared memory backbone (the dominant prompt-injection persistence risk).
+
+    The write-lock is **structural, not advisory**: ``mint`` refuses a
+    ``memory:write`` scope unless this provider was constructed
+    ``write_approved=True``. That closes the bypass where a caller hands
+    ``memory:write`` straight to ``CredentialBroker.acquire`` (which forwards any
+    scope string verbatim). The ``write_approved`` flag is where the device-flow
+    HITL approval lands — wired in v0.3 (#14) / v0.4 graduation (#15); v0.2 only
+    ever constructs it read-locked.
     """
 
     stateful = False  # access tokens expire (auto-refreshed near expiry); none to revoke
 
     READ_ONLY_SCOPE = "memory:read"
+    WRITE_SCOPE = "memory:write"
 
-    def __init__(self, *, exchange: Callable[[Json], Json]) -> None:
+    def __init__(
+        self, *, exchange: Callable[[Json], Json], write_approved: bool = False
+    ) -> None:
         self._exchange = exchange
+        self._write_approved = write_approved
 
     async def mint(self, scope: str, ttl: int) -> tuple[str, str | None]:
+        if scope == self.WRITE_SCOPE and not self._write_approved:
+            raise MemoryWriteLocked(
+                "memory:write is locked: this provider is read-only. Widening requires "
+                "device-flow re-approval (HITL), wired in #14 (v0.3) / #15 (v0.4). "
+                "A read-locked provider never mints a write token, even via broker.acquire."
+            )
         resp = self._exchange({"scope": scope, "ttl": ttl})
         return str(resp["access_token"]), None
 
     async def revoke(self, handle: str | None) -> None:
         # Access tokens expire on their own; there is nothing to revoke.
         return None
+
+
+def resolve_memory_scope(*, write_approved: bool = False) -> str:
+    """Resolve the memory scope to lease — write is locked by default (v0.2-A6).
+
+    The fail-closed seam for "write は既定ロック": absent an explicit approval the
+    scope is read-only, so a hijacked/unattended agent can never silently widen
+    to ``memory:write`` on the shared backbone. Granting write requires a device
+    flow re-approval (HITL); that approval path is wired in v0.3 (#14) and the
+    quarantine→trusted graduation gate in v0.4 (#15). This function only encodes
+    the default *policy* — `MemoryCloudProvider.mint` is the structural
+    enforcement point (it refuses ``memory:write`` unless ``write_approved``), so
+    the lock holds even if a caller bypasses this resolver.
+    """
+    if write_approved:
+        return MemoryCloudProvider.WRITE_SCOPE
+    return MemoryCloudProvider.READ_ONLY_SCOPE
 
 
 class CloudflareTokenProvider:

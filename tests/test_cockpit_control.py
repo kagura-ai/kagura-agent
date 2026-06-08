@@ -11,7 +11,7 @@ from kagura_agent.patterns.checkpoint import InMemoryCheckpointStore
 
 
 class OneShotBrain:
-    caps = BrainCaps(name="oneshot", requires_mcp=False)
+    caps = BrainCaps(name="oneshot")
 
     async def run(
         self, task: Task, *, resume: Checkpoint | None = None
