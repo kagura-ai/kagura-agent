@@ -47,13 +47,20 @@ def normalize_slack_event(payload: dict[str, Any], *, bot_user_id: str) -> Event
     if payload.get("bot_id") or payload.get("user") == bot_user_id:
         return None  # ignore our own / other bots' messages
 
+    text = payload.get("text", "")
+    if not text.strip():
+        # Empty / whitespace-only body (attachment-only, sticker, share). A plain
+        # type=message with no text slips past the subtype guard above; dropping it
+        # prevents a billed empty-prompt brain LAUNCH.
+        return None
+
     ts = payload["ts"]
     thread_ts = payload.get("thread_ts")
     thread_id = thread_ts or ts
     is_thread_reply = thread_ts is not None and thread_ts != ts
     return Event(
         thread_id=thread_id,
-        text=payload.get("text", ""),
+        text=text,
         is_thread_reply=is_thread_reply,
         sender=payload.get("user"),
     )
