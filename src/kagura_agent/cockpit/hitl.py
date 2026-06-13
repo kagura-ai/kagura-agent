@@ -30,6 +30,30 @@ class Decision:
     approved: bool
 
 
+async def record_decision(
+    memory: MemoryClient,
+    request: CapabilityRequest,
+    *,
+    approved: bool,
+    failure: str | None = None,
+) -> None:
+    """Record a HITL decision to memory as a graduation trail.
+
+    Shared by the synchronous `HitlGate.review` and the cockpit's async approval
+    loop (#32) so both write the same evidence the graduation curve later reads.
+    """
+    if approved:
+        verb = "approved"
+    elif failure:
+        verb = f"denied (transport_error: {failure})"
+    else:
+        verb = "denied"
+    await memory.remember(
+        f"HITL {verb} {request.capability}: {request.reason}",
+        tags=("hitl", "graduation-trail"),
+    )
+
+
 class HitlGate:
     def __init__(self, transport: Transport, memory: MemoryClient) -> None:
         self._transport = transport
@@ -52,14 +76,5 @@ class HitlGate:
             failure = type(exc).__name__
 
         approved = answer.strip().lower() == _APPROVE
-        if approved:
-            verb = "approved"
-        elif failure:
-            verb = f"denied (transport_error: {failure})"
-        else:
-            verb = "denied"
-        await self._memory.remember(
-            f"HITL {verb} {request.capability}: {request.reason}",
-            tags=("hitl", "graduation-trail"),
-        )
+        await record_decision(self._memory, request, approved=approved, failure=failure)
         return Decision(approved=approved)

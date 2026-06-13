@@ -19,6 +19,7 @@ class Intent(Enum):
     CONTINUE = "continue"
     STATUS = "status"
     APPROVE = "approve"
+    DENY = "deny"
     KILL = "kill"
 
 
@@ -28,6 +29,7 @@ _COMMANDS = {
     "/status": Intent.STATUS,
     "/kill": Intent.KILL,
     "/approve": Intent.APPROVE,
+    "/deny": Intent.DENY,
 }
 
 
