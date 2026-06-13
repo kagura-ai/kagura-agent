@@ -20,12 +20,15 @@ Two consumers of the cockpit approval loop (#32) live here, both fail-closed:
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 
 from kagura_agent.cockpit.core import Cockpit
 from kagura_agent.cockpit.hitl import CapabilityRequest
 from kagura_agent.membrane.graduation import GraduationEngine
 from kagura_agent.membrane.lease import Lease
+
+log = logging.getLogger(__name__)
 
 _MEMORY_WRITE = "memory:write"
 
@@ -100,7 +103,6 @@ class WriteGraduationGate:
         approval, or None (fail-closed) when not eligible / denied / timed out."""
         if not self._engine.should_propose(category, input_trust=input_trust):
             return None  # not graduated (or untrusted input / cooldown) — no proposal
-        self._engine.mark_proposed(category)  # start the cooldown for this category
         future = await self._cockpit.request_capability(
             CapabilityRequest(
                 thread_id=thread_id, capability=f"memory:promote:{category}", reason=reason
@@ -109,10 +111,28 @@ class WriteGraduationGate:
         try:
             decision = await asyncio.wait_for(future, self._timeout)
         except TimeoutError:
+            # The operator never decided — fail-closed, and do NOT burn the
+            # cooldown: a proposal nobody saw must stay re-surfaceable, so
+            # mark_proposed is deliberately skipped on this path.
             await self._cockpit.withdraw_pending(thread_id)
-            return None  # no operator decision in the window — fail-closed
+            return None
+        # A real decision (approve OR deny) was seen → start the cooldown so the
+        # operator is not re-nagged with the same proposal during the window.
+        self._engine.mark_proposed(category)
         if not decision.approved:
             return None  # operator denied — nothing promoted
+        # Promote per-id and resiliently: a single failing promote (stale id, or
+        # an MCP-backed backend rejecting one) must not strand the rest of the
+        # batch. A failed promote leaves that memory quarantined — fail-safe (no
+        # over-grant). Return the ids that actually landed in the trusted backbone.
+        promoted: list[str] = []
         for memory_id in memory_ids:
-            self._promote(memory_id)  # host-side promotion, only after the grant
-        return list(memory_ids)
+            try:
+                self._promote(memory_id)
+            except Exception:
+                log.exception(
+                    "write-graduation: promote of %s failed; left quarantined", memory_id
+                )
+                continue
+            promoted.append(memory_id)
+        return promoted

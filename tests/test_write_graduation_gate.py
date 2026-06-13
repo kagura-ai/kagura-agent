@@ -151,3 +151,62 @@ async def test_graduated_timeout_withdraws_and_promotes_nothing() -> None:
     assert result is None
     assert reg.pending("t1") is False  # withdrawn — no orphan
     assert await agent.recall("note", trusted_only=True) == []  # stays quarantined
+
+
+async def test_timeout_does_not_burn_cooldown_allowing_reproposal() -> None:
+    # A timed-out proposal (operator never decided) must NOT consume the
+    # graduation cooldown — otherwise a missed proposal silently locks the
+    # category out of re-proposal for cooldown_seconds.
+    engine = _eligible_engine()
+    reg = PendingApprovalRegistry()
+    gate = WriteGraduationGate(engine, _cockpit(reg), promote=lambda mid: None, timeout=0.01)
+
+    assert await gate.propose_promotion(
+        _CATEGORY, ["m1"], thread_id="t1", input_trust="trusted", reason="r"
+    ) is None
+    # cooldown NOT burned → the category is still eligible to re-surface
+    assert engine.should_propose(_CATEGORY, input_trust="trusted") is True
+
+
+async def test_deny_burns_cooldown_to_rate_limit_renag() -> None:
+    # A *seen* decision (deny) DOES start the cooldown so the operator is not
+    # re-nagged with the same proposal during the cooldown window.
+    engine = _eligible_engine()
+    reg = PendingApprovalRegistry()
+    gate = WriteGraduationGate(engine, _cockpit(reg), promote=lambda mid: None)
+
+    task = asyncio.create_task(
+        gate.propose_promotion(_CATEGORY, ["m1"], thread_id="t1", input_trust="trusted", reason="r")
+    )
+    await _drive_until_pending(reg, "t1")
+    reg.resolve("t1", approved=False)
+
+    assert await task is None
+    assert engine.should_propose(_CATEGORY, input_trust="trusted") is False  # cooldown started
+
+
+async def test_partial_promote_failure_does_not_strand_the_batch() -> None:
+    # A promote() that fails for one id must not abort the whole batch: the other
+    # ids are promoted and the returned list reflects what actually landed. A
+    # failed promote leaves that memory quarantined — fail-safe, no over-grant.
+    engine = _eligible_engine()
+    reg = PendingApprovalRegistry()
+    promoted: list[str] = []
+
+    def promote(mid: str) -> None:
+        if mid == "bad":
+            raise KeyError(mid)
+        promoted.append(mid)
+
+    gate = WriteGraduationGate(engine, _cockpit(reg), promote=promote)
+    task = asyncio.create_task(
+        gate.propose_promotion(
+            _CATEGORY, ["m1", "bad", "m3"], thread_id="t1", input_trust="trusted", reason="r"
+        )
+    )
+    await _drive_until_pending(reg, "t1")
+    reg.resolve("t1", approved=True)
+
+    result = await task
+    assert result == ["m1", "m3"]  # bad skipped, batch not stranded
+    assert promoted == ["m1", "m3"]
