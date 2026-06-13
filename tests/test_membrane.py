@@ -97,6 +97,139 @@ def test_unix_socket_without_sock_extension_is_rejected_by_type(tmp_path) -> Non
         srv.close()
 
 
+# --- subtree scan: a mounted *directory* must not hide a socket/device node ---
+# Defense-in-depth (deferred from #17, coordinated with #18): the per-path guard
+# above only inspects the mount source itself. A directory inside the project
+# root that *contains* a unix socket or device node in its subtree is still a
+# host-reach vector (the container can traverse to the inode), so validate_spec
+# walks the subtree and refuses it. The walk is BOUNDED and FAILS CLOSED on a cap.
+
+
+def _bind_unix_socket(path):  # type: ignore[no-untyped-def]
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(path))
+    return srv
+
+
+def test_workspace_dir_containing_a_sock_file_is_rejected(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # A *.sock unix socket planted inside an otherwise-legitimate workspace dir
+    # must sink the whole mount, not just be caught when mounted directly.
+    if not hasattr(socket, "AF_UNIX"):  # pragma: no cover - e.g. Windows
+        pytest.skip("AF_UNIX sockets not supported on this platform")
+    workspace = tmp_path / "ws"
+    (workspace / "sub").mkdir(parents=True)
+    (workspace / "sub" / "code.py").write_text("print(1)\n", encoding="utf-8")
+    srv = _bind_unix_socket(workspace / "sub" / "app.sock")
+    try:
+        spec = LaunchSpec(image="x", mounts=(Mount(source=str(workspace), target="/w"),))
+        with pytest.raises(MembraneViolation, match="socket"):
+            validate_spec(spec, project_root=str(tmp_path))
+    finally:
+        srv.close()
+
+
+def test_workspace_dir_containing_an_extensionless_socket_is_rejected(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # The detection is type-based, not name-based: an AF_UNIX socket whose name
+    # does NOT end in .sock (D-Bus/systemd style) hidden in the subtree is still
+    # refused via S_ISSOCK.
+    if not hasattr(socket, "AF_UNIX"):  # pragma: no cover - e.g. Windows
+        pytest.skip("AF_UNIX sockets not supported on this platform")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    srv = _bind_unix_socket(workspace / "bus")  # deliberately no .sock extension
+    try:
+        spec = LaunchSpec(image="x", mounts=(Mount(source=str(workspace), target="/w"),))
+        with pytest.raises(MembraneViolation, match="socket"):
+            validate_spec(spec, project_root=str(tmp_path))
+    finally:
+        srv.close()
+
+
+def test_clean_workspace_dir_passes(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # A directory whose subtree holds only regular files and subdirectories
+    # validates without raising.
+    workspace = tmp_path / "ws"
+    (workspace / "a" / "b").mkdir(parents=True)
+    (workspace / "a" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (workspace / "a" / "b" / "data.json").write_text("{}\n", encoding="utf-8")
+    spec = LaunchSpec(image="x", mounts=(Mount(source=str(workspace), target="/w"),))
+    validate_spec(spec, project_root=str(tmp_path))  # must not raise
+
+
+def test_subtree_scan_fails_closed_on_entry_cap(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # A subtree too large to fully verify is REFUSED, not waved through: when the
+    # bounded walk hits its entry cap it raises rather than returning "clean".
+    from kagura_agent.membrane import launcher as L
+
+    monkeypatch.setattr(L, "_MAX_SUBTREE_ENTRIES", 3)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    for i in range(10):
+        (workspace / f"f{i}.py").write_text("\n", encoding="utf-8")
+    spec = LaunchSpec(image="x", mounts=(Mount(source=str(workspace), target="/w"),))
+    with pytest.raises(MembraneViolation, match="cap"):
+        validate_spec(spec, project_root=str(tmp_path))
+
+
+def test_subtree_scan_fails_closed_on_depth_cap(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # A subtree deeper than the depth cap is likewise refused (fail-closed),
+    # bounding the walk so a pathological tree cannot make validation hang.
+    from kagura_agent.membrane import launcher as L
+
+    monkeypatch.setattr(L, "_MAX_SUBTREE_DEPTH", 1)
+    workspace = tmp_path / "ws"
+    (workspace / "a" / "b" / "c").mkdir(parents=True)
+    spec = LaunchSpec(image="x", mounts=(Mount(source=str(workspace), target="/w"),))
+    with pytest.raises(MembraneViolation, match="cap"):
+        validate_spec(spec, project_root=str(tmp_path))
+
+
+def test_subtree_scan_flags_a_device_node_by_type(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Coordinate with #18 (device-node hardening): a char/block device node in a
+    # mounted subtree is a host-reach vector just like a socket. Detection is by
+    # file *type* (mknod needs root), so we fake a char-device entry and assert
+    # the helper flags it.
+    import os
+    import stat as stat_mod
+
+    from kagura_agent.membrane import launcher as L
+
+    class _FakeStat:
+        def __init__(self, mode: int) -> None:
+            self.st_mode = mode
+
+    class _FakeEntry:
+        def __init__(self, path: str, mode: int) -> None:
+            self.path = path
+            self.name = os.path.basename(path)
+            self._mode = mode
+
+        def is_symlink(self) -> bool:
+            return False
+
+        def is_dir(self, *, follow_symlinks: bool = True) -> bool:
+            return stat_mod.S_ISDIR(self._mode)
+
+        def stat(self, *, follow_symlinks: bool = True) -> "_FakeStat":
+            return _FakeStat(self._mode)
+
+    class _FakeScandir:
+        def __init__(self, entries):  # type: ignore[no-untyped-def]
+            self._entries = entries
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return iter(self._entries)
+
+        def __exit__(self, *exc) -> bool:  # type: ignore[no-untyped-def]
+            return False
+
+    def fake_scandir(path):  # type: ignore[no-untyped-def]
+        return _FakeScandir([_FakeEntry(f"{path}/ttyS0", stat_mod.S_IFCHR | 0o600)])
+
+    monkeypatch.setattr(os, "scandir", fake_scandir)
+    assert L._subtree_special_file_reason("/ws") is not None
+
+
 # --- the socket guard itself (cross-platform: tests the resolved-path check
 # directly, independent of realpath / project-root containment) ---------------
 
