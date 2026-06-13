@@ -33,6 +33,21 @@ async def test_failure_records_prevents_edge_and_demotes() -> None:
     assert engine.should_propose("apt", input_trust="trusted") is False
 
 
+async def test_failure_description_is_quarantined_not_trusted() -> None:
+    # The failure description has untrusted provenance (often tool-derived), so it
+    # must land in the quarantine tier — excluded from trusted-only recalls that
+    # steer behaviour — not the trusted backbone.
+    memory = LocalMemoryClient()
+    engine = GraduationEngine(GraduationPolicy(), clock=_Clock())
+    learner = FailureLearner(memory=memory, graduation=engine)
+
+    action_mid = await memory.remember("ran apt", tags=("apt",))
+    await learner.failed("apt", action_mid=action_mid, description="poisoned failure text")
+
+    assert await memory.recall("poisoned", trusted_only=True) == []
+    assert await memory.recall("poisoned", trusted_only=False)  # present, but quarantined
+
+
 async def test_verified_success_advances_curve() -> None:
     memory = LocalMemoryClient()
     engine = GraduationEngine(GraduationPolicy(), clock=_Clock())
