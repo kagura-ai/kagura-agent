@@ -15,6 +15,18 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 
+class BrainUnavailable(RuntimeError):
+    """A brain cannot run because its backing dependency is not installed.
+
+    Raised at brain *construction* (fail-fast, before any task runs) so the CLI
+    and cockpit transports can surface an actionable install hint instead of a
+    raw ImportError deep in the agentic loop (which the cockpit's broad
+    ``except`` would otherwise render as a generic "internal error"). It lives at
+    the seam so `session.py` and the transports can catch it without importing
+    any provider/SDK module.
+    """
+
+
 @dataclass(frozen=True)
 class BrainCaps:
     """What a brain declares about itself at startup.

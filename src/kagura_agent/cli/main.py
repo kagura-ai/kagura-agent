@@ -11,8 +11,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 from collections.abc import Sequence
 from typing import Any
+
+from kagura_agent.core.brain.base import BrainUnavailable
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -88,18 +91,22 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
-    import sys
-
     ns = parse_args(sys.argv[1:] if argv is None else argv)
     if ns.command == "run":
         mcp_servers = load_mcp_config(ns.mcp_config)
-        result = asyncio.run(
-            _run_task(
-                ns.task,
-                mcp_servers=mcp_servers,
-                strict_mcp_config=ns.strict_mcp_config,
+        try:
+            result = asyncio.run(
+                _run_task(
+                    ns.task,
+                    mcp_servers=mcp_servers,
+                    strict_mcp_config=ns.strict_mcp_config,
+                )
             )
-        )
+        except BrainUnavailable as exc:
+            # Expected setup condition (optional brain not installed) — surface the
+            # actionable install hint, not a raw traceback or generic "internal error".
+            print(str(exc), file=sys.stderr)
+            return 2
         print(result)
         return 0
     return 1
