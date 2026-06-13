@@ -90,3 +90,36 @@ async def test_non_operator_deny_is_also_ignored() -> None:
 
     assert not fut.done()             # a non-operator cannot deny either
     assert reg.pending("t1") is True
+
+
+async def test_operator_deny_resolves_denied() -> None:
+    # The operator may also deny (not only approve) — completes the gate matrix.
+    transport = CliTransport(inbox=[])
+    reg = PendingApprovalRegistry()
+    cockpit = Cockpit(
+        transport, _FakeBrain(), InMemoryCheckpointStore(), approvals=reg, operator_id="op1"
+    )
+    fut = await cockpit.request_capability(_REQ)
+
+    await cockpit.handle(Event(thread_id="t1", text="/deny", is_thread_reply=True, sender="op1"))
+
+    assert (await fut).approved is False
+    assert reg.pending("t1") is False
+
+
+async def test_operator_gated_but_sender_none_is_fail_closed() -> None:
+    # A CLI-style event (sender=None) against an operator-gated cockpit must NOT
+    # resolve: None != operator_id → rejected, pending stays open. (The single-user
+    # CLI sender-less path is only permissive when operator_id is itself None.)
+    transport = CliTransport(inbox=[])
+    reg = PendingApprovalRegistry()
+    cockpit = Cockpit(
+        transport, _FakeBrain(), InMemoryCheckpointStore(), approvals=reg, operator_id="op1"
+    )
+    fut = await cockpit.request_capability(_REQ)
+
+    # a sender-less /approve (CLI-style) against an operator-gated cockpit
+    await cockpit.handle(Event(thread_id="t1", text="/approve", is_thread_reply=True))
+
+    assert not fut.done()             # fail-closed
+    assert reg.pending("t1") is True  # stays open for the real operator

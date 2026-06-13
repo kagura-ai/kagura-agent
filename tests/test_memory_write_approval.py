@@ -10,14 +10,16 @@ denied or timed-out request grants nothing — fail-closed.
 
 import asyncio
 
-from kagura_agent.cockpit.approval import PendingApprovalRegistry
+import pytest
+
+from kagura_agent.cockpit.approval import PendingApprovalExists, PendingApprovalRegistry
 from kagura_agent.cockpit.core import Cockpit
 from kagura_agent.cockpit.hitl import CapabilityRequest
 from kagura_agent.cockpit.memory_write import MemoryWriteApprover
 from kagura_agent.cockpit.transports.cli import CliTransport
 from kagura_agent.mcp.memory_cloud import LocalMemoryClient
 from kagura_agent.membrane.lease import Budget, CredentialBroker
-from kagura_agent.membrane.providers import MemoryCloudProvider
+from kagura_agent.membrane.providers import MemoryCloudProvider, MemoryWriteLocked
 from kagura_agent.patterns.checkpoint import InMemoryCheckpointStore
 
 
@@ -181,3 +183,51 @@ async def test_approved_acquires_memory_write_lease_through_the_broker() -> None
     assert lease is not None
     assert lease.scope == "memory:write"
     assert lease.cred == "kmc-write-1"
+
+
+async def test_operator_approval_alone_does_not_grant_write_broker_still_refuses() -> None:
+    # The crux invariant: operator approval is necessary but NOT sufficient. Even
+    # after the operator approves, a grant that tries to mint memory:write from a
+    # NON-write_approved provider is refused by the broker's _assert_scope_allowed
+    # gate (#12/#20) — approval flips the *provider*, not the broker check. The
+    # MemoryWriteApprover propagates the refusal rather than returning a lease.
+    reg = PendingApprovalRegistry()
+    cockpit = _cockpit(CliTransport(inbox=[]), reg)
+    provider = MemoryCloudProvider(
+        exchange=lambda req: {"access_token": "x"}, write_approved=False  # NOT write-approved
+    )
+    broker = CredentialBroker({"memory": provider}, clock=lambda: 1000.0)
+
+    async def grant():  # type: ignore[no-untyped-def]
+        return await broker.acquire("memory", scope="memory:write", ttl=300, budget=Budget(3600))
+
+    approver = MemoryWriteApprover(cockpit, grant, timeout=5)
+    task = asyncio.create_task(approver.request("t1", "persist note"))
+    await _drive_until_pending(reg, "t1")
+    reg.resolve("t1", approved=True)  # operator approves...
+
+    with pytest.raises(MemoryWriteLocked):  # ...but the broker still refuses the write
+        await task
+
+
+async def test_concurrent_second_request_surfaces_pending_exists() -> None:
+    # MemoryWriteApprover does not silently supersede a live pending: a second
+    # request for the same thread while the first still awaits surfaces
+    # PendingApprovalExists (the registry's one-pending-per-thread invariant),
+    # rather than clobbering the request the operator may be about to approve.
+    reg = PendingApprovalRegistry()
+    cockpit = _cockpit(CliTransport(inbox=[]), reg)
+    sentinel = object()
+
+    async def grant():  # type: ignore[no-untyped-def]
+        return sentinel
+
+    approver = MemoryWriteApprover(cockpit, grant, timeout=5)
+    first = asyncio.create_task(approver.request("t1", "r1"))
+    await _drive_until_pending(reg, "t1")
+
+    with pytest.raises(PendingApprovalExists):
+        await approver.request("t1", "r2")
+
+    reg.resolve("t1", approved=True)  # let the first complete cleanly
+    assert await first is sentinel
