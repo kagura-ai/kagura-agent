@@ -7,8 +7,20 @@ v0.3). Slack/Discord are pure additions on the same `Transport` protocol.
 """
 
 from kagura_agent.cockpit.intent import Intent, classify
-from kagura_agent.cockpit.transports.base import Event
+from kagura_agent.cockpit.transports.base import Event, click_authorized
 from kagura_agent.cockpit.transports.cli import CliTransport
+
+# --- HITL button operator gate (#14, button path) -------------------------
+
+def test_click_authorized_allows_any_when_no_operator() -> None:
+    assert click_authorized("anyone", None) is True
+    assert click_authorized(None, None) is True
+
+
+def test_click_authorized_only_operator_when_configured() -> None:
+    assert click_authorized("op", "op") is True
+    assert click_authorized("attacker", "op") is False
+    assert click_authorized(None, "op") is False
 
 # --- structural intent routing --------------------------------------------
 

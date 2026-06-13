@@ -7,6 +7,8 @@ round-trip.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from kagura_agent.cockpit.transports.base import Event
@@ -84,3 +86,76 @@ def test_action_value_extracts_clicked_option() -> None:
 def test_action_value_empty_actions_raises() -> None:
     with pytest.raises(ValueError, match="no actions"):
         action_value({"actions": []})
+
+
+# --- HITL ask: operator gate + no supersede hang ----------------------------
+
+class _FakeSlackClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []  # type: ignore[type-arg]
+
+    async def chat_postMessage(self, **kw: object) -> None:
+        self.calls.append(dict(kw))
+
+
+class _CapturingApp:
+    """Fake AsyncApp that captures the registered message/action handlers."""
+
+    def __init__(self) -> None:
+        self.client = _FakeSlackClient()
+        self.action_handler = None  # type: ignore[var-annotated]
+
+    def event(self, _name: str):  # type: ignore[no-untyped-def]
+        return lambda fn: fn
+
+    def action(self, _spec: object):  # type: ignore[no-untyped-def]
+        def deco(fn):  # type: ignore[no-untyped-def]
+            self.action_handler = fn
+            return fn
+
+        return deco
+
+
+async def _noop_ack() -> None:
+    return None
+
+
+async def test_ask_button_resolves_only_for_operator() -> None:
+    from kagura_agent.cockpit.transports.slack import SlackTransport
+
+    app = _CapturingApp()
+    t = SlackTransport(app, "UBOT", channel_map={"1.0": "C1"}, operator_id="op")
+    pending = asyncio.create_task(t.ask("1.0", "approve?", ["/approve", "/deny"]))
+    await asyncio.sleep(0)  # let ask register the pending future + post
+
+    # A non-operator click is ignored (request stays pending).
+    await app.action_handler(  # type: ignore[misc]
+        ack=_noop_ack,
+        body={"user": {"id": "attacker"}, "container": {"thread_ts": "1.0"},
+              "actions": [{"value": "/approve"}]},
+    )
+    await asyncio.sleep(0)
+    assert not pending.done()
+
+    # The operator's click resolves it.
+    await app.action_handler(  # type: ignore[misc]
+        ack=_noop_ack,
+        body={"user": {"id": "op"}, "container": {"thread_ts": "1.0"},
+              "actions": [{"value": "/approve"}]},
+    )
+    assert await asyncio.wait_for(pending, timeout=1) == "/approve"
+
+
+async def test_ask_supersede_fails_old_future_instead_of_hanging() -> None:
+    from kagura_agent.cockpit.transports.slack import SlackTransport
+
+    app = _CapturingApp()
+    t = SlackTransport(app, "UBOT", channel_map={"1.0": "C1"})
+    first = asyncio.create_task(t.ask("1.0", "q1", ["/approve"]))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(t.ask("1.0", "q2", ["/approve"]))
+    await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError, match="superseded"):
+        await asyncio.wait_for(first, timeout=1)  # old awaiter unblocks, not hangs
+    second.cancel()
