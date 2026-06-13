@@ -15,6 +15,13 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
+from kagura_agent.cli.doctor import (
+    DOCTOR_FAIL_EXIT,
+    FAIL,
+    format_report,
+    overall_status,
+    run_doctor,
+)
 from kagura_agent.core.brain.base import BrainUnavailable
 
 
@@ -37,6 +44,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="reject MCP servers not present in --mcp-config (no silent passthrough)",
     )
+    sub.add_parser("doctor", help="preflight check: memory / claude / docker / egress")
     return parser.parse_args(list(argv))
 
 
@@ -92,6 +100,10 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
     ns = parse_args(sys.argv[1:] if argv is None else argv)
+    if ns.command == "doctor":
+        results = run_doctor()
+        print(format_report(results))
+        return DOCTOR_FAIL_EXIT if overall_status(results) == FAIL else 0
     if ns.command == "run":
         mcp_servers = load_mcp_config(ns.mcp_config)
         try:
