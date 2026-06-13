@@ -19,6 +19,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Protocol
 
+from kagura_agent.membrane.providers import MemoryCloudProvider, MemoryWriteLocked
+
 log = logging.getLogger(__name__)
 
 
@@ -97,6 +99,30 @@ class CredentialBroker:
         self._clock = clock
         self._ledger = ledger or LeaseLedger()
 
+    def _assert_scope_allowed(self, p: CredProvider, scope: str) -> None:
+        """Broker-level write-lock (defense-in-depth) for the highest-risk scope.
+
+        ``memory:write`` (and any future privileged ``memory:*`` scope) is the
+        dominant prompt-injection persistence risk, so the broker itself refuses
+        to mint it unless the resolved provider is a recognized, write-approved
+        ``MemoryCloudProvider``. The broker does NOT trust an arbitrary provider
+        to self-enforce: a look-alike wired under the "memory" name, or one
+        lacking the check, is rejected HERE — not just inside ``mint``. This is an
+        intentional cross-layer reference (broker -> concrete provider): the
+        knowledge "who may mint a write token" must live in the broker, because a
+        capability check delegated to the provider can be subverted by the very
+        look-alike this guards against. The broker is the single chokepoint;
+        acquiring creds outside it is outside the membrane's contract.
+        """
+        if MemoryCloudProvider.requires_write_approval(scope) and not (
+            isinstance(p, MemoryCloudProvider) and p.write_approved
+        ):
+            raise MemoryWriteLocked(
+                f"broker refuses scope {scope!r}: it requires a write-approved "
+                "MemoryCloudProvider (a read-locked or look-alike provider cannot "
+                "mint a privileged memory token, even via broker.acquire/renew)."
+            )
+
     def open_leases(self) -> list[Lease]:
         """Stateful leases the ledger is currently tracking (for the sweeper and
         for observability — exposed so callers need not reach into the ledger)."""
@@ -104,6 +130,7 @@ class CredentialBroker:
 
     async def acquire(self, provider: str, *, scope: str, ttl: int, budget: Budget) -> Lease:
         p = self._providers[provider]
+        self._assert_scope_allowed(p, scope)
         cred, handle = await p.mint(scope, ttl)
         lease = Lease(
             provider=provider,
@@ -120,6 +147,7 @@ class CredentialBroker:
     async def renew(self, lease: Lease, *, ttl: int) -> Lease:
         budget = lease.budget.spend(ttl)  # raises BudgetExhausted
         p = self._providers[lease.provider]
+        self._assert_scope_allowed(p, lease.scope)  # same broker-level write-lock as acquire
         # Mint the replacement FIRST. If mint raises (network/rate-limit), the
         # current lease is left fully intact — still valid and still tracked in
         # the ledger (it is never forgotten below until a successful revoke), so

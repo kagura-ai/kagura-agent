@@ -156,8 +156,33 @@ class MemoryCloudProvider:
         self._exchange = exchange
         self._write_approved = write_approved
 
+    @property
+    def write_approved(self) -> bool:
+        """Whether this provider was constructed with write approval (read-only by
+        default). Public so the broker can hard-gate ``memory:write`` without
+        reaching into a private attribute (see CredentialBroker.acquire)."""
+        return self._write_approved
+
+    @classmethod
+    def requires_write_approval(cls, scope: str) -> bool:
+        """Whether a memory scope needs write approval — **fail-closed**.
+
+        Any ``memory:*`` scope that is not the read-only scope (``memory:write``,
+        and any future ``memory:admin`` / ``memory:delete``) requires approval. A
+        new scope is treated as privileged by default; only ``memory:read`` is
+        exempt. This is the single source of truth the broker and ``mint`` both
+        consult, so a literal ``"memory:write"`` comparison can't silently miss a
+        future write-ish scope.
+
+        The scope is normalized (strip + casefold) for the decision so a case or
+        whitespace variant (``"MEMORY:WRITE"``, ``" memory:write "``) cannot slip
+        past the guard — fail-closed against malformed-but-privileged scopes.
+        """
+        normalized = scope.strip().casefold()
+        return normalized != cls.READ_ONLY_SCOPE and normalized.startswith("memory:")
+
     async def mint(self, scope: str, ttl: int) -> tuple[str, str | None]:
-        if scope == self.WRITE_SCOPE and not self._write_approved:
+        if self.requires_write_approval(scope) and not self._write_approved:
             raise MemoryWriteLocked(
                 "memory:write is locked: this provider is read-only. Widening requires "
                 "device-flow re-approval (HITL), wired in #14 (v0.3) / #15 (v0.4). "
