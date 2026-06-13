@@ -38,3 +38,15 @@ class Transport(Protocol):
     async def send(self, thread_id: str, text: str) -> None: ...
 
     async def ask(self, thread_id: str, question: str, options: list[str]) -> str: ...
+
+
+def click_authorized(clicker: str | None, operator_id: str | None) -> bool:
+    """Whether a HITL button click may resolve a pending request.
+
+    The button (`ask`) path is the synchronous twin of the typed `/approve`
+    event; it must enforce the same operator-identity gate (#14). With no
+    operator configured (single-user CLI), any click is allowed; otherwise only
+    the operator's click qualifies — so a non-operator (e.g. a hijacked agent)
+    cannot self-approve by clicking ✅.
+    """
+    return operator_id is None or clicker == operator_id

@@ -20,7 +20,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
-from kagura_agent.cockpit.transports.base import Event
+from kagura_agent.cockpit.transports.base import Event, click_authorized
 
 # Prefix on each HITL button's custom_id, so the callback can tell an approval
 # click apart from any other component and recover the chosen option.
@@ -88,9 +88,12 @@ class DiscordTransport:  # pragma: no cover - requires discord.py + a bot token
     View and blocks on a future its callbacks resolve.
     """
 
-    def __init__(self, client: Any, bot_user_id: int) -> None:
+    def __init__(
+        self, client: Any, bot_user_id: int, *, operator_id: str | None = None
+    ) -> None:
         self._client = client
         self._bot_user_id = bot_user_id
+        self._operator_id = operator_id
         self._inbox: asyncio.Queue[Event] = asyncio.Queue()
         self._client.add_listener(self._on_message, "on_message")
 
@@ -128,6 +131,9 @@ class DiscordTransport:  # pragma: no cover - requires discord.py + a bot token
 
             async def _callback(interaction: Any, _option: str = option) -> None:
                 await interaction.response.defer()
+                # Operator-identity gate (#14): only the operator's click resolves.
+                if not click_authorized(str(interaction.user.id), self._operator_id):
+                    return
                 if not future.done():
                     future.set_result(_option)
 
