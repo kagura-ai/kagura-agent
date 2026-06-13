@@ -26,6 +26,13 @@ import json
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from kagura_agent.membrane.cred_env import (
+    aws_cred_env,
+    cloudflare_cred_env,
+    gcp_cred_env,
+    github_cred_env,
+)
+
 # A provider's injected transport speaks raw JSON-ish dicts in and out; the
 # cloud-specific shape is the provider's concern, not the broker's.
 Json = Mapping[str, Any]
@@ -71,6 +78,9 @@ class AwsStsProvider:
         # STS session credentials cannot be revoked; they expire at DurationSeconds.
         return None
 
+    def cred_to_env(self, cred: str) -> dict[str, str]:
+        return aws_cred_env(cred)
+
 
 class GcpImpersonationProvider:
     """GCP service-account impersonation. `scope` is the target SA email."""
@@ -94,6 +104,9 @@ class GcpImpersonationProvider:
         # Impersonation access tokens are not revocable; they expire at `lifetime`.
         return None
 
+    def cred_to_env(self, cred: str) -> dict[str, str]:
+        return gcp_cred_env(cred)
+
 
 class GitHubAppProvider:
     """GitHub App installation token. `scope` is ``installation:<id>``.
@@ -115,6 +128,9 @@ class GitHubAppProvider:
     async def revoke(self, handle: str | None) -> None:
         # Installation tokens expire (~1h); nothing to revoke.
         return None
+
+    def cred_to_env(self, cred: str) -> dict[str, str]:
+        return github_cred_env(cred)
 
 
 class MemoryWriteLocked(RuntimeError):
@@ -240,3 +256,6 @@ class CloudflareTokenProvider:
         if handle is None:
             return
         self._delete(handle)
+
+    def cred_to_env(self, cred: str) -> dict[str, str]:
+        return cloudflare_cred_env(cred)
