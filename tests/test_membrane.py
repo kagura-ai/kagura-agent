@@ -8,6 +8,9 @@ The membrane guards *reach*, not in-container freedom. Hard invariants:
 - egress is default-deny + allowlist.
 """
 
+import importlib.resources
+import json
+
 import pytest
 
 from kagura_agent.membrane.egress import EGRESS_NETWORK, EgressDecision, EgressPolicy
@@ -15,6 +18,7 @@ from kagura_agent.membrane.launcher import (
     LaunchSpec,
     MembraneViolation,
     Mount,
+    _seccomp_profile,
     docker_run_args,
     validate_spec,
 )
@@ -100,6 +104,73 @@ def test_docker_run_args_bake_in_hardening() -> None:
     # never the dangerous ones
     assert "docker.sock" not in joined
     assert "--privileged" not in args
+
+
+# --- seccomp + host-reach escape-flag invariants (#18) -----------------------
+
+
+def test_docker_run_args_sets_an_explicit_seccomp_profile() -> None:
+    # Explicitly setting seccomp guarantees the profile applies even on a daemon
+    # defaulting to seccomp=unconfined.
+    args = docker_run_args(LaunchSpec(image="x"))
+    joined = " ".join(args)
+    assert "--security-opt" in args
+    assert "seccomp=" in joined
+    assert "seccomp=unconfined" not in joined
+
+
+def test_seccomp_profile_is_deploy_configurable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("KAGURA_SECCOMP_PROFILE", "/host/custom/seccomp.json")
+    args = docker_run_args(LaunchSpec(image="x"))
+    assert "seccomp=/host/custom/seccomp.json" in " ".join(args)
+
+
+def test_seccomp_default_points_at_the_bundled_profile(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("KAGURA_SECCOMP_PROFILE", raising=False)
+    # Package data → resolves the same way editable or wheel-installed.
+    assert _seccomp_profile().replace("\\", "/").endswith(
+        "kagura_agent/membrane/seccomp-agent.json"
+    )
+
+
+def test_seccomp_unconfined_is_refused(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # The env override must not be allowed to disable seccomp entirely.
+    monkeypatch.setenv("KAGURA_SECCOMP_PROFILE", "unconfined")
+    with pytest.raises(MembraneViolation, match="unconfined"):
+        docker_run_args(LaunchSpec(image="x"))
+
+
+def test_docker_run_args_never_emits_host_reach_escape_flags() -> None:
+    # --device / --add-host / --privileged would punch through the membrane even
+    # on --network none; the launcher must never produce them. LaunchSpec carries
+    # no field that could; this locks that invariant.
+    args = docker_run_args(
+        LaunchSpec(image="x", env={"K": "v"}, egress_allow=("api.anthropic.com",))
+    )
+    joined = " ".join(args)
+    assert "--device" not in args
+    assert "--add-host" not in args
+    assert "--privileged" not in args
+    assert "seccomp=unconfined" not in joined
+
+
+def test_bundled_seccomp_profile_denies_high_risk_syscalls() -> None:
+    # Read the profile as package data (its canonical home), not a repo path.
+    profile_text = (
+        importlib.resources.files("kagura_agent.membrane")
+        .joinpath("seccomp-agent.json")
+        .read_text(encoding="utf-8")
+    )
+    profile = json.loads(profile_text)
+    assert profile["defaultAction"] == "SCMP_ACT_ALLOW"  # defense-in-depth deny-list
+    denied = {
+        name
+        for rule in profile["syscalls"]
+        if rule["action"] == "SCMP_ACT_ERRNO"
+        for name in rule["names"]
+    }
+    for syscall in ("perf_event_open", "ptrace", "bpf", "userfaultfd", "init_module", "mount"):
+        assert syscall in denied, syscall
 
 
 # --- egress default-deny + allowlist --------------------------------------
