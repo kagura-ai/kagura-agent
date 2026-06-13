@@ -49,6 +49,33 @@ async def test_session_run_returns_result_and_persists_checkpoint() -> None:
     assert cp.state == {"turn": 1}
 
 
+class _MisbehavingBrain:
+    """Yields events AFTER its terminal DoneEvent — must be ignored."""
+
+    caps = BrainCaps(name="bad")
+
+    async def run(
+        self, task: Task, *, resume: Checkpoint | None = None
+    ) -> AsyncIterator[BrainEvent]:
+        yield MessageEvent(text="working")
+        yield DoneEvent(result="first", state={"turn": 1})
+        yield MessageEvent(text="LATE")  # post-terminal narration
+        yield DoneEvent(result="second", state={"turn": 99})  # would corrupt result
+
+
+async def test_session_treats_first_done_as_terminal() -> None:
+    store = InMemoryCheckpointStore()
+    session = Session(brain=_MisbehavingBrain(), checkpoints=store)
+
+    result = await session.run(Task(prompt="x", session_id="s1"))
+
+    assert result.text == "first"  # not "second"
+    assert result.messages == ["working"]  # "LATE" not recorded
+    cp = await store.load("s1")
+    assert cp is not None
+    assert cp.state == {"turn": 1}  # not 99
+
+
 async def test_session_resume_feeds_prior_checkpoint_to_brain() -> None:
     store = InMemoryCheckpointStore()
     brain = FakeBrain()
