@@ -242,3 +242,132 @@ async def test_broker_non_memory_scope_is_unaffected() -> None:
     broker = CredentialBroker({"aws": FakeStatelessProvider()}, clock=_clock)
     lease = await broker.acquire("aws", scope="s3:read", ttl=300, budget=Budget(3600))
     assert lease.cred == "sts-token-1"
+# --- renew never loses track of a live token (#21) ---------------------------
+# Invariant: at no point may a live stateful token exist that the ledger does
+# not track. renew mints the replacement first (a mint failure must leave the
+# current lease intact and usable — never revoke-before-mint), records the new
+# token BEFORE revoking the old one (so a revoke failure can't orphan the fresh
+# token), and keeps the old lease tracked if its revoke fails (sweep retries).
+
+
+class FlakyMintProvider:
+    """Stateful provider whose Nth mint raises (simulates rate-limit/network)."""
+
+    stateful = True
+
+    def __init__(self, fail_on_mint: int) -> None:
+        self.minted = 0
+        self.revoked: list[str] = []
+        self._fail_on = fail_on_mint
+
+    async def mint(self, scope: str, ttl: int) -> tuple[str, str | None]:
+        self.minted += 1
+        if self.minted == self._fail_on:
+            raise RuntimeError("mint failed (rate limited)")
+        return f"cf-token-{self.minted}", f"cf-handle-{self.minted}"
+
+    async def revoke(self, handle: str | None) -> None:
+        assert handle is not None
+        self.revoked.append(handle)
+
+
+class RevokeFailsProvider:
+    """Stateful provider whose revoke always raises."""
+
+    stateful = True
+
+    def __init__(self) -> None:
+        self.minted = 0
+        self.revoke_attempts: list[str] = []
+
+    async def mint(self, scope: str, ttl: int) -> tuple[str, str | None]:
+        self.minted += 1
+        return f"cf-token-{self.minted}", f"cf-handle-{self.minted}"
+
+    async def revoke(self, handle: str | None) -> None:
+        assert handle is not None
+        self.revoke_attempts.append(handle)
+        raise RuntimeError("revoke failed")
+
+
+class SameHandleProvider:
+    """Pathological provider that reissues the SAME handle every mint."""
+
+    stateful = True
+
+    def __init__(self) -> None:
+        self.minted = 0
+        self.revoked: list[str] = []
+
+    async def mint(self, scope: str, ttl: int) -> tuple[str, str | None]:
+        self.minted += 1
+        return f"cf-token-{self.minted}", "cf-handle-fixed"
+
+    async def revoke(self, handle: str | None) -> None:
+        assert handle is not None
+        self.revoked.append(handle)
+
+
+async def test_renew_stateful_revokes_old_and_tracks_only_new() -> None:
+    provider = FakeStatefulProvider()
+    broker = CredentialBroker({"cf": provider}, clock=_clock, ledger=LeaseLedger())
+    lease = await broker.acquire("cf", scope="zone:edit", ttl=300, budget=Budget(3600))
+
+    renewed = await broker.renew(lease, ttl=300)
+
+    assert renewed.cred == "cf-token-2"
+    assert provider.revoked == ["cf-handle-1"]  # old revoked
+    handles = [ln.handle for ln in broker.open_leases()]
+    assert handles == ["cf-handle-2"]  # only the new token tracked
+
+
+async def test_renew_mint_failure_keeps_old_lease_tracked_and_unrevoked() -> None:
+    provider = FlakyMintProvider(fail_on_mint=2)  # acquire ok, renew's mint fails
+    broker = CredentialBroker({"cf": provider}, clock=_clock, ledger=LeaseLedger())
+    lease = await broker.acquire("cf", scope="zone:edit", ttl=300, budget=Budget(3600))
+
+    with pytest.raises(RuntimeError, match="mint failed"):
+        await broker.renew(lease, ttl=300)
+
+    # Old token must remain live AND tracked; it was never revoked.
+    handles = [ln.handle for ln in broker.open_leases()]
+    assert handles == ["cf-handle-1"]
+    assert provider.revoked == []
+    # A failed renew must not consume budget: the caller's lease is unchanged
+    # (Budget is immutable; spend() returns a new value that was discarded), so
+    # a retry spends from the original budget — no double-spend.
+    assert lease.budget.remaining() == 3600
+
+
+async def test_renew_revoke_failure_tracks_new_and_keeps_old_for_sweep() -> None:
+    provider = RevokeFailsProvider()
+    broker = CredentialBroker({"cf": provider}, clock=_clock, ledger=LeaseLedger())
+    lease = await broker.acquire("cf", scope="zone:edit", ttl=300, budget=Budget(3600))
+
+    # renew succeeds (new cred is valid); the old token's revoke fails but is
+    # swallowed — the renewal must not fail just because cleanup of the old
+    # token did.
+    renewed = await broker.renew(lease, ttl=300)
+
+    assert renewed.cred == "cf-token-2"
+    assert provider.revoke_attempts == ["cf-handle-1"]  # revoke was attempted
+    # BOTH tokens tracked: the new one (never orphaned) and the old one (left
+    # for the restart sweeper to retry).
+    handles = sorted(ln.handle for ln in broker.open_leases())
+    assert handles == ["cf-handle-1", "cf-handle-2"]
+
+
+async def test_renew_same_handle_does_not_drop_or_revoke_the_live_token() -> None:
+    # If the provider reissues the same handle, old and new are the same token
+    # at the provider: revoking "the old" would kill the live one, and
+    # forgetting it would drop the renewed ledger entry (same key). Do neither.
+    provider = SameHandleProvider()
+    broker = CredentialBroker({"cf": provider}, clock=_clock, ledger=LeaseLedger())
+    lease = await broker.acquire("cf", scope="zone:edit", ttl=300, budget=Budget(3600))
+
+    renewed = await broker.renew(lease, ttl=300)
+
+    assert renewed.cred == "cf-token-2"
+    assert provider.revoked == []  # must NOT revoke the shared handle
+    handles = [ln.handle for ln in broker.open_leases()]
+    assert handles == ["cf-handle-fixed"]  # exactly one tracked entry, not dropped

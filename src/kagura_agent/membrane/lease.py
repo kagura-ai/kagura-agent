@@ -123,6 +123,11 @@ class CredentialBroker:
                 "mint a privileged memory token, even via broker.acquire/renew)."
             )
 
+    def open_leases(self) -> list[Lease]:
+        """Stateful leases the ledger is currently tracking (for the sweeper and
+        for observability — exposed so callers need not reach into the ledger)."""
+        return self._ledger.open_leases()
+
     async def acquire(self, provider: str, *, scope: str, ttl: int, budget: Budget) -> Lease:
         p = self._providers[provider]
         self._assert_scope_allowed(p, scope)
@@ -143,6 +148,11 @@ class CredentialBroker:
         budget = lease.budget.spend(ttl)  # raises BudgetExhausted
         p = self._providers[lease.provider]
         self._assert_scope_allowed(p, lease.scope)  # same broker-level write-lock as acquire
+        # Mint the replacement FIRST. If mint raises (network/rate-limit), the
+        # current lease is left fully intact — still valid and still tracked in
+        # the ledger (it is never forgotten below until a successful revoke), so
+        # the caller keeps a working cred and nothing is orphaned. Never
+        # revoke-before-mint: that would destroy a working cred on mint failure.
         cred, handle = await p.mint(lease.scope, ttl)
         renewed = replace(
             lease,
@@ -151,12 +161,28 @@ class CredentialBroker:
             expires_at=self._clock() + ttl,
             handle=handle,
         )
-        # Symmetric with release(): a stateful old token must be revoked, or it
-        # leaks (still valid at the provider, no longer tracked for sweeping).
-        if lease.stateful and lease.handle is not None:
-            await p.revoke(lease.handle)
-        self._ledger.forget(lease)
+        # Record the new token BEFORE touching the old one: a revoke failure
+        # below must never leave the freshly-minted (live) token untracked.
         self._ledger.record(renewed)
+        # If the provider reissued the SAME handle, old and new are the same
+        # token at the provider — revoking "the old" would kill the live one,
+        # and forgetting it would drop the renewed entry (same ledger key). Skip.
+        if lease.handle == handle:
+            return renewed
+        # Symmetric with release(): a stateful old token must be revoked, or it
+        # leaks (still valid at the provider). If revoke fails, keep the old
+        # lease tracked so the restart sweeper retries it — do not orphan it.
+        if lease.stateful and lease.handle is not None:
+            try:
+                await p.revoke(lease.handle)
+            except Exception:
+                log.exception(
+                    "renew: revoke of old lease %s:%s failed; left tracked for sweep",
+                    lease.provider,
+                    lease.handle,
+                )
+                return renewed
+        self._ledger.forget(lease)
         return renewed
 
     async def release(self, lease: Lease) -> None:
