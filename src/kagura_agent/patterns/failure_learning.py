@@ -8,7 +8,7 @@ the trust score the graduation curve reads.
 
 from __future__ import annotations
 
-from kagura_agent.mcp.memory_cloud import MemoryClient
+from kagura_agent.mcp.memory_cloud import QUARANTINE_TIER, MemoryClient
 from kagura_agent.membrane.graduation import GraduationEngine
 
 
@@ -18,7 +18,14 @@ class FailureLearner:
         self._graduation = graduation
 
     async def failed(self, category: str, *, action_mid: str, description: str) -> None:
-        fail_mid = await self._memory.remember(description, tags=("failure", category))
+        # The failure `description` can be agent/tool-derived (e.g. a tool's error
+        # text), so it is untrusted provenance — write it to the quarantine tier,
+        # not the trusted backbone. This keeps a poisoned failure record out of
+        # trusted-only recalls (which steer graduation/behaviour) until a host
+        # promotes it, mirroring QuarantinedMemoryClient's write confinement.
+        fail_mid = await self._memory.remember(
+            description, tags=("failure", category), trust_tier=QUARANTINE_TIER
+        )
         await self._memory.create_edge(fail_mid, action_mid, type="prevents")
         self._graduation.record_failure(category)
 
