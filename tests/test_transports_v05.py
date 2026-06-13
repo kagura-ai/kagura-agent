@@ -16,7 +16,7 @@ from kagura_agent.cockpit.transports.slack import normalize_slack_event
 def test_slack_top_level_message_is_launch_event() -> None:
     payload = {"type": "message", "user": "U1", "text": "build it", "channel": "D1", "ts": "100.1"}
     event = normalize_slack_event(payload, bot_user_id="UBOT")
-    assert event == Event(thread_id="100.1", text="build it", is_thread_reply=False)
+    assert event == Event(thread_id="100.1", text="build it", is_thread_reply=False, sender="U1")
     assert classify(event, known_sessions=set()) is Intent.LAUNCH
 
 
@@ -26,7 +26,7 @@ def test_slack_thread_reply_is_continue_event() -> None:
         "ts": "101.2", "thread_ts": "100.1",
     }
     event = normalize_slack_event(payload, bot_user_id="UBOT")
-    assert event == Event(thread_id="100.1", text="more", is_thread_reply=True)
+    assert event == Event(thread_id="100.1", text="more", is_thread_reply=True, sender="U1")
     assert classify(event, known_sessions={"100.1"}) is Intent.CONTINUE
 
 
