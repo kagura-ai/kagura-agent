@@ -12,8 +12,14 @@ surface.
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
+
+#: The tier an agent's writes land in by default (#15). Read-side recall filters
+#: it out of the trusted backbone (``trusted_only=True``), so a quarantined write
+#: cannot pollute trusted memory until a host-side promote graduates it.
+QUARANTINE_TIER = "quarantine"
+TRUSTED_TIER = "trusted"
 
 
 @dataclass(frozen=True)
@@ -21,7 +27,7 @@ class Memory:
     id: str
     text: str
     tags: tuple[str, ...] = ()
-    trust_tier: str = "trusted"
+    trust_tier: str = TRUSTED_TIER
 
 
 @runtime_checkable
@@ -66,7 +72,7 @@ class LocalMemoryClient:
         terms = [t.lower() for t in query.split()]
         results: list[Memory] = []
         for mem in self._memories.values():
-            if trusted_only and mem.trust_tier != "trusted":
+            if trusted_only and mem.trust_tier != TRUSTED_TIER:
                 continue
             if tags and not set(tags) & set(mem.tags):
                 continue
@@ -80,6 +86,53 @@ class LocalMemoryClient:
 
     def edges_of(self, src_id: str) -> list[tuple[str, str]]:
         return list(self._edges.get(src_id, []))
+
+    def promote(self, memory_id: str) -> None:
+        """Host-side ONLY: graduate a quarantined memory into the trusted backbone.
+
+        Deliberately NOT on the ``MemoryClient`` protocol (the agent surface): the
+        agent can never promote its own writes. Promotion is the effect of a
+        post-graduation HITL grant (#15), applied host-side. Unknown id raises
+        ``KeyError`` — fail-closed, no silent no-op that could mask a bad id.
+        """
+        mem = self._memories[memory_id]  # KeyError if unknown — fail-closed
+        self._memories[memory_id] = replace(mem, trust_tier=TRUSTED_TIER)
+
+
+class QuarantinedMemoryClient:
+    """The confined ``MemoryClient`` the membrane leases into the agent container.
+
+    Every write is forced into the quarantine tier — the caller-supplied
+    ``trust_tier`` is intentionally ignored, so a hijacked agent cannot mint a
+    trusted memory by simply asking for one. There is no promote path here;
+    graduating a quarantined write into the trusted backbone is host-side only
+    (``LocalMemoryClient.promote``), gated by graduation HITL (#15). This mirrors
+    the ``write_approved`` / broker write-lock posture (#12/#20): the agent's
+    self-asserted trust tier is never trusted. ``recall``/``create_edge`` delegate
+    unchanged — confinement is on the write path only.
+    """
+
+    def __init__(self, inner: MemoryClient) -> None:
+        self._inner = inner
+
+    async def remember(
+        self, text: str, *, tags: tuple[str, ...] = (), trust_tier: str = TRUSTED_TIER
+    ) -> str:
+        # trust_tier is accepted (protocol parity) but IGNORED — fail-closed: the
+        # agent's writes always land quarantined, regardless of what it requests.
+        return await self._inner.remember(text, tags=tags, trust_tier=QUARANTINE_TIER)
+
+    async def recall(
+        self,
+        query: str,
+        *,
+        trusted_only: bool = False,
+        tags: tuple[str, ...] = (),
+    ) -> list[Memory]:
+        return await self._inner.recall(query, trusted_only=trusted_only, tags=tags)
+
+    async def create_edge(self, src_id: str, dst_id: str, *, type: str) -> None:
+        await self._inner.create_edge(src_id, dst_id, type=type)
 
 
 class MemoryUnreachableError(RuntimeError):
