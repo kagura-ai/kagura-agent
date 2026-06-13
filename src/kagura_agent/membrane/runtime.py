@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from kagura_agent.membrane.launcher import LaunchSpec, docker_run_args, validate_spec
+from kagura_agent.membrane.launcher import (
+    AGENT_LABEL,
+    LaunchSpec,
+    docker_run_args,
+    validate_spec,
+)
 
 
 class ContainerRuntime(Protocol):
@@ -59,7 +64,7 @@ class DockerRuntime:  # pragma: no cover - shells out to docker
         import asyncio
 
         proc = await asyncio.create_subprocess_exec(
-            "docker", "ps", "--filter", "label=kagura-agent", "-q",
+            "docker", "ps", "--filter", f"label={AGENT_LABEL}", "-q",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

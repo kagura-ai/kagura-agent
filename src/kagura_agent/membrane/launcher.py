@@ -19,7 +19,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import PurePath
 
-from kagura_agent.membrane.egress import EGRESS_NETWORK
+from kagura_agent.membrane.egress import EGRESS_NETWORK, EgressPolicy
+
+# Stamped on every launched container so the cockpit can reconstruct the session
+# registry from Docker alone after a restart (docs/operations.md). MUST match the
+# label `DockerRuntime.list()` filters on, or reconcile()/kill miss live agents.
+AGENT_LABEL = "kagura-agent"
 
 
 class MembraneViolation(RuntimeError):
@@ -209,6 +214,13 @@ def validate_spec(spec: LaunchSpec, *, project_root: str) -> LaunchSpec:
                 f"refusing to mount {mount.source!r}: could not resolve/validate path ({e})"
             ) from e
         resolved_mounts.append(replace(mount, source=source))
+    # Validate the egress allowlist at the membrane gate (fail-closed): reject
+    # wildcard/subdomain or malformed entries HERE, not only if a proxy later
+    # happens to build the policy. EgressPolicy's constructor is the single guard.
+    try:
+        EgressPolicy(allow=spec.egress_allow)
+    except ValueError as e:
+        raise MembraneViolation(f"refusing launch: invalid egress allowlist ({e})") from e
     return replace(spec, mounts=tuple(resolved_mounts))
 
 
@@ -266,6 +278,7 @@ def _network_args(spec: LaunchSpec) -> list[str]:
 
 def docker_run_args(spec: LaunchSpec) -> list[str]:
     args = ["docker", "run", "--rm"]
+    args += ["--label", AGENT_LABEL]  # so reconcile()/list() can find this container
     args += list(_HARDENING)
     args += ["--security-opt", f"seccomp={_seccomp_profile()}"]
     # Invariant: the produced args NEVER include host-reach escape flags
