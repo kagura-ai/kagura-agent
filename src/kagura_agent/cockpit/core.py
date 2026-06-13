@@ -59,11 +59,18 @@ class Cockpit:
         `PendingApprovalExists` if the thread already has a live pending request.
         """
         future = self._approvals.register(request)
-        await self._transport.send(
-            request.thread_id,
-            f"approval requested: {request.capability} ({request.reason}) "
-            "— reply /approve or /deny",
-        )
+        try:
+            await self._transport.send(
+                request.thread_id,
+                f"approval requested: {request.capability} ({request.reason}) "
+                "— reply /approve or /deny",
+            )
+        except BaseException:
+            # A failed surface must not strand the thread with an orphan pending
+            # (which would reject every later request until it expires). Roll back
+            # (deny the discarded future + remove the entry — fail-closed), re-raise.
+            self._approvals.resolve(request.thread_id, approved=False)
+            raise
         return future
 
     async def serve(self) -> None:

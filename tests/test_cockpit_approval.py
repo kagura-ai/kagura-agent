@@ -144,3 +144,26 @@ async def test_approve_with_no_pending_preserves_legacy_reply() -> None:
     await cockpit.handle(Event(thread_id="t1", text="/approve", is_thread_reply=True))
 
     assert transport.sent[-1] == ("t1", "no pending approval")
+
+
+async def test_request_capability_rolls_back_pending_when_send_fails() -> None:
+    # A transport failure while surfacing the request must NOT strand the thread
+    # with an orphan pending (which would reject every later request until it
+    # expires). Roll back the registration and re-raise.
+    class _BoomTransport:
+        async def listen(self):  # type: ignore[no-untyped-def]  # pragma: no cover
+            raise NotImplementedError
+
+        async def send(self, thread_id, text):  # type: ignore[no-untyped-def]
+            raise RuntimeError("transport down")
+
+        async def ask(self, thread_id, question, options):  # type: ignore[no-untyped-def]  # pragma: no cover
+            raise NotImplementedError
+
+    reg = PendingApprovalRegistry()
+    cockpit = Cockpit(_BoomTransport(), _FakeBrain(), InMemoryCheckpointStore(), approvals=reg)
+
+    with pytest.raises(RuntimeError):
+        await cockpit.request_capability(_REQ)
+
+    assert reg.pending("t1") is False  # rolled back — no orphan pending
