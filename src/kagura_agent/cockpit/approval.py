@@ -73,6 +73,17 @@ class PendingApprovalRegistry:
         self._purge_if_expired(thread_id)
         return thread_id in self._pending
 
+    def peek(self, thread_id: str) -> CapabilityRequest | None:
+        """The thread's pending request WITHOUT resolving it (None if none/expired).
+
+        Lets a caller write the decision audit *before* `resolve` makes the grant
+        observable to the awaiting consumer — so a grant is never minted without
+        its graduation-trail evidence.
+        """
+        self._purge_if_expired(thread_id)
+        entry = self._pending.get(thread_id)
+        return entry.request if entry is not None else None
+
     def resolve(self, thread_id: str, *, approved: bool) -> CapabilityRequest | None:
         """Resolve the thread's pending request, returning it (or None if none).
 
