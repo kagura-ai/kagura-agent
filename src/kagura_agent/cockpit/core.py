@@ -136,6 +136,15 @@ class Cockpit:
     async def _handle_deny(self, event: Event) -> None:
         await self._resolve_pending(event, approved=False)
 
+    def _sender_is_operator(self, event: Event) -> bool:
+        """Whether this event may drive a privileged control action.
+
+        When an operator is configured, only that identity qualifies; with no
+        operator (single-user CLI default) every event qualifies. Shared by the
+        approve/deny and /kill gates so destructive control surfaces enforce the
+        same operator-identity boundary (#14)."""
+        return self._operator_id is None or event.sender == self._operator_id
+
     async def _resolve_pending(self, event: Event, *, approved: bool) -> None:
         # A typed /approve|/deny resolves the thread's *pending* capability
         # request (registered by request_capability). No live pending — including
@@ -149,21 +158,38 @@ class Cockpit:
         # identity may resolve. A non-operator approve/deny is rejected and the
         # request is LEFT PENDING for the real operator — fail-closed against a
         # hijacked agent self-approving its own capability request.
-        if self._operator_id is not None and event.sender != self._operator_id:
+        if not self._sender_is_operator(event):
             await self._transport.send(
                 event.thread_id, "approval ignored: only the operator may approve/deny"
             )
             return
-        request = self._approvals.resolve(event.thread_id, approved=approved)
-        if request is None:  # raced/expired between the pending() check and resolve
+        # Write the audit BEFORE resolving: resolving sets the future the consumer
+        # awaits, which lets it mint the capability. If the graduation-trail write
+        # fails, we must NOT grant — peek (non-destructive) + record first, then
+        # resolve, so a grant never exists without its recorded evidence.
+        request = self._approvals.peek(event.thread_id)
+        if request is None:  # raced/expired between the pending() check and peek
             await self._transport.send(event.thread_id, "no pending approval")
             return
         if self._memory is not None:
             await record_decision(self._memory, request, approved=approved)
+        if self._approvals.resolve(event.thread_id, approved=approved) is None:
+            # Expired between peek and resolve (TTL). Fail-closed: nothing granted.
+            await self._transport.send(event.thread_id, "no pending approval")
+            return
         verb = "approved" if approved else "denied"
         await self._transport.send(event.thread_id, f"{verb} {request.capability}")
 
     async def _handle_kill(self, event: Event) -> None:
+        # /kill is destructive (tears down the container + closes the session), so
+        # it enforces the same operator-identity gate as approve/deny (#14): a
+        # non-operator — e.g. a hijacked agent posting /kill — must not be able to
+        # drive it. Fail-closed: reject and leave the session untouched.
+        if not self._sender_is_operator(event):
+            await self._transport.send(
+                event.thread_id, "kill ignored: only the operator may kill a session"
+            )
+            return
         rec = self._registry.get(event.thread_id)
         if rec is not None and rec.container_id and self._launcher is not None:
             await self._launcher.kill(rec.container_id)
