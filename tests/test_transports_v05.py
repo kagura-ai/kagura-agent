@@ -51,14 +51,14 @@ def test_discord_channel_message_is_launch_event() -> None:
     event = normalize_discord_message(
         author_id=1, bot_user_id=99, content="build it", channel_id=555, thread_id=None
     )
-    assert event == Event(thread_id="555", text="build it", is_thread_reply=False)
+    assert event == Event(thread_id="555", text="build it", is_thread_reply=False, sender="1")
 
 
 def test_discord_thread_message_is_continue_event() -> None:
     event = normalize_discord_message(
         author_id=1, bot_user_id=99, content="more", channel_id=555, thread_id=777
     )
-    assert event == Event(thread_id="777", text="more", is_thread_reply=True)
+    assert event == Event(thread_id="777", text="more", is_thread_reply=True, sender="1")
 
 
 def test_discord_ignores_bot_own_messages() -> None:
