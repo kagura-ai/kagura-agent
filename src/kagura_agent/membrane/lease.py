@@ -231,6 +231,19 @@ class CredentialBroker:
         same poison handle. Log, forget, and continue.
         """
         for lease in self._ledger.open_leases():
+            if lease.provider not in self._providers:
+                # The provider that minted this stateful token is no longer
+                # registered (config drift across a restart). We CANNOT revoke it,
+                # so we must NOT forget it — forgetting would drop a still-valid
+                # cloud token from tracking forever (a leak). Keep it tracked so a
+                # later sweep, once the provider is restored, can revoke it.
+                log.error(
+                    "sweep: no provider %r for open lease (handle=%s); left tracked "
+                    "(cannot revoke an unknown provider's token)",
+                    lease.provider,
+                    lease.handle,
+                )
+                continue
             try:
                 await self.release(lease)
             except Exception:

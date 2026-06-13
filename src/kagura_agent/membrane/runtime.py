@@ -61,12 +61,26 @@ class DockerRuntime:  # pragma: no cover - shells out to docker
         proc = await asyncio.create_subprocess_exec(
             "docker", "ps", "--filter", "label=kagura-agent", "-q",
             stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        out, _ = await proc.communicate()
+        out, err = await proc.communicate()
+        # Fail closed: a failed `docker ps` must NOT look like "no containers
+        # alive" — that would make restart reconciliation skip live agent
+        # containers. Raise so the caller treats enumeration as unavailable.
+        if proc.returncode != 0:
+            raise RuntimeError(f"docker ps failed: {err.decode().strip()}")
         return [line for line in out.decode().splitlines() if line]
 
     async def kill(self, container_id: str) -> None:
         import asyncio
 
-        proc = await asyncio.create_subprocess_exec("docker", "kill", container_id)
-        await proc.communicate()
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "kill", container_id,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        # A failed kill must surface, not be reported as success — the cockpit's
+        # /kill and the tiered hijack-containment path rely on this.
+        if proc.returncode != 0:
+            raise RuntimeError(f"docker kill {container_id} failed: {err.decode().strip()}")
