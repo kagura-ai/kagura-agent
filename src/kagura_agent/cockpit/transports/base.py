@@ -19,11 +19,17 @@ class Event:
 
     `is_thread_reply` is the structural signal the intent router uses to tell a
     fresh launch from a continuation — no language understanding required.
+
+    `sender` is the transport-specific identity of who sent the message (e.g. a
+    Slack user id), used by the cockpit to enforce operator-identity on HITL
+    approvals (#14). It is optional: the single-user CLI adapter leaves it None,
+    which the cockpit treats as "no operator gate" (backward-compatible).
     """
 
     thread_id: str
     text: str
     is_thread_reply: bool
+    sender: str | None = None
 
 
 class Transport(Protocol):
