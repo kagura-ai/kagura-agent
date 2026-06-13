@@ -109,14 +109,18 @@ _HARDENING = [
 # seccomp=unconfined. Docker reads this path on the HOST it runs on (not inside
 # the container). The profile ships as package data, so it resolves the same way
 # whether kagura-agent is installed editable or as a wheel; deploy-configurable
-# via KAGURA_SECCOMP_PROFILE.
+# via KAGURA_SECCOMP_PROFILE. (importlib.resources.files returns a real fs path
+# for a normally-installed/unzipped package, which docker needs; a zipapp/zip-
+# import deploy would need KAGURA_SECCOMP_PROFILE set to an extracted path.)
 _DEFAULT_SECCOMP_PROFILE = str(
     importlib.resources.files("kagura_agent.membrane") / "seccomp-agent.json"
 )
 
 
 def _seccomp_profile() -> str:
-    profile = os.environ.get("KAGURA_SECCOMP_PROFILE", _DEFAULT_SECCOMP_PROFILE)
+    # A set-but-empty/whitespace override is treated as unset → bundled default
+    # (an empty seccomp= would make docker error out, not fail safe).
+    profile = os.environ.get("KAGURA_SECCOMP_PROFILE", "").strip() or _DEFAULT_SECCOMP_PROFILE
     # Refuse the unconfined footgun: disabling seccomp would punch the very hole
     # this hardening exists to close, and is worse than the daemon default.
     if profile.strip().casefold() == "unconfined":

@@ -117,6 +117,18 @@ def test_docker_run_args_sets_an_explicit_seccomp_profile() -> None:
     assert "--security-opt" in args
     assert "seccomp=" in joined
     assert "seccomp=unconfined" not in joined
+    # exactly one seccomp= flag (no accidental duplicate)
+    assert sum(1 for a in args if a.startswith("seccomp=")) == 1
+
+
+def test_empty_seccomp_env_falls_back_to_bundled_default(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A set-but-empty override must not emit a bare `seccomp=` (docker errors);
+    # it falls back to the bundled default.
+    monkeypatch.setenv("KAGURA_SECCOMP_PROFILE", "   ")
+    joined = " ".join(docker_run_args(LaunchSpec(image="x")))
+    assert "seccomp=" in joined
+    assert "seccomp= " not in joined + " "  # not an empty value
+    assert "seccomp-agent.json" in joined
 
 
 def test_seccomp_profile_is_deploy_configurable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
