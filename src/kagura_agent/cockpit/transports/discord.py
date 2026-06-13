@@ -43,6 +43,10 @@ def normalize_discord_message(
     """
     if author_id == bot_user_id:
         return None
+    if not content.strip():
+        # Empty / whitespace-only message (attachment-only, sticker, embed). Drop
+        # it so it cannot become a billed empty-prompt brain LAUNCH.
+        return None
     sender = str(author_id)
     if thread_id is not None:
         return Event(

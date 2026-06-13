@@ -28,6 +28,19 @@ def test_normalize_carries_sender() -> None:
     assert event == Event(thread_id="1.0", text="hi", is_thread_reply=False, sender="U123")
 
 
+def test_normalize_drops_empty_text_message() -> None:
+    # A plain type=message with no text (attachment-only) must not become a
+    # billed empty-prompt LAUNCH.
+    assert normalize_slack_event(
+        {"type": "message", "user": "U1", "channel": "D1", "ts": "1.0"},
+        bot_user_id="UBOT",
+    ) is None
+    assert normalize_slack_event(
+        {"type": "message", "user": "U1", "channel": "D1", "ts": "1.0", "text": "   "},
+        bot_user_id="UBOT",
+    ) is None
+
+
 def test_normalize_thread_reply_carries_sender() -> None:
     event = normalize_slack_event(
         {

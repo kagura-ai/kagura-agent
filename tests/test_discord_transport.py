@@ -30,6 +30,16 @@ def test_normalize_thread_message_carries_sender() -> None:
     assert event == Event(thread_id="777", text="more", is_thread_reply=True, sender="7")
 
 
+def test_normalize_drops_empty_content_message() -> None:
+    # Attachment-only / sticker messages have empty content — drop, don't LAUNCH.
+    assert normalize_discord_message(
+        author_id=1, bot_user_id=99, content="", channel_id=555, thread_id=None
+    ) is None
+    assert normalize_discord_message(
+        author_id=1, bot_user_id=99, content="   ", channel_id=555, thread_id=777
+    ) is None
+
+
 def test_normalize_drops_bot_own_message() -> None:
     assert normalize_discord_message(
         author_id=99, bot_user_id=99, content="hi", channel_id=555, thread_id=None
