@@ -17,7 +17,7 @@ import os
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from pathlib import PurePosixPath
+from pathlib import PurePath
 
 from kagura_agent.membrane.egress import EGRESS_NETWORK
 
@@ -85,15 +85,18 @@ def _dangerous_mount_reason(resolved: str) -> str | None:
             return "a unix socket (host-reach vector)"
     except OSError:
         pass  # path missing / unstattable — fall through to the name-based guard
-    if PurePosixPath(lowered).name.endswith(".sock"):
+    if PurePath(lowered).name.endswith(".sock"):
         return "a unix socket (*.sock)"
     return None
 
 
 def _is_within(child: str, parent: str) -> bool:
-    # Both paths are already realpath-resolved by validate_spec.
-    child_p = PurePosixPath(child)
-    parent_p = PurePosixPath(parent)
+    # Both paths are already realpath-resolved by validate_spec. Use the native
+    # path flavor (PurePath) so containment is compared the same way realpath
+    # produced the strings: PurePosixPath on the Linux host target (no change),
+    # PureWindowsPath for cross-platform dev/test where realpath emits `C:\…`.
+    child_p = PurePath(child)
+    parent_p = PurePath(parent)
     return child_p == parent_p or parent_p in child_p.parents
 
 
