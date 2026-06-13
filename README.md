@@ -621,6 +621,9 @@ Two concerns live in dedicated docs to keep this file focused on design:
   questions (subscription-via-CLI automation; operator self-responsibility) and
   pre-launch action items held for CLO review. Flags questions, reaches no
   binding conclusion.
+- **[`docs/extending.md`](docs/extending.md)** — giving the agent new API hands:
+  custom MCP servers (`--mcp-config`), shell + egress allowlist, and per-task
+  cloud cred leasing — with the no-baked-secrets rule that spans all three.
 
 ---
 
@@ -671,6 +674,7 @@ kagura-agent/
 ├── README.md                       # this file — canonical design doc
 ├── docs/
 │   ├── operations.md               # incident runbook (hijack / key rotation)
+│   ├── extending.md                # giving the agent new API hands (MCP / egress / cred lease)
 │   └── legal.md                    # ToS + self-responsibility posture
 ├── pyproject.toml
 ├── src/
