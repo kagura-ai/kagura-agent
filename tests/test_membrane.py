@@ -8,6 +8,8 @@ The membrane guards *reach*, not in-container freedom. Hard invariants:
 - egress is default-deny + allowlist.
 """
 
+import socket
+
 import pytest
 
 from kagura_agent.membrane.egress import EGRESS_NETWORK, EgressDecision, EgressPolicy
@@ -15,6 +17,7 @@ from kagura_agent.membrane.launcher import (
     LaunchSpec,
     MembraneViolation,
     Mount,
+    _dangerous_mount_reason,
     docker_run_args,
     validate_spec,
 )
@@ -28,6 +31,115 @@ def test_docker_sock_mount_is_rejected() -> None:
     )
     with pytest.raises(MembraneViolation, match="docker.sock"):
         validate_spec(spec, project_root="/work/project")
+
+
+def test_containerd_sock_mount_is_rejected() -> None:
+    # The old substring guard only knew the literal "docker.sock"; other host
+    # control sockets (containerd, podman, crio) were missed.
+    # project_root contains the socket so ONLY the socket guard (not the
+    # containment check) can reject it — isolating the behavior under test.
+    spec = LaunchSpec(
+        image="kagura-agent:python",
+        mounts=(
+            Mount(
+                source="/run/containerd/containerd.sock",
+                target="/run/containerd/containerd.sock",
+            ),
+        ),
+    )
+    with pytest.raises(MembraneViolation):
+        validate_spec(spec, project_root="/run/containerd")
+
+
+def test_uppercase_docker_sock_mount_is_rejected() -> None:
+    # Case-insensitive mounts (e.g. /var/run/DOCKER.SOCK) defeated the old
+    # case-sensitive substring check. project_root contains it so only the
+    # socket guard can reject it.
+    spec = LaunchSpec(
+        image="kagura-agent:python",
+        mounts=(Mount(source="/var/run/DOCKER.SOCK", target="/var/run/docker.sock"),),
+    )
+    with pytest.raises(MembraneViolation):
+        validate_spec(spec, project_root="/var/run")
+
+
+def test_sock_suffix_inside_project_root_is_rejected() -> None:
+    # A *.sock even inside the project root is refused: the socket guard runs
+    # before the containment check, so a symlink/hardlink to a host socket
+    # placed inside the root cannot smuggle one in.
+    spec = LaunchSpec(
+        image="kagura-agent:python",
+        mounts=(Mount(source="/work/project/app.sock", target="/w/app.sock"),),
+    )
+    with pytest.raises(MembraneViolation):
+        validate_spec(spec, project_root="/work/project")
+
+
+def test_unix_socket_without_sock_extension_is_rejected_by_type(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # The real fix is type-based, not name-based: an actual unix socket whose
+    # name does NOT end in .sock (D-Bus/systemd-style) is still refused via
+    # os.stat + S_ISSOCK — closing the same name-matching weakness the issue
+    # is about. Lives inside project_root so only the socket-type guard can
+    # reject it.
+    if not hasattr(socket, "AF_UNIX"):  # pragma: no cover - e.g. Windows
+        pytest.skip("AF_UNIX sockets not supported on this platform")
+    sock_path = tmp_path / "bus"  # deliberately no .sock extension
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        srv.bind(str(sock_path))
+        spec = LaunchSpec(image="x", mounts=(Mount(source=str(sock_path), target="/w"),))
+        with pytest.raises(MembraneViolation):
+            validate_spec(spec, project_root=str(tmp_path))
+    finally:
+        srv.close()
+
+
+# --- the socket guard itself (cross-platform: tests the resolved-path check
+# directly, independent of realpath / project-root containment) ---------------
+
+
+def test_dangerous_mount_reason_flags_known_control_sockets() -> None:
+    for p in (
+        "/var/run/docker.sock",
+        "/run/docker.sock",
+        "/run/containerd/containerd.sock",
+    ):
+        assert _dangerous_mount_reason(p) is not None, p
+
+
+def test_dangerous_mount_reason_is_case_insensitive() -> None:
+    assert _dangerous_mount_reason("/var/run/DOCKER.SOCK") is not None
+
+
+def test_dangerous_mount_reason_flags_any_sock_suffix() -> None:
+    # Any *.sock is refused, even one that isn't a known control socket.
+    assert _dangerous_mount_reason("/work/project/app.sock") is not None
+
+
+def test_dangerous_mount_reason_allows_a_plain_directory() -> None:
+    assert _dangerous_mount_reason("/work/project/src") is None
+
+
+def test_dangerous_mount_reason_flags_socket_by_type_not_name(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # The real fix is type-based: an extension-less unix socket (D-Bus/systemd
+    # style) is caught via os.stat S_ISSOCK, not its name.
+    import os
+    import stat as stat_mod
+
+    target = str(tmp_path / "bus")  # no .sock extension
+
+    class _SockStat:
+        st_mode = stat_mod.S_IFSOCK | 0o600
+
+    real_stat = os.stat
+
+    def fake_stat(path, *a, **k):  # type: ignore[no-untyped-def]
+        if str(path) == target:
+            return _SockStat()
+        return real_stat(path, *a, **k)
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+    assert _dangerous_mount_reason(target) is not None
 
 
 def test_host_fs_outside_project_root_is_rejected() -> None:
