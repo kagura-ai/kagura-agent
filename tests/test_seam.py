@@ -26,7 +26,7 @@ def _imported_names(source: str) -> set[str]:
 
 
 def test_session_does_not_import_the_sdk_or_claude_brain() -> None:
-    source = Path(session_mod.__file__).read_text()
+    source = Path(session_mod.__file__).read_text(encoding="utf-8")
     imports = _imported_names(source)
 
     leaked_roots = {name for name in imports if name.split(".")[0] in FORBIDDEN_ROOTS}

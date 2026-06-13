@@ -3,7 +3,7 @@
 # Distributed as a recipe (this Dockerfile), not a prebuilt image, to avoid the
 # redistribution terms of bundled tooling (CLO L-H1). Pin the digest below for
 # reproducibility; the launcher injects creds/mounts/egress per run.
-FROM debian:bookworm-slim@sha256:0000000000000000000000000000000000000000000000000000000000000000
+FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716
 
 # Tools are *baked*; credentials and first-party code are *injected* at run time.
 RUN apt-get update \
