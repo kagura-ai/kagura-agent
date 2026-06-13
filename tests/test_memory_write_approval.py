@@ -12,8 +12,10 @@ import asyncio
 
 from kagura_agent.cockpit.approval import PendingApprovalRegistry
 from kagura_agent.cockpit.core import Cockpit
+from kagura_agent.cockpit.hitl import CapabilityRequest
 from kagura_agent.cockpit.memory_write import MemoryWriteApprover
 from kagura_agent.cockpit.transports.cli import CliTransport
+from kagura_agent.mcp.memory_cloud import LocalMemoryClient
 from kagura_agent.membrane.lease import Budget, CredentialBroker
 from kagura_agent.membrane.providers import MemoryCloudProvider
 from kagura_agent.patterns.checkpoint import InMemoryCheckpointStore
@@ -89,6 +91,71 @@ async def test_timeout_does_not_grant() -> None:
 
     assert result is None  # fail-closed on no operator decision
     assert calls == []
+
+
+async def test_timeout_clears_pending_no_orphan() -> None:
+    # On timeout the approver must WITHDRAW the pending (not leave an orphan that
+    # lingers until the registry TTL). An orphan would (a) let a late /approve
+    # record a misleading "approved" with nothing granted, and (b) wedge the next
+    # request with PendingApprovalExists. ttl(300) >> timeout(0.01), so without the
+    # withdraw the entry would still be present here.
+    reg = PendingApprovalRegistry()
+    cockpit = _cockpit(CliTransport(inbox=[]), reg)
+
+    async def grant():  # type: ignore[no-untyped-def]  # pragma: no cover - must NOT run
+        return object()
+
+    assert await MemoryWriteApprover(cockpit, grant, timeout=0.01).request("t1", "r") is None
+    assert reg.pending("t1") is False  # withdrawn, not orphaned
+
+
+async def test_timeout_allows_rerequest_without_pending_exists() -> None:
+    reg = PendingApprovalRegistry()
+    cockpit = _cockpit(CliTransport(inbox=[]), reg)
+    sentinel = object()
+
+    async def grant():  # type: ignore[no-untyped-def]
+        return sentinel
+
+    # first request times out (nobody resolves) → must not strand a pending
+    assert await MemoryWriteApprover(cockpit, grant, timeout=0.01).request("t1", "r1") is None
+
+    # a second request on the SAME thread must register cleanly, not raise
+    # PendingApprovalExists left behind by the timed-out first request
+    task = asyncio.create_task(MemoryWriteApprover(cockpit, grant, timeout=5).request("t1", "r2"))
+    await _drive_until_pending(reg, "t1")
+    reg.resolve("t1", approved=True)
+    assert await task is sentinel
+
+
+async def test_withdraw_pending_records_denied_and_clears() -> None:
+    reg = PendingApprovalRegistry()
+    memory = LocalMemoryClient()
+    cockpit = Cockpit(
+        CliTransport(inbox=[]),
+        _FakeBrain(),
+        InMemoryCheckpointStore(),
+        approvals=reg,
+        memory=memory,
+    )
+    await cockpit.request_capability(
+        CapabilityRequest(thread_id="t1", capability="memory:write", reason="r")
+    )
+
+    await cockpit.withdraw_pending("t1")
+
+    assert reg.pending("t1") is False  # cleared
+    trail = await memory.recall("memory:write", tags=("graduation-trail",))
+    assert trail and "denied" in trail[0].text  # audit symmetry: timeout logs a deny
+
+
+async def test_withdraw_pending_with_no_pending_is_a_noop() -> None:
+    reg = PendingApprovalRegistry()
+    cockpit = _cockpit(CliTransport(inbox=[]), reg)
+
+    await cockpit.withdraw_pending("ghost")  # must not raise
+
+    assert reg.pending("ghost") is False
 
 
 async def test_approved_acquires_memory_write_lease_through_the_broker() -> None:

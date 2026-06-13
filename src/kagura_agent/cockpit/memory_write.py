@@ -46,7 +46,12 @@ class MemoryWriteApprover:
         try:
             decision = await asyncio.wait_for(future, self._timeout)
         except TimeoutError:
-            return None  # no operator decision within the window — fail-closed
+            # No operator decision within the window — fail-closed. Withdraw the
+            # pending so the timed-out request leaves no orphan in the registry (a
+            # late /approve can't record a false "approved", and a re-request isn't
+            # wedged by PendingApprovalExists until the registry TTL elapses).
+            await self._cockpit.withdraw_pending(thread_id)
+            return None
         if not decision.approved:
             return None  # operator denied — fail-closed
         return await self._grant()  # approved → mint the write-approved lease

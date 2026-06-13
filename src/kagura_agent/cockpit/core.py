@@ -78,6 +78,18 @@ class Cockpit:
             raise
         return future
 
+    async def withdraw_pending(self, thread_id: str) -> None:
+        """Fail-closed teardown of a pending approval the *producer* gave up on
+        (e.g. a consumer's `asyncio.wait_for` timed out). Resolves it denied and
+        clears the registry entry, so (a) a late `/approve` cannot record a
+        misleading "approved" with nothing actually granted, and (b) the next
+        `request_capability` for the thread is not wedged by
+        `PendingApprovalExists` until the registry TTL elapses. Records the
+        timeout as a denial on the graduation-trail for audit symmetry."""
+        request = self._approvals.resolve(thread_id, approved=False)
+        if request is not None and self._memory is not None:
+            await record_decision(self._memory, request, approved=False)
+
     async def serve(self) -> None:
         # Per-event isolation: the cockpit is the sole message consumer and the
         # sole HITL surface, so one bad event must never silently kill the loop
