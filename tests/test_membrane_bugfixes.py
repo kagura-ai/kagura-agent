@@ -12,6 +12,15 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+from kagura_agent.membrane.launcher import (
+    AGENT_LABEL,
+    LaunchSpec,
+    MembraneViolation,
+    docker_run_args,
+    validate_spec,
+)
 from kagura_agent.membrane.lease import Budget, CredentialBroker, LeaseLedger
 from kagura_agent.membrane.providers import CloudflareTokenProvider
 
@@ -74,3 +83,33 @@ async def test_sweep_forgets_when_present_provider_revoke_fails() -> None:
     await CredentialBroker({"cf": cf}, clock=lambda: 0.0, ledger=ledger).sweep()
 
     assert ledger.open_leases() == []
+
+
+# --- launcher: stamp the agent label so reconcile()/list() find containers ---
+
+def test_docker_run_args_stamps_agent_label() -> None:
+    args = docker_run_args(LaunchSpec(image="img:tag"))
+    # The label DockerRuntime.list() filters on MUST be present, or reconcile()
+    # and the hijack-containment kill path silently miss live agent containers.
+    assert "--label" in args
+    assert AGENT_LABEL in args
+    i = args.index("--label")
+    assert args[i + 1] == AGENT_LABEL
+
+
+# --- launcher: egress allowlist is validated fail-closed at the gate ---------
+
+def test_validate_spec_rejects_wildcard_egress() -> None:
+    spec = LaunchSpec(image="img", egress_allow=("*.evil.com",))
+    with pytest.raises(MembraneViolation, match="egress allowlist"):
+        validate_spec(spec, project_root="/tmp")
+
+
+def test_validate_spec_accepts_plain_host_egress() -> None:
+    spec = LaunchSpec(image="img", egress_allow=("api.example.com",))
+    assert validate_spec(spec, project_root="/tmp").egress_allow == ("api.example.com",)
+
+
+def test_validate_spec_accepts_empty_egress() -> None:
+    # Sealed (no egress) is the default and must remain valid.
+    assert validate_spec(LaunchSpec(image="img"), project_root="/tmp").egress_allow == ()
