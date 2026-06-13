@@ -38,3 +38,6 @@ buffer/
 *.sqlite
 *.sqlite-journal
 logs/
+
+# kagura-engineer local dev config
+repo.yaml
