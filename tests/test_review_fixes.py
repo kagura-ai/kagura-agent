@@ -263,7 +263,36 @@ def test_transport_listen_is_async_generator() -> None:
     assert inspect.isasyncgenfunction(DiscordTransport.listen)
 
 
-async def test_slack_send_is_honest_stub() -> None:
-    transport = SlackTransport(app=None, bot_user_id="U")
-    with pytest.raises(NotImplementedError):
-        await transport.send("c", "hi")
+class _FakeSlackClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []  # type: ignore[type-arg]
+
+    async def chat_postMessage(self, **kw: object) -> None:
+        self.calls.append(dict(kw))
+
+
+class _FakeSlackApp:
+    """Minimal stand-in for slack_bolt's AsyncApp: no-op decorators + a client."""
+
+    def __init__(self) -> None:
+        self.client = _FakeSlackClient()
+
+    def event(self, _name: str):  # type: ignore[no-untyped-def]
+        return lambda fn: fn
+
+    def action(self, _spec: object):  # type: ignore[no-untyped-def]
+        return lambda fn: fn
+
+
+async def test_slack_send_posts_to_recorded_channel() -> None:
+    app = _FakeSlackApp()
+    transport = SlackTransport(app=app, bot_user_id="U", channel_map={"1.0": "C9"})
+    await transport.send("1.0", "hello")
+    assert app.client.calls == [{"channel": "C9", "thread_ts": "1.0", "text": "hello"}]
+
+
+async def test_slack_send_unknown_thread_fails_loud() -> None:
+    # No recorded channel for the thread → raise, never post to a guessed channel.
+    transport = SlackTransport(app=_FakeSlackApp(), bot_user_id="U")
+    with pytest.raises(KeyError):
+        await transport.send("ghost", "hi")
