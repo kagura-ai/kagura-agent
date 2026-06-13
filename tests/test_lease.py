@@ -209,6 +209,16 @@ async def test_broker_refuses_future_privileged_memory_scope_fail_closed() -> No
         await broker.acquire("memory", scope="memory:admin", ttl=300, budget=Budget(3600))
 
 
+async def test_broker_allows_privileged_scope_on_write_approved_provider() -> None:
+    # The generalized predicate must still ALLOW a privileged scope (not just the
+    # literal memory:write) when the provider IS write-approved — guards against a
+    # regression that narrows the approved path back to a single scope string.
+    provider = MemoryCloudProvider(exchange=_memory_exchange, write_approved=True)
+    broker = CredentialBroker({"memory": provider}, clock=_clock)
+    lease = await broker.acquire("memory", scope="memory:admin", ttl=300, budget=Budget(3600))
+    assert lease.cred == "tok-memory:admin"
+
+
 async def test_broker_renew_also_enforces_the_write_lock() -> None:
     # renew goes through the same gate: a hand-crafted memory:write lease on a
     # look-alike provider is refused at renew, not just at acquire.
