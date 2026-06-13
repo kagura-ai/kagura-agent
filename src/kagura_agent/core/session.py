@@ -53,6 +53,9 @@ class Session:
                 messages.append(event.text)
             elif isinstance(event, DoneEvent):
                 done = event
+                break  # DoneEvent is terminal: stop consuming so post-terminal
+                # narration can't be recorded nor the result overwritten by a
+                # second Done (a misbehaving brain must not corrupt the result).
         if done is None:
             raise SessionError(f"brain ended without DoneEvent for session {task.session_id!r}")
 
