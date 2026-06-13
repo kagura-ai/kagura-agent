@@ -71,11 +71,10 @@ def _dangerous_mount_reason(resolved: str) -> str | None:
     stat'd (where type can't be checked).
 
     Scope: this validates the *resolved mount source itself*. Mounting a parent
-    *directory* that merely contains a socket is governed by the project-root
-    containment check (`_is_within`) — host control sockets live outside the
-    workspace, so their parent dirs are rejected there. Recursively scanning a
-    mounted subtree for sockets is a separate, broader hardening (tracked apart
-    from this name/type-matching fix).
+    *directory* whose subtree merely contains a socket/device node is handled
+    separately by `_subtree_special_file_reason` (defense-in-depth), in addition
+    to the project-root containment check (`_is_within`) that keeps host control
+    sockets — which live outside the workspace — out in the first place.
     """
     lowered = resolved.lower()
     if lowered in _DANGEROUS_SOCKETS:
@@ -87,6 +86,70 @@ def _dangerous_mount_reason(resolved: str) -> str | None:
         pass  # path missing / unstattable — fall through to the name-based guard
     if PurePath(lowered).name.endswith(".sock"):
         return "a unix socket (*.sock)"
+    return None
+
+
+# Bounds for the subtree scan below. A real workspace is well under these; a tree
+# that exceeds either is refused (fail-closed) rather than scanned unbounded or
+# silently passed. Sized to verify normal projects without letting a pathological
+# (deep/huge) tree stall validation.
+_MAX_SUBTREE_ENTRIES = 50_000
+_MAX_SUBTREE_DEPTH = 64
+
+
+def _subtree_special_file_reason(directory: str) -> str | None:
+    """Why this directory's subtree is unsafe to bind-mount, else None.
+
+    Defense-in-depth beyond `_dangerous_mount_reason` (which inspects only the
+    mount *source* itself): a directory inside the project root could still hide
+    a unix socket or device node (char/block) somewhere in its subtree, and a
+    bind mount exposes those real inodes to the container — a host-reach / escape
+    vector. We walk the subtree and refuse it if any such special file is found.
+
+    Symlinks are NOT followed: a bind mount carries the actual inodes, and an
+    absolute symlink inside it re-roots into the *container's* namespace at run
+    time (so it is not itself a host-reach vector here); following them would also
+    risk walking out of the tree or looping. Only real socket/device inodes in
+    the tree matter.
+
+    The walk is BOUNDED on both total entries and depth and FAILS CLOSED on a
+    cap: a subtree too large/deep to fully verify is refused, never waved through
+    as "clean", and the bound stops a pathological tree from stalling validation.
+    """
+    entries = 0
+    stack: list[tuple[str, int]] = [(directory, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if depth > _MAX_SUBTREE_DEPTH:
+            return (
+                f"subtree exceeds the {_MAX_SUBTREE_DEPTH}-level depth cap "
+                "(cannot verify it is free of sockets/device nodes)"
+            )
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    entries += 1
+                    if entries > _MAX_SUBTREE_ENTRIES:
+                        return (
+                            f"subtree exceeds the {_MAX_SUBTREE_ENTRIES}-entry scan cap "
+                            "(cannot verify it is free of sockets/device nodes)"
+                        )
+                    if entry.is_symlink():
+                        continue  # see docstring: not a host-reach vector via bind mount
+                    try:
+                        mode = entry.stat(follow_symlinks=False).st_mode
+                    except OSError:
+                        # An entry we cannot stat is one we cannot clear → fail closed.
+                        return f"contains an entry that could not be inspected: {entry.path!r}"
+                    if stat.S_ISSOCK(mode):
+                        return f"subtree contains a unix socket: {entry.path!r} (host-reach vector)"
+                    if stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+                        return f"subtree contains a device node: {entry.path!r} (host-reach vector)"
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append((entry.path, depth + 1))
+        except OSError as e:
+            # A directory we must verify but cannot list → fail closed.
+            return f"subtree could not be fully scanned ({e})"
     return None
 
 
@@ -130,6 +193,15 @@ def validate_spec(spec: LaunchSpec, *, project_root: str) -> LaunchSpec:
                     f"refusing to mount {mount.source!r} (-> {source!r}): "
                     f"outside project root {project_root!r}"
                 )
+            # Defense-in-depth: a within-root *directory* could still hide a unix
+            # socket or device node in its subtree (the per-path guard above only
+            # checked the source itself). Walk it (bounded, fail-closed) and refuse.
+            if os.path.isdir(source):
+                subtree_reason = _subtree_special_file_reason(source)
+                if subtree_reason is not None:
+                    raise MembraneViolation(
+                        f"refusing to mount {mount.source!r} (-> {source!r}): {subtree_reason}"
+                    )
         except MembraneViolation:
             raise
         except Exception as e:
