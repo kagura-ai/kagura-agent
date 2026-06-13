@@ -30,6 +30,11 @@ def claude_sdk_available(
     Pure and SDK-free (like `_mcp_option_kwargs`) so it is unit-testable by
     injecting `find_spec`; the real `find_spec` only inspects import metadata and
     never triggers the heavy `claude_agent_sdk` import.
+
+    Known limit: this confirms the module is *findable*, not that it imports
+    cleanly. A corrupt/partial install would pass here yet still raise at the real
+    import in `query()` (falling back to the generic error path). The dominant
+    case — the `claude` extra simply not installed — is fully covered.
     """
     return find_spec(_CLAUDE_SDK_MODULE) is not None
 

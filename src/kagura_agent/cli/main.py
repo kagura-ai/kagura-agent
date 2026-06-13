@@ -105,8 +105,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
         except BrainUnavailable as exc:
             # Expected setup condition (optional brain not installed) — surface the
             # actionable install hint, not a raw traceback or generic "internal error".
+            # Exit 3 (not 2) so a wrapping script can tell this apart from argparse's
+            # own usage-error exit code (2).
             print(str(exc), file=sys.stderr)
-            return 2
+            return 3
         print(result)
         return 0
     return 1

@@ -96,7 +96,7 @@ def test_main_run_surfaces_brain_unavailable(monkeypatch, capsys) -> None:  # ty
     monkeypatch.setattr(cli_main, "_run_task", _boom)
     rc = main(["run", "do a thing"])
 
-    assert rc != 0
+    assert rc == 3  # distinct from argparse's usage-error code (2)
     err = capsys.readouterr().err
     assert "claude" in err.lower()
     assert "--extra claude" in err or "kagura-agent[claude]" in err
