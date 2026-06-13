@@ -71,8 +71,12 @@ def make_default_brain(  # pragma: no cover - requires the SDK
     non-memory MCP servers; memory itself is reached via the CLI, not here.
     """
 
-    from kagura_agent.core.brain.sdk_engine import SdkEngine
+    from kagura_agent.core.brain.sdk_engine import SdkEngine, require_claude_sdk
 
+    # Fail-fast with an actionable BrainUnavailable if the optional `claude` extra
+    # is missing — before the cockpit loop runs, so the operator gets an install
+    # hint instead of a raw ModuleNotFoundError surfaced as "internal error".
+    require_claude_sdk()
     return ClaudeBrain(
         engine=SdkEngine(mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
     )
