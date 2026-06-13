@@ -57,7 +57,7 @@ packages = ["kagura_agent"]
 # (which strict's warn_unused_ignores flips to an error wherever a dep happens to
 # be present). The claude SDK stays on its own inline ignore by design.
 [[tool.mypy.overrides]]
-module = ["boto3", "google.*", "jwt", "httpx", "requests.*"]
+module = ["boto3", "google.*", "jwt", "httpx", "requests.*", "discord", "discord.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]
