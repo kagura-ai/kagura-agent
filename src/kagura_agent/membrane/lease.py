@@ -15,10 +15,11 @@ The broker absorbs two provider shapes behind one interface:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Protocol
 
+from kagura_agent.membrane.cred_env import EnvCredProvider
 from kagura_agent.membrane.providers import MemoryCloudProvider, MemoryWriteLocked
 
 log = logging.getLogger(__name__)
@@ -127,6 +128,38 @@ class CredentialBroker:
         """Stateful leases the ledger is currently tracking (for the sweeper and
         for observability — exposed so callers need not reach into the ledger)."""
         return self._ledger.open_leases()
+
+    def container_env(self, leases: Iterable[Lease]) -> dict[str, str]:
+        """Translate live leases into the env the launcher injects (#39).
+
+        Each lease's cred is mapped to env vars by its provider's
+        ``cred_to_env`` (only providers implementing ``EnvCredProvider`` — memory
+        is reached by the CLI, not a generic env var, so it is skipped). The
+        result feeds ``LaunchSpec.env`` -> ``docker_run_args`` -> ``-e KEY=VALUE``.
+
+        Fail-closed on ambiguity, not silently:
+        - an unknown provider name raises ``KeyError`` (the lease was minted
+          outside this broker's registry — never wave it through);
+        - two leases setting the *same* env var to *different* values raise
+          ``ValueError`` (a silent last-writer-wins would hand the container a
+          half-overwritten cred);
+        - a checkpoint-safe lease (``cred is None``) contributes nothing.
+        """
+        env: dict[str, str] = {}
+        for lease in leases:
+            if lease.cred is None:
+                continue
+            provider = self._providers[lease.provider]  # KeyError if unknown — fail-closed
+            if not isinstance(provider, EnvCredProvider):
+                continue  # e.g. memory: no generic container env mapping
+            for key, value in provider.cred_to_env(lease.cred).items():
+                if key in env and env[key] != value:
+                    raise ValueError(
+                        f"container env conflict on {key!r}: two leases set it to "
+                        "different values (refusing a half-overwritten cred)"
+                    )
+                env[key] = value
+        return env
 
     async def acquire(self, provider: str, *, scope: str, ttl: int, budget: Budget) -> Lease:
         p = self._providers[provider]
