@@ -22,7 +22,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
-from kagura_agent.cockpit.transports.base import Event
+from kagura_agent.cockpit.transports.base import Event, click_authorized
 
 # Stable identifier for the HITL approval action block, so the action handler can
 # tell an approval click apart from any other interactive component.
@@ -130,12 +130,15 @@ class SlackTransport:  # pragma: no cover - requires slack-bolt + a workspace
         app: Any,
         bot_user_id: str,
         channel_map: dict[str, str] | None = None,
+        *,
+        operator_id: str | None = None,
     ) -> None:
         self._app = app
         self._bot_user_id = bot_user_id
         self._channels: dict[str, str] = dict(channel_map or {})
         self._pending: dict[str, asyncio.Future[str]] = {}
         self._inbox: asyncio.Queue[Event] = asyncio.Queue()
+        self._operator_id = operator_id
         self._wire_handlers()
 
     def _wire_handlers(self) -> None:
@@ -154,6 +157,11 @@ class SlackTransport:  # pragma: no cover - requires slack-bolt + a workspace
 
         async def _on_choice(ack: Any, body: dict[str, Any], **_: Any) -> None:
             await ack()
+            # Operator-identity gate (#14) for the button path: ignore a click
+            # from anyone but the operator (leave the request pending).
+            clicker = (body.get("user") or {}).get("id")
+            if not click_authorized(clicker, self._operator_id):
+                return
             thread_id = (body.get("message") or {}).get("thread_ts") or (
                 body.get("container") or {}
             ).get("thread_ts")
@@ -180,6 +188,13 @@ class SlackTransport:  # pragma: no cover - requires slack-bolt + a workspace
     async def ask(self, thread_id: str, question: str, options: list[str]) -> str:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
+        # Fail an outstanding request for the same thread instead of silently
+        # overwriting it — its awaiter would otherwise hang forever.
+        superseded = self._pending.get(thread_id)
+        if superseded is not None and not superseded.done():
+            superseded.set_exception(
+                RuntimeError("approval superseded by a newer request on this thread")
+            )
         self._pending[thread_id] = future
         await self._app.client.chat_postMessage(
             channel=resolve_channel(thread_id, self._channels),
