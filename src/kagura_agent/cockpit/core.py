@@ -40,6 +40,7 @@ class Cockpit:
         launcher: _Killer | None = None,
         approvals: PendingApprovalRegistry | None = None,
         memory: MemoryClient | None = None,
+        operator_id: str | None = None,
     ) -> None:
         self._transport = transport
         self._brain = brain
@@ -48,6 +49,10 @@ class Cockpit:
         self._launcher = launcher
         self._approvals = approvals or PendingApprovalRegistry()
         self._memory = memory
+        # When set, only an event whose `sender` matches may resolve a pending
+        # HITL approval (#14: prevents a hijacked agent self-approving). None =
+        # single-user CLI default: no operator gate (#32-compatible).
+        self._operator_id = operator_id
 
     async def request_capability(self, request: CapabilityRequest) -> asyncio.Future[Decision]:
         """Producer seam (#32): register a pending approval, surface it to the
@@ -72,6 +77,18 @@ class Cockpit:
             self._approvals.resolve(request.thread_id, approved=False)
             raise
         return future
+
+    async def withdraw_pending(self, thread_id: str) -> None:
+        """Fail-closed teardown of a pending approval the *producer* gave up on
+        (e.g. a consumer's `asyncio.wait_for` timed out). Resolves it denied and
+        clears the registry entry, so (a) a late `/approve` cannot record a
+        misleading "approved" with nothing actually granted, and (b) the next
+        `request_capability` for the thread is not wedged by
+        `PendingApprovalExists` until the registry TTL elapses. Records the
+        timeout as a denial on the graduation-trail for audit symmetry."""
+        request = self._approvals.resolve(thread_id, approved=False)
+        if request is not None and self._memory is not None:
+            await record_decision(self._memory, request, approved=False)
 
     async def serve(self) -> None:
         # Per-event isolation: the cockpit is the sole message consumer and the
@@ -125,8 +142,20 @@ class Cockpit:
         # one that already expired — keeps the legacy reply and grants nothing
         # (fail-closed); never fall through to LAUNCH (which would spin a brain
         # run on the literal "/approve" and clobber the session record).
+        if not self._approvals.pending(event.thread_id):
+            await self._transport.send(event.thread_id, "no pending approval")
+            return
+        # Operator-identity gate (#14): when an operator is configured, only that
+        # identity may resolve. A non-operator approve/deny is rejected and the
+        # request is LEFT PENDING for the real operator — fail-closed against a
+        # hijacked agent self-approving its own capability request.
+        if self._operator_id is not None and event.sender != self._operator_id:
+            await self._transport.send(
+                event.thread_id, "approval ignored: only the operator may approve/deny"
+            )
+            return
         request = self._approvals.resolve(event.thread_id, approved=approved)
-        if request is None:
+        if request is None:  # raced/expired between the pending() check and resolve
             await self._transport.send(event.thread_id, "no pending approval")
             return
         if self._memory is not None:
