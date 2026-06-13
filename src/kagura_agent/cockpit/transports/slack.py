@@ -1,20 +1,41 @@
 """Slack transport — Bolt, Socket Mode (no public URL). A pure addition.
 
-The testable core is `normalize_slack_event`: it maps a Slack events-API
-`message` payload onto the shared `Event`, deriving the structural
-launch/continue signal and dropping the bot's own messages. The Bolt wiring is
-lazy-imported glue, exercised in deployment rather than unit tests.
+Split into two layers, matching the codebase convention:
+
+- **pure, unit-tested helpers** — `normalize_slack_event` (payload -> `Event`,
+  now carrying the sender for the operator-identity gate), `resolve_channel`
+  (thread_ts -> channel id), `approval_blocks` / `action_value` (the ✅/❌ HITL
+  buttons and reading the click back).
+- **`SlackTransport`** — the Bolt/WebClient I/O that wires those helpers to a
+  live workspace. It needs slack-bolt + a workspace, so it is exercised at
+  deployment, not in unit tests (`# pragma: no cover`).
+
+Operator identity (#14): `normalize_slack_event` puts the Slack user id on
+`Event.sender`; the deployer constructs `Cockpit(operator_id="<U…>")` so only
+that user's `/approve` resolves a pending request. A separate bot id
+(`@kagura-agent`) keeps this cockpit distinct from any ingestion bot.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
 from kagura_agent.cockpit.transports.base import Event
 
+# Stable identifier for the HITL approval action block, so the action handler can
+# tell an approval click apart from any other interactive component.
+APPROVAL_ACTION_ID = "kagura_hitl_choice"
+
 
 def normalize_slack_event(payload: dict[str, Any], *, bot_user_id: str) -> Event | None:
+    """Map a Slack events-API `message` payload onto the shared `Event`.
+
+    Derives the structural launch/continue signal, drops the bot's own messages,
+    and carries the sender (`payload["user"]`) so the cockpit can enforce
+    operator identity on HITL approvals (#14).
+    """
     if payload.get("type") != "message":
         return None
     if payload.get("subtype"):
@@ -30,27 +51,133 @@ def normalize_slack_event(payload: dict[str, Any], *, bot_user_id: str) -> Event
     thread_ts = payload.get("thread_ts")
     thread_id = thread_ts or ts
     is_thread_reply = thread_ts is not None and thread_ts != ts
-    return Event(thread_id=thread_id, text=payload.get("text", ""), is_thread_reply=is_thread_reply)
+    return Event(
+        thread_id=thread_id,
+        text=payload.get("text", ""),
+        is_thread_reply=is_thread_reply,
+        sender=payload.get("user"),
+    )
+
+
+def resolve_channel(thread_id: str, channel_map: dict[str, str]) -> str:
+    """The Slack channel a reply on `thread_id` must go to.
+
+    `Event` keys on the thread ts and does not carry the channel, so the
+    transport records thread_id -> channel as events arrive. Fail loud on an
+    unknown thread rather than guess a channel — posting to the wrong channel is
+    worse than raising.
+    """
+    try:
+        return channel_map[thread_id]
+    except KeyError:
+        raise KeyError(
+            f"no channel known for thread {thread_id!r}; cannot post (the thread "
+            "must have been observed via listen() first)"
+        ) from None
+
+
+def approval_blocks(question: str, options: list[str]) -> list[dict[str, Any]]:
+    """Block Kit: the question plus one button per option (value = the option).
+
+    The click is read back by `action_value`; the option string round-trips
+    through the button `value`, so the cockpit's HITL contract (`ask` returns the
+    chosen option) holds without a side lookup table.
+    """
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": question}},
+        {
+            "type": "actions",
+            "block_id": APPROVAL_ACTION_ID,
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": f"{APPROVAL_ACTION_ID}:{opt}",
+                    "text": {"type": "plain_text", "text": opt},
+                    "value": opt,
+                }
+                for opt in options
+            ],
+        },
+    ]
+
+
+def action_value(payload: dict[str, Any]) -> str:
+    """Extract the clicked option from a Slack interactive-action payload."""
+    actions = payload.get("actions") or []
+    if not actions:
+        raise ValueError("Slack action payload has no actions")
+    return str(actions[0]["value"])
 
 
 class SlackTransport:  # pragma: no cover - requires slack-bolt + a workspace
-    """Socket-Mode adapter. Holds the bot token; lives only in the cockpit."""
+    """Socket-Mode adapter. Holds the bot token; lives only in the cockpit.
 
-    def __init__(self, app: Any, bot_user_id: str) -> None:
+    `app` is a `slack_bolt.async_app.AsyncApp`. Channels are learned from inbound
+    events (`listen`) and reused by `send`/`ask`, so a reply always lands on the
+    thread it belongs to. `ask` posts ✅/❌ buttons and blocks on a future the
+    action handler resolves.
+    """
+
+    def __init__(
+        self,
+        app: Any,
+        bot_user_id: str,
+        channel_map: dict[str, str] | None = None,
+    ) -> None:
         self._app = app
         self._bot_user_id = bot_user_id
+        self._channels: dict[str, str] = dict(channel_map or {})
+        self._pending: dict[str, asyncio.Future[str]] = {}
+        self._inbox: asyncio.Queue[Event] = asyncio.Queue()
+        self._wire_handlers()
+
+    def _wire_handlers(self) -> None:
+        # Registered via explicit calls rather than `@self._app.event(...)`
+        # decorator syntax: `self._app` is Any (Bolt is an optional dep), and
+        # decorator syntax on an untyped callable trips mypy strict's
+        # disallow_untyped_decorators. A plain call of an Any is fine.
+        async def _on_message(event: dict[str, Any], **_: Any) -> None:
+            normalized = normalize_slack_event(event, bot_user_id=self._bot_user_id)
+            if normalized is None:
+                return
+            channel = event.get("channel")
+            if channel is not None:
+                self._channels[normalized.thread_id] = channel
+            await self._inbox.put(normalized)
+
+        async def _on_choice(ack: Any, body: dict[str, Any], **_: Any) -> None:
+            await ack()
+            thread_id = (body.get("message") or {}).get("thread_ts") or (
+                body.get("container") or {}
+            ).get("thread_ts")
+            if thread_id is None:
+                return
+            future = self._pending.pop(thread_id, None)
+            if future is not None and not future.done():
+                future.set_result(action_value(body))
+
+        self._app.event("message")(_on_message)
+        self._app.action({"block_id": APPROVAL_ACTION_ID})(_on_choice)
 
     async def listen(self) -> AsyncIterator[Event]:
-        raise NotImplementedError("wired via Bolt's event handlers in deployment")
-        yield  # unreachable — makes this an async generator, not a coroutine
+        while True:
+            yield await self._inbox.get()
 
     async def send(self, thread_id: str, text: str) -> None:
-        # Honest stub: `Event` does not yet carry the Slack channel id (it keys on
-        # thread ts), so a real chat_postMessage needs a thread_id->channel map
-        # wired at deployment. Raise rather than ship a send that posts to the
-        # wrong channel.
-        raise NotImplementedError("wired via Bolt with a thread->channel map in deployment")
+        await self._app.client.chat_postMessage(
+            channel=resolve_channel(thread_id, self._channels),
+            thread_ts=thread_id,
+            text=text,
+        )
 
     async def ask(self, thread_id: str, question: str, options: list[str]) -> str:
-        # posts ✅/❌ buttons; resolved by an interactive-action handler
-        raise NotImplementedError("wired via Bolt's action handlers in deployment")
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._pending[thread_id] = future
+        await self._app.client.chat_postMessage(
+            channel=resolve_channel(thread_id, self._channels),
+            thread_ts=thread_id,
+            text=question,
+            blocks=approval_blocks(question, options),
+        )
+        return await future
