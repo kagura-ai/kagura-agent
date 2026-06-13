@@ -1,0 +1,93 @@
+<svg viewBox="0 0 680 580" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">kagura-agent architecture</title>
+  <desc id="dsc">The kagura-agent run path flows through a trusted host cockpit to the Claude Code brain in-process; a separate membrane layer hardens a Docker container for isolated agent work, and memory is reached via a short-lived leased token.</desc>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-end">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8a8a8a"/>
+    </marker>
+    <style>
+      text{font-family:ui-sans-serif,system-ui,'Segoe UI',sans-serif;}
+      .h1{font-size:20px;font-weight:600;fill:#23211e;}
+      .ttl,.bt{font-size:13px;font-weight:600;fill:#23211e;}
+      .sub,.bs,.zlbl,.lg{font-size:11px;font-weight:400;fill:#5f5c55;}
+      .sub{font-size:12.5px;}
+      .zlbl{font-size:12px;font-weight:600;}
+      .bs{font-size:10.5px;}
+      .box,.zone{fill:none;stroke:#a8a499;stroke-width:1.3;}
+      .zone{opacity:0.7;}
+      .run{stroke:#8b5cf6;stroke-width:2;}
+      .unsafe{stroke:#dd6a4f;stroke-width:2.4;}
+      .arr{stroke:#8a8a8a;stroke-width:1.4;fill:none;}
+      .bound{stroke:#dd6a4f;}
+      @media (prefers-color-scheme: dark){
+        .h1,.ttl,.bt{fill:#e8e6e1;}
+        .sub,.bs,.zlbl,.lg{fill:#b4b0a6;}
+        .box,.zone{stroke:#74706a;}
+        .arr,#ah path{stroke:#9a968e;fill:#9a968e;}
+      }
+    </style>
+  </defs>
+
+  <text x="4" y="22" class="h1">kagura-agent — how it works</text>
+  <text x="4" y="42" class="sub">the run path, plus the membrane that isolates agent work</text>
+
+  <rect x="4" y="54" width="14" height="10" fill="none" stroke="#8b5cf6" stroke-width="2"/>
+  <text x="24" y="63" class="lg">run path (cockpit → brain)</text>
+  <rect x="230" y="54" width="14" height="10" fill="none" stroke="#dd6a4f" stroke-width="2.4"/>
+  <text x="250" y="63" class="lg">untrusted · membrane-guarded</text>
+
+  <rect x="6" y="80" width="668" height="150" rx="10" class="zone"/>
+  <text x="18" y="100" class="zlbl">trusted host — cockpit · holds the bot token + docker</text>
+
+  <rect x="18"  y="120" width="150" height="72" rx="8" class="box run"/>
+  <text x="93"  y="150" text-anchor="middle" class="bt">transport</text>
+  <text x="93"  y="169" text-anchor="middle" class="bs">CLI · Slack · Discord</text>
+
+  <rect x="184" y="120" width="150" height="72" rx="8" class="box run"/>
+  <text x="259" y="150" text-anchor="middle" class="bt">cockpit</text>
+  <text x="259" y="169" text-anchor="middle" class="bs">intent · HITL · registry</text>
+
+  <rect x="350" y="120" width="150" height="72" rx="8" class="box run"/>
+  <text x="425" y="150" text-anchor="middle" class="bt">session</text>
+  <text x="425" y="169" text-anchor="middle" class="bs">tasks · checkpoints</text>
+
+  <rect x="516" y="120" width="150" height="72" rx="8" class="box run"/>
+  <text x="591" y="150" text-anchor="middle" class="bt">brain</text>
+  <text x="591" y="169" text-anchor="middle" class="bs">Claude Code (sub SDK)</text>
+
+  <line x1="168" y1="156" x2="183" y2="156" class="arr" marker-end="url(#ah)"/>
+  <line x1="334" y1="156" x2="349" y2="156" class="arr" marker-end="url(#ah)"/>
+  <line x1="500" y1="156" x2="515" y2="156" class="arr" marker-end="url(#ah)"/>
+
+  <text x="18" y="216" class="bs">runs left → right, in-process on the host — the plain run does not use a container</text>
+
+  <text x="18" y="250" class="zlbl bound" fill="#dd6a4f">membrane — trust boundary (everything below is untrusted)</text>
+  <line x1="6" y1="258" x2="674" y2="258" stroke="#dd6a4f" stroke-width="1.5" stroke-dasharray="6 5"/>
+
+  <text x="18" y="280" class="sub">used when the agent must run code in isolation (not the plain run above):</text>
+
+  <rect x="18"  y="292" width="200" height="62" rx="8" class="box"/>
+  <text x="118" y="320" text-anchor="middle" class="bt">launcher</text>
+  <text x="118" y="339" text-anchor="middle" class="bs">validate + harden the spec</text>
+
+  <rect x="240" y="292" width="200" height="62" rx="8" class="box"/>
+  <text x="340" y="320" text-anchor="middle" class="bt">egress policy</text>
+  <text x="340" y="339" text-anchor="middle" class="bs">default-deny allowlist</text>
+
+  <rect x="462" y="292" width="200" height="62" rx="8" class="box"/>
+  <text x="562" y="320" text-anchor="middle" class="bt">credential lease</text>
+  <text x="562" y="339" text-anchor="middle" class="bs">time-boxed budget</text>
+
+  <line x1="118" y1="354" x2="118" y2="390" class="arr" marker-end="url(#ah)"/>
+  <line x1="340" y1="354" x2="340" y2="390" class="arr" marker-end="url(#ah)"/>
+  <line x1="562" y1="354" x2="562" y2="390" class="arr" marker-end="url(#ah)"/>
+
+  <rect x="20" y="392" width="640" height="66" rx="8" class="box unsafe"/>
+  <text x="340" y="420" text-anchor="middle" class="bt">hardened agent container</text>
+  <text x="340" y="442" text-anchor="middle" class="bs">non-root · read-only rootfs · cap-drop ALL · seccomp · network sealed</text>
+
+  <line x1="340" y1="458" x2="340" y2="486" class="arr" stroke-dasharray="5 4" marker-end="url(#ah)"/>
+  <rect x="120" y="488" width="440" height="60" rx="8" class="box"/>
+  <text x="340" y="514" text-anchor="middle" class="bt">Kagura Memory Cloud</text>
+  <text x="340" y="534" text-anchor="middle" class="bs">CLI-leased token · read: trust-tier · write: locked → graduation</text>
+</svg>
