@@ -1,0 +1,42 @@
+{
+  "comment": "kagura-agent v0.2 defense-in-depth seccomp profile. NOT a deny-by-default sandbox: it is defaultAction=ALLOW with an explicit deny-list, layered on --cap-drop ALL + --security-opt no-new-privileges + --read-only. Its job is to ensure the high-risk, mostly capability-INDEPENDENT syscalls below are denied even on a permissively-configured daemon (e.g. one defaulting to seccomp=unconfined). A full deny-by-default allow-list (Docker-default-equivalent) is a stronger but heavier future hardening. architectures is intentionally omitted so the runtime resolves these syscall names for whatever arch the container runs on.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "syscalls": [
+    {
+      "names": [
+        "perf_event_open",
+        "bpf",
+        "userfaultfd",
+        "ptrace",
+        "process_vm_readv",
+        "process_vm_writev",
+        "kexec_load",
+        "kexec_file_load",
+        "init_module",
+        "finit_module",
+        "delete_module",
+        "mount",
+        "umount",
+        "umount2",
+        "pivot_root",
+        "chroot",
+        "reboot",
+        "swapon",
+        "swapoff",
+        "add_key",
+        "request_key",
+        "keyctl",
+        "settimeofday",
+        "clock_settime",
+        "adjtimex",
+        "acct",
+        "quotactl",
+        "open_by_handle_at",
+        "name_to_handle_at"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1,
+      "comment": "EPERM on a hijacked agent's escape/info-leak primitives (perf_event_open/bpf/userfaultfd are cap-independent; the rest are belt-and-suspenders since --cap-drop ALL already gates them)."
+    }
+  ]
+}

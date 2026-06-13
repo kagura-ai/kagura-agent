@@ -12,6 +12,7 @@ already-leased, time-boxed env into the spec.
 
 from __future__ import annotations
 
+import importlib.resources
 import os
 import stat
 from collections.abc import Mapping
@@ -150,6 +151,34 @@ _HARDENING = [
     "--cpus", "2",
 ]
 
+# Defense-in-depth seccomp profile, layered on --cap-drop ALL above. Explicitly
+# setting --security-opt seccomp=<profile> guarantees the high-risk syscalls
+# (perf_event_open, bpf, …) are denied even on a daemon defaulting to
+# seccomp=unconfined. Docker reads this path on the HOST it runs on (not inside
+# the container). The profile ships as package data, so it resolves the same way
+# whether kagura-agent is installed editable or as a wheel; deploy-configurable
+# via KAGURA_SECCOMP_PROFILE. (importlib.resources.files returns a real fs path
+# for a normally-installed/unzipped package, which docker needs; a zipapp/zip-
+# import deploy would need KAGURA_SECCOMP_PROFILE set to an extracted path.)
+_DEFAULT_SECCOMP_PROFILE = str(
+    importlib.resources.files("kagura_agent.membrane") / "seccomp-agent.json"
+)
+
+
+def _seccomp_profile() -> str:
+    # A set-but-empty/whitespace override is treated as unset → bundled default
+    # (an empty seccomp= would make docker error out, not fail safe).
+    profile = os.environ.get("KAGURA_SECCOMP_PROFILE", "").strip() or _DEFAULT_SECCOMP_PROFILE
+    # Refuse the unconfined footgun: disabling seccomp would punch the very hole
+    # this hardening exists to close, and is worse than the daemon default.
+    if profile.strip().casefold() == "unconfined":
+        raise MembraneViolation(
+            "KAGURA_SECCOMP_PROFILE=unconfined would disable seccomp entirely; the "
+            "membrane refuses to launch without a seccomp profile. Point it at a "
+            "profile file instead (or unset it to use the bundled default)."
+        )
+    return profile
+
 
 def _network_args(spec: LaunchSpec) -> list[str]:
     # Sealed by default. Only a non-empty egress allowlist attaches the container
@@ -163,6 +192,11 @@ def _network_args(spec: LaunchSpec) -> list[str]:
 def docker_run_args(spec: LaunchSpec) -> list[str]:
     args = ["docker", "run", "--rm"]
     args += list(_HARDENING)
+    args += ["--security-opt", f"seccomp={_seccomp_profile()}"]
+    # Invariant: the produced args NEVER include host-reach escape flags
+    # (--device, --add-host, --privileged, seccomp=unconfined). LaunchSpec
+    # intentionally carries no `device`/`add_host` field; if one is ever added
+    # it MUST be denied here rather than forwarded. Locked by a regression test.
     args += _network_args(spec)
     for mount in spec.mounts:
         ro = ":ro" if mount.read_only else ""
