@@ -13,6 +13,7 @@ already-leased, time-boxed env into the spec.
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
@@ -39,7 +40,53 @@ class LaunchSpec:
     env: Mapping[str, str] = field(default_factory=dict)
 
 
-_DANGEROUS_SOURCES = ("docker.sock",)
+# Known container/host control sockets — reaching any of these from a container
+# is escape to host root. Kept lower-cased for case-insensitive comparison; this
+# list is for clear, specific errors, NOT the primary guard (see below).
+_DANGEROUS_SOCKETS = frozenset(
+    {
+        "/var/run/docker.sock",
+        "/run/docker.sock",
+        "/run/containerd/containerd.sock",
+        "/var/run/containerd/containerd.sock",
+        "/run/podman/podman.sock",
+        "/var/run/podman/podman.sock",
+        "/var/run/crio/crio.sock",
+        "/run/crio/crio.sock",
+    }
+)
+
+
+def _dangerous_mount_reason(resolved: str) -> str | None:
+    """Why this already-realpath-resolved source is too dangerous to mount, else None.
+
+    The original guard matched the literal substring ``docker.sock`` case-
+    sensitively, which missed ``containerd.sock``, ``DOCKER.SOCK``, and any other
+    privileged socket. The fix does NOT lean on name matching either (the same
+    fragility): the primary check is by **file type** — ``os.stat`` + ``S_ISSOCK``
+    refuses any unix socket regardless of name (incl. extension-less D-Bus/systemd
+    sockets). The canonical denylist and the ``*.sock`` suffix are belt-and-
+    suspenders for clearer errors and for paths that don't exist / can't be
+    stat'd (where type can't be checked).
+
+    Scope: this validates the *resolved mount source itself*. Mounting a parent
+    *directory* that merely contains a socket is governed by the project-root
+    containment check (`_is_within`) — host control sockets live outside the
+    workspace, so their parent dirs are rejected there. Recursively scanning a
+    mounted subtree for sockets is a separate, broader hardening (tracked apart
+    from this name/type-matching fix).
+    """
+    lowered = resolved.lower()
+    if lowered in _DANGEROUS_SOCKETS:
+        return "a known container control socket (= host root)"
+    try:
+        if stat.S_ISSOCK(os.stat(resolved).st_mode):
+            return "a unix socket (host-reach vector)"
+    except OSError:
+        pass  # path missing / unstattable — fall through to the name-based guard
+    if PurePosixPath(lowered).name.endswith(".sock"):
+        return "a unix socket (*.sock)"
+    return None
 
 
 def _is_within(child: str, parent: str) -> bool:
@@ -69,9 +116,10 @@ def validate_spec(spec: LaunchSpec, *, project_root: str) -> LaunchSpec:
         try:
             source = os.path.realpath(mount.source)
             root = os.path.realpath(project_root)
-            if any(token in source for token in _DANGEROUS_SOURCES):
+            reason = _dangerous_mount_reason(source)
+            if reason is not None:
                 raise MembraneViolation(
-                    f"refusing to mount {mount.source!r} (-> {source!r}): docker.sock = host root"
+                    f"refusing to mount {mount.source!r} (-> {source!r}): {reason}"
                 )
             if not _is_within(source, root):
                 raise MembraneViolation(
