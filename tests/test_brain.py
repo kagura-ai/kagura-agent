@@ -16,12 +16,14 @@ import pytest
 
 from kagura_agent.core.brain.auth import AuthError, resolve_auth
 from kagura_agent.core.brain.base import (
+    BrainUnavailable,
     Checkpoint,
     DoneEvent,
     MessageEvent,
     Task,
 )
 from kagura_agent.core.brain.claude import ClaudeBrain, RawTurn
+from kagura_agent.core.brain.sdk_engine import claude_sdk_available, require_claude_sdk
 
 # --- per-provider auth ----------------------------------------------------
 
@@ -92,3 +94,27 @@ async def test_claude_brain_passes_resume_state_to_engine() -> None:
     _ = [e async for e in brain.run(Task(prompt="more", session_id="s1"), resume=cp)]
 
     assert engine.calls == [("more", {"turn": 1})]
+
+
+# --- #28: optional Claude brain (claude-agent-sdk) availability -----------
+# The SDK is an optional extra. Detection is a pure, SDK-free helper (find_spec
+# injected) so it is testable without installing the 73MB SDK — mirroring the
+# `_mcp_option_kwargs` pattern. Absence raises a typed, actionable BrainUnavailable
+# (NOT a raw ModuleNotFoundError that downstream would render as "internal error").
+
+def test_claude_sdk_available_reflects_find_spec() -> None:
+    assert claude_sdk_available(find_spec=lambda name: object()) is True
+    assert claude_sdk_available(find_spec=lambda name: None) is False
+
+
+def test_require_claude_sdk_silent_when_present() -> None:
+    require_claude_sdk(find_spec=lambda name: object())  # must not raise
+
+
+def test_require_claude_sdk_raises_actionable_when_absent() -> None:
+    with pytest.raises(BrainUnavailable) as ei:
+        require_claude_sdk(find_spec=lambda name: None)
+    msg = str(ei.value)
+    assert "claude" in msg.lower()  # names the optional extra
+    # surfaces a concrete install command the operator can run
+    assert "--extra claude" in msg or "kagura-agent[claude]" in msg

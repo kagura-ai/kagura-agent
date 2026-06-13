@@ -6,10 +6,49 @@ smoke path, not unit tests (it needs the SDK installed and a subscription).
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import importlib.util
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from kagura_agent.core.brain.base import BrainUnavailable
 from kagura_agent.core.brain.claude import RawTurn
+
+_CLAUDE_SDK_MODULE = "claude_agent_sdk"
+_INSTALL_HINT = (
+    "The Claude brain requires the optional 'claude' extra (claude-agent-sdk), "
+    "which is not installed. Install it with one of:\n"
+    "  uv run --extra claude kagura-agent run ...\n"
+    "  pip install 'kagura-agent[claude]'"
+)
+
+
+def claude_sdk_available(
+    *, find_spec: Callable[[str], object | None] = importlib.util.find_spec
+) -> bool:
+    """Whether the Claude Agent SDK is importable, *without* importing it.
+
+    Pure and SDK-free (like `_mcp_option_kwargs`) so it is unit-testable by
+    injecting `find_spec`; the real `find_spec` only inspects import metadata and
+    never triggers the heavy `claude_agent_sdk` import.
+
+    Known limit: this confirms the module is *findable*, not that it imports
+    cleanly. A corrupt/partial install would pass here yet still raise at the real
+    import in `query()` (falling back to the generic error path). The dominant
+    case — the `claude` extra simply not installed — is fully covered.
+    """
+    return find_spec(_CLAUDE_SDK_MODULE) is not None
+
+
+def require_claude_sdk(
+    *, find_spec: Callable[[str], object | None] = importlib.util.find_spec
+) -> None:
+    """Raise `BrainUnavailable` with an actionable install hint if the SDK is absent.
+
+    Called at brain construction (fail-fast) so the missing-extra condition is
+    surfaced before the agentic loop runs, never as a raw `ModuleNotFoundError`.
+    """
+    if not claude_sdk_available(find_spec=find_spec):
+        raise BrainUnavailable(_INSTALL_HINT)
 
 
 def _mcp_option_kwargs(

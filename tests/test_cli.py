@@ -9,7 +9,8 @@ import json
 
 import pytest
 
-from kagura_agent.cli.main import load_mcp_config, parse_args
+from kagura_agent.cli.main import load_mcp_config, main, parse_args
+from kagura_agent.core.brain.base import BrainUnavailable
 
 
 def test_parse_run_with_task() -> None:
@@ -76,3 +77,27 @@ def test_load_mcp_config_rejects_non_object_json(tmp_path) -> None:
     p.write_text(json.dumps({"mcpServers": None}))
     with pytest.raises(ValueError, match="expected a JSON object"):
         load_mcp_config(str(p))
+
+
+# --- #28: missing Claude brain surfaces an actionable error, not "internal error" ---
+
+def test_main_run_surfaces_brain_unavailable(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    # When the optional `claude` extra is absent, brain construction raises
+    # BrainUnavailable; `main` must surface it as an actionable message + non-zero
+    # exit, NOT let it fall through to a raw traceback / generic "internal error".
+    from kagura_agent.cli import main as cli_main
+
+    async def _boom(*_a, **_k) -> str:
+        raise BrainUnavailable(
+            "The Claude brain requires the optional 'claude' extra "
+            "(claude-agent-sdk). Install it with: uv run --extra claude ..."
+        )
+
+    monkeypatch.setattr(cli_main, "_run_task", _boom)
+    rc = main(["run", "do a thing"])
+
+    assert rc == 3  # distinct from argparse's usage-error code (2)
+    err = capsys.readouterr().err
+    assert "claude" in err.lower()
+    assert "--extra claude" in err or "kagura-agent[claude]" in err
+    assert "internal error" not in err.lower()  # the failure mode this issue fixes
