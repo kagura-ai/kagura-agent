@@ -49,13 +49,19 @@ class Session:
         messages: list[str] = []
         done: DoneEvent | None = None
         async for event in self._brain.run(task, resume=resume):
+            # DoneEvent is terminal: once seen, DRAIN the rest of the stream but
+            # ignore it, so post-terminal narration can't be recorded nor the
+            # result overwritten by a second Done. We drain rather than `break`
+            # because breaking mid-stream leaves the brain's underlying async
+            # generator (e.g. the Claude SDK's) to be aclose()'d while still
+            # running — "aclose(): asynchronous generator is already running" on
+            # every run. Letting it run to exhaustion closes it cleanly.
+            if done is not None:
+                continue
             if isinstance(event, MessageEvent):
                 messages.append(event.text)
             elif isinstance(event, DoneEvent):
                 done = event
-                break  # DoneEvent is terminal: stop consuming so post-terminal
-                # narration can't be recorded nor the result overwritten by a
-                # second Done (a misbehaving brain must not corrupt the result).
         if done is None:
             raise SessionError(f"brain ended without DoneEvent for session {task.session_id!r}")
 
