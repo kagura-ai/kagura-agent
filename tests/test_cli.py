@@ -29,6 +29,17 @@ def test_parse_no_command_exits() -> None:
         parse_args([])
 
 
+def test_parse_rejects_empty_task() -> None:
+    # A blank prompt would spin a billed empty-prompt brain run.
+    with pytest.raises(SystemExit):
+        parse_args(["run", ""])
+
+
+def test_parse_rejects_whitespace_task() -> None:
+    with pytest.raises(SystemExit):
+        parse_args(["run", "   "])
+
+
 # --- v0.2-A6: --mcp-config / --strict-mcp-config --------------------------
 
 def test_parse_run_defaults_have_no_mcp_config() -> None:
@@ -101,3 +112,21 @@ def test_main_run_surfaces_brain_unavailable(monkeypatch, capsys) -> None:  # ty
     assert "claude" in err.lower()
     assert "--extra claude" in err or "kagura-agent[claude]" in err
     assert "internal error" not in err.lower()  # the failure mode this issue fixes
+
+
+# --- --mcp-config load failures surface cleanly, not as a raw traceback ---
+
+def test_main_run_clean_error_on_missing_mcp_config(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    rc = main(["run", "do a thing", "--mcp-config", str(tmp_path / "nope.json")])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--mcp-config" in err
+    assert "Traceback" not in err
+
+
+def test_main_run_clean_error_on_invalid_mcp_json(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    bad = tmp_path / "bad.json"
+    bad.write_text("not json{")
+    rc = main(["run", "do a thing", "--mcp-config", str(bad)])
+    assert rc == 2
+    assert "--mcp-config" in capsys.readouterr().err
