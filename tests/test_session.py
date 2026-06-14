@@ -76,6 +76,40 @@ async def test_session_treats_first_done_as_terminal() -> None:
     assert cp.state == {"turn": 1}  # not 99
 
 
+class _DrainBrain:
+    """Records whether its generator was consumed to exhaustion (finally ran)."""
+
+    caps = BrainCaps(name="drain")
+
+    def __init__(self) -> None:
+        self.exhausted = False
+
+    async def run(
+        self, task: Task, *, resume: Checkpoint | None = None
+    ) -> AsyncIterator[BrainEvent]:
+        try:
+            yield MessageEvent(text="a")
+            yield DoneEvent(result="r", state={"turn": 1})
+            yield MessageEvent(text="ignored-but-drained")
+        finally:
+            self.exhausted = True
+
+
+async def test_session_drains_stream_after_done_not_break() -> None:
+    # Regression: breaking mid-stream on the first DoneEvent left the brain's
+    # underlying async generator (e.g. the Claude SDK's) to be aclose()'d while
+    # running ("aclose(): asynchronous generator is already running"). We drain
+    # to exhaustion instead — post-Done events are ignored but the generator is
+    # consumed fully and closes cleanly.
+    brain = _DrainBrain()
+    result = await Session(brain=brain, checkpoints=InMemoryCheckpointStore()).run(
+        Task(prompt="x", session_id="s1")
+    )
+    assert result.text == "r"
+    assert result.messages == ["a"]  # post-Done narration ignored
+    assert brain.exhausted is True  # consumed to exhaustion, not broken mid-stream
+
+
 async def test_session_resume_feeds_prior_checkpoint_to_brain() -> None:
     store = InMemoryCheckpointStore()
     brain = FakeBrain()
