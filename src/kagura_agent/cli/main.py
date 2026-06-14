@@ -25,11 +25,21 @@ from kagura_agent.cli.doctor import (
 from kagura_agent.core.brain.base import BrainUnavailable
 
 
+def _nonempty_task(value: str) -> str:
+    """Reject an empty/whitespace-only task at parse time.
+
+    A blank prompt would otherwise spin a billed empty-prompt brain run (the
+    transports already drop empty inbound messages; the CLI is the other entry)."""
+    if not value.strip():
+        raise argparse.ArgumentTypeError("task must not be empty")
+    return value
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="kagura-agent")
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="run a single task")
-    run.add_argument("task", help="natural-language task description")
+    run.add_argument("task", type=_nonempty_task, help="natural-language task description")
     # Memory is CLI-primary; these knobs are for *other* MCP servers, mirroring
     # Claude Code's own flags (orthogonal to memory — v0.2-A6).
     run.add_argument(
@@ -105,7 +115,13 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
         print(format_report(results))
         return DOCTOR_FAIL_EXIT if overall_status(results) == FAIL else 0
     if ns.command == "run":
-        mcp_servers = load_mcp_config(ns.mcp_config)
+        try:
+            mcp_servers = load_mcp_config(ns.mcp_config)
+        except (OSError, ValueError) as exc:
+            # Missing file / bad JSON / wrong shape: surface a clean, actionable
+            # message instead of a raw traceback. Exit 2 (operator input error).
+            print(f"--mcp-config {ns.mcp_config!r}: {exc}", file=sys.stderr)
+            return 2
         try:
             result = asyncio.run(
                 _run_task(
