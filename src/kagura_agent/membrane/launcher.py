@@ -216,9 +216,11 @@ def validate_spec(spec: LaunchSpec, *, project_root: str) -> LaunchSpec:
         resolved_mounts.append(replace(mount, source=source))
     # Validate the egress allowlist at the membrane gate (fail-closed): reject
     # wildcard/subdomain or malformed entries HERE, not only if a proxy later
-    # happens to build the policy. EgressPolicy's constructor is the single guard.
+    # happens to build the policy. Use from_spec (not EgressPolicy(allow=...)) so
+    # the launcher and the proxy derive the policy from the SAME spec — its whole
+    # reason to exist is to keep them from drifting apart.
     try:
-        EgressPolicy(allow=spec.egress_allow)
+        EgressPolicy.from_spec(spec)
     except ValueError as e:
         raise MembraneViolation(f"refusing launch: invalid egress allowlist ({e})") from e
     return replace(spec, mounts=tuple(resolved_mounts))
