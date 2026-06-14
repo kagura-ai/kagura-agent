@@ -17,7 +17,7 @@ from kagura_agent.cockpit.approval import PendingApprovalRegistry
 from kagura_agent.cockpit.hitl import CapabilityRequest, Decision, record_decision
 from kagura_agent.cockpit.intent import Intent, classify
 from kagura_agent.cockpit.registry import SessionRegistry
-from kagura_agent.cockpit.transports.base import Event, Transport
+from kagura_agent.cockpit.transports.base import Event, Transport, click_authorized
 from kagura_agent.core.brain.base import BrainProvider, Task
 from kagura_agent.core.session import Session
 from kagura_agent.mcp.memory_cloud import MemoryClient
@@ -142,8 +142,9 @@ class Cockpit:
         When an operator is configured, only that identity qualifies; with no
         operator (single-user CLI default) every event qualifies. Shared by the
         approve/deny and /kill gates so destructive control surfaces enforce the
-        same operator-identity boundary (#14)."""
-        return self._operator_id is None or event.sender == self._operator_id
+        same operator-identity boundary (#14). Single source of truth for the rule
+        is `click_authorized` (also used by the transport button path)."""
+        return click_authorized(event.sender, self._operator_id)
 
     async def _resolve_pending(self, event: Event, *, approved: bool) -> None:
         # A typed /approve|/deny resolves the thread's *pending* capability
@@ -163,20 +164,20 @@ class Cockpit:
                 event.thread_id, "approval ignored: only the operator may approve/deny"
             )
             return
-        # Write the audit BEFORE resolving: resolving sets the future the consumer
-        # awaits, which lets it mint the capability. If the graduation-trail write
-        # fails, we must NOT grant — peek (non-destructive) + record first, then
-        # resolve, so a grant never exists without its recorded evidence.
-        request = self._approvals.peek(event.thread_id)
-        if request is None:  # raced/expired between the pending() check and peek
+        # Claim the entry WITHOUT resolving its future: liveness is decided and the
+        # entry removed atomically here, THEN we write the audit, THEN fulfil the
+        # future (the grant the consumer observes). This guarantees (a) a grant is
+        # never observable before its audit, and (b) an audit is never written for
+        # a request that wasn't live (e.g. expired during the audit await).
+        claimed = self._approvals.claim(event.thread_id)
+        if claimed is None:  # expired/raced between the gate and the claim
             await self._transport.send(event.thread_id, "no pending approval")
             return
+        request, future = claimed
         if self._memory is not None:
             await record_decision(self._memory, request, approved=approved)
-        if self._approvals.resolve(event.thread_id, approved=approved) is None:
-            # Expired between peek and resolve (TTL). Fail-closed: nothing granted.
-            await self._transport.send(event.thread_id, "no pending approval")
-            return
+        if not future.done():
+            future.set_result(Decision(approved=approved))
         verb = "approved" if approved else "denied"
         await self._transport.send(event.thread_id, f"{verb} {request.capability}")
 
@@ -192,6 +193,21 @@ class Cockpit:
             return
         rec = self._registry.get(event.thread_id)
         if rec is not None and rec.container_id and self._launcher is not None:
-            await self._launcher.kill(rec.container_id)
+            try:
+                await self._launcher.kill(rec.container_id)
+            except Exception:
+                # The container kill failed (e.g. docker error — runtime.kill now
+                # raises on non-zero). Don't leave the session falsely "running"
+                # (it would keep routing follow-ups as CONTINUE): close it so it
+                # isn't treated as resumable, and surface the failure so the
+                # operator can clean up a possible orphan.
+                log.exception("kill of container %s failed", rec.container_id)
+                self._registry.close(event.thread_id)
+                await self._transport.send(
+                    event.thread_id,
+                    f"session {event.thread_id}: container kill FAILED (see logs); "
+                    "session closed",
+                )
+                return
         self._registry.close(event.thread_id)
         await self._transport.send(event.thread_id, f"session {event.thread_id} killed")

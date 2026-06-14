@@ -73,16 +73,23 @@ class PendingApprovalRegistry:
         self._purge_if_expired(thread_id)
         return thread_id in self._pending
 
-    def peek(self, thread_id: str) -> CapabilityRequest | None:
-        """The thread's pending request WITHOUT resolving it (None if none/expired).
+    def claim(
+        self, thread_id: str
+    ) -> tuple[CapabilityRequest, asyncio.Future[Decision]] | None:
+        """Pop the live pending entry WITHOUT setting its future (None if none/expired).
 
-        Lets a caller write the decision audit *before* `resolve` makes the grant
-        observable to the awaiting consumer — so a grant is never minted without
-        its graduation-trail evidence.
+        The caller writes the decision audit, THEN fulfils the returned future.
+        Deciding liveness and removing the entry **atomically here** (before any
+        audit) means: (a) the grant — the consumer observing the resolved future —
+        never precedes its audit, and (b) an audit is never written for a request
+        that wasn't actually live (e.g. one that expired during the audit await).
+        Replaces the earlier peek+resolve, which could write an "approved" audit
+        and then have `resolve` find the entry TTL-expired (grant denied) — a
+        false trail entry.
         """
         self._purge_if_expired(thread_id)
-        entry = self._pending.get(thread_id)
-        return entry.request if entry is not None else None
+        entry = self._pending.pop(thread_id, None)
+        return (entry.request, entry.future) if entry is not None else None
 
     def resolve(self, thread_id: str, *, approved: bool) -> CapabilityRequest | None:
         """Resolve the thread's pending request, returning it (or None if none).

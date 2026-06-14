@@ -13,6 +13,7 @@ import asyncio
 
 import pytest
 
+from kagura_agent.cockpit.approval import PendingApprovalRegistry
 from kagura_agent.cockpit.core import Cockpit
 from kagura_agent.cockpit.hitl import CapabilityRequest
 from kagura_agent.cockpit.registry import SessionRegistry
@@ -176,3 +177,57 @@ async def test_successful_approve_records_then_grants() -> None:
     decision = await asyncio.wait_for(future, timeout=1)
     assert decision.approved is True
     assert any("memory:write" in w for w in memory.written)  # audit written
+
+
+# --- claim(): pop without resolving (no false-audit on TTL expiry race) ------
+
+async def test_claim_pops_entry_without_resolving_future() -> None:
+    reg = PendingApprovalRegistry(clock=lambda: 0.0, ttl_seconds=300.0)
+    req = CapabilityRequest(thread_id="t", capability="c", reason="r")
+    future = reg.register(req)
+
+    claimed = reg.claim("t")
+    assert claimed is not None
+    request, fut = claimed
+    assert request is req
+    assert fut is future
+    assert not fut.done()  # claim must NOT resolve the future (caller does, post-audit)
+    assert reg.pending("t") is False  # entry removed
+    fut.cancel()
+
+
+async def test_claim_on_expired_returns_none_and_denies() -> None:
+    now = {"t": 0.0}
+    reg = PendingApprovalRegistry(clock=lambda: now["t"], ttl_seconds=10.0)
+    future = reg.register(CapabilityRequest(thread_id="t", capability="c", reason="r"))
+
+    now["t"] = 100.0  # past TTL
+    # Expired → no claim (so the caller writes NO audit), and the consumer's
+    # future is failed-closed (denied) by the purge.
+    assert reg.claim("t") is None
+    assert future.done() and future.result().approved is False
+
+
+async def test_claim_absent_returns_none() -> None:
+    assert PendingApprovalRegistry().claim("nope") is None
+
+
+# --- /kill: a failed container kill must not leave the session "running" -----
+
+class _RaisingKiller:
+    async def kill(self, _container_id: str) -> None:
+        raise RuntimeError("docker kill failed")
+
+
+async def test_kill_failure_closes_session_and_reports() -> None:
+    reg = SessionRegistry()
+    reg.add("t1", container_id="c1")
+    t = _RecordingTransport()
+    cockpit = _cockpit(t, registry=reg, launcher=_RaisingKiller(), operator_id="op1")
+
+    # No exception escapes; session is closed (not left running) and the failure
+    # is surfaced — regression guard for runtime.kill now raising on non-zero.
+    await cockpit.handle(Event(thread_id="t1", text="/kill", is_thread_reply=True, sender="op1"))
+
+    assert reg.get("t1").status == "closed"
+    assert any("FAILED" in msg for _, msg in t.sent)
