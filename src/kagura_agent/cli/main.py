@@ -54,7 +54,20 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="reject MCP servers not present in --mcp-config (no silent passthrough)",
     )
-    sub.add_parser("doctor", help="preflight check: memory / claude / docker / egress")
+    doctor = sub.add_parser(
+        "doctor", help="preflight check: memory / claude / docker / egress (+ providers)"
+    )
+    doctor.add_argument(
+        "--registry",
+        default="kagura-agent.toml",
+        help="provider registry TOML to diagnose (default: kagura-agent.toml; skipped if absent)",
+    )
+    doctor.add_argument(
+        "--probe",
+        action="store_true",
+        help="opt-in: dry-mint a short-lived scoped token per provider, then revoke "
+        "(performs a real mint against the live provider)",
+    )
     return parser.parse_args(list(argv))
 
 
@@ -108,11 +121,68 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
     return transport.sent[-1][1] if transport.sent else ""
 
 
+def _run_probes(registry: Any) -> list[Any]:  # pragma: no cover - deployment edge (live mint)
+    """Dry-mint each derivable-scope provider (--probe), per-provider.
+
+    Built one provider at a time so a kind that needs a deployment-supplied
+    callable (cloudflare/memory_cloud) reports its own FAIL without blocking the
+    others (e.g. aws_sts still probes). Kinds whose probe scope is not derivable
+    from the registry are skipped with a WARN.
+    """
+    import asyncio
+    import time
+
+    from kagura_agent.cli.doctor import (
+        FAIL,
+        WARN,
+        CheckResult,
+        _probe_scope,
+        probe_provider,
+    )
+    from kagura_agent.membrane.cloud_transports import build_broker
+
+    async def _all() -> list[Any]:
+        out: list[Any] = []
+        for spec in registry:
+            cname = f"probe:{spec.name}"
+            scope = _probe_scope(spec)
+            if scope is None:
+                out.append(
+                    CheckResult(cname, WARN, "probe scope not derivable for this kind — skipped")
+                )
+                continue
+            try:
+                broker = build_broker([spec], clock=time.monotonic)
+            except ValueError as exc:
+                out.append(
+                    CheckResult(cname, FAIL, "could not build provider for --probe", hint=str(exc))
+                )
+                continue
+            out.append(await probe_provider(broker, spec.name, scope=scope))
+        return out
+
+    return asyncio.run(_all())
+
+
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
     ns = parse_args(sys.argv[1:] if argv is None else argv)
     if ns.command == "doctor":
-        results = run_doctor()
-        print(format_report(results))
+        from pathlib import Path
+
+        from kagura_agent.membrane.registry_io import load_registry
+
+        registry = None
+        reg_path = Path(ns.registry)
+        if reg_path.exists():
+            try:
+                registry = load_registry(reg_path)
+            except ValueError as exc:
+                print(f"registry error: {exc}", file=sys.stderr)
+                return 2
+        results = run_doctor(registry=registry)
+        if ns.probe and registry:
+            results = results + _run_probes(registry)
+        print(format_report(results))  # one coherent report, one overall verdict
         return DOCTOR_FAIL_EXIT if overall_status(results) == FAIL else 0
     if ns.command == "run":
         try:

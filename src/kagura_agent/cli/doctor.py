@@ -23,13 +23,24 @@ from here*, matching kagura-engineer's doctor.
 
 from __future__ import annotations
 
+import os
 import subprocess
-from collections.abc import Callable, Mapping
+import sys
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from kagura_agent.core.brain.sdk_engine import claude_sdk_available
 from kagura_agent.mcp.memory_cloud import memory_reachable
+from kagura_agent.membrane.lease import Budget
+from kagura_agent.membrane.registry import ProviderSpec, kind_schema
+from kagura_agent.membrane.registry_io import (
+    EnvResolver,
+    FileResolver,
+    SecretRefError,
+    _read_file,
+    resolve_secret_ref,
+)
 
 OK = "ok"
 WARN = "warn"
@@ -152,17 +163,153 @@ def run_doctor(
     docker_probe: Callable[[], bool] = _docker_available,
     egress_probe: Callable[[], bool] = _egress_configured,
     env: Mapping[str, str] | None = None,
+    registry: Iterable[ProviderSpec] | None = None,
+    resolve_env: EnvResolver | None = None,
+    resolve_file: FileResolver = _read_file,
 ) -> list[CheckResult]:
-    """Run every check, threading injected probes in. Probes default to live ones."""
-    import os
+    """Run every check, threading injected probes in. Probes default to live ones.
 
+    When ``registry`` is given, a per-provider reference-resolution check is
+    appended for each spec (answers "why can't the agent touch <service>?"
+    before runtime). Backward-compatible: with no registry, the result set is
+    unchanged.
+    """
     resolved_env = os.environ if env is None else env
-    return [
+    results = [
         check_memory(reachable=memory_probe()),
         check_brain(sdk_available=sdk_probe(), env=resolved_env),
         check_docker(available=docker_probe()),
         check_egress(configured=egress_probe()),
     ]
+    if registry is not None:
+        renv = resolve_env if resolve_env is not None else resolved_env.get
+        results.extend(check_providers(registry, resolve_env=renv, resolve_file=resolve_file))
+    return results
+
+
+# --------------------------------------------------------------------------
+# Credential-aware checks (#59) — registry reference resolution + dry-mint
+# --------------------------------------------------------------------------
+
+
+def check_provider(
+    spec: ProviderSpec,
+    *,
+    resolve_env: EnvResolver = os.environ.get,
+    resolve_file: FileResolver = _read_file,
+) -> CheckResult:
+    """Diagnose whether a provider's secret references resolve on this host.
+
+    A **required** reference that is absent, ambiguous (both ``*_env`` and
+    ``*_file``), or unresolvable is a FAIL with an actionable hint naming the env
+    var / file path — never the resolved secret value. An absent **optional**
+    reference is fine (the provider falls back to ambient/default creds), so it
+    stays OK. This is the pre-flight answer to "why can't the agent touch X?".
+    """
+    name = f"provider:{spec.name}"
+    fails: list[str] = []
+    optional_absent: list[str] = []
+    for ref in kind_schema(spec.kind).secrets:
+        env_field, file_field = f"{ref.name}_env", f"{ref.name}_file"
+        has_env, has_file = env_field in spec.fields, file_field in spec.fields
+        if has_env and has_file:
+            fails.append(f"{ref.name}: both {env_field} and {file_field} set (ambiguous)")
+            continue
+        field = env_field if has_env else file_field if has_file else None
+        if field is None:
+            if ref.required:
+                fails.append(
+                    f"{ref.name}: required but neither {env_field} nor {file_field} is set"
+                )
+            else:
+                optional_absent.append(ref.name)
+            continue
+        try:
+            resolve_secret_ref(
+                field, str(spec.fields[field]), get_env=resolve_env, read_file=resolve_file
+            )
+        except SecretRefError as exc:
+            fails.append(str(exc))  # names the env var / path, never the value
+
+    if fails:
+        return CheckResult(
+            name,
+            FAIL,
+            f"{spec.kind}: {len(fails)} unresolved reference(s)",
+            hint="; ".join(fails),
+        )
+    detail = f"{spec.kind}: all required references resolve"
+    if optional_absent:
+        detail += f" (optional not set: {', '.join(optional_absent)} — using ambient/default)"
+    return CheckResult(name, OK, detail)
+
+
+def check_providers(
+    registry: Iterable[ProviderSpec],
+    *,
+    resolve_env: EnvResolver = os.environ.get,
+    resolve_file: FileResolver = _read_file,
+) -> list[CheckResult]:
+    """A reference-resolution :class:`CheckResult` per provider in the registry."""
+    return [
+        check_provider(spec, resolve_env=resolve_env, resolve_file=resolve_file)
+        for spec in registry
+    ]
+
+
+def _probe_scope(spec: ProviderSpec) -> str | None:
+    """A safe, minimal scope to dry-mint for a provider, or ``None`` to skip.
+
+    ``memory_cloud`` is probed read-only (never ``memory:write`` — that trips the
+    device-flow HITL / fail-closed lock). ``aws_sts`` probes its role ARN. Other
+    kinds need a deployment-specific scope not derivable from the registry alone,
+    so they are skipped.
+    """
+    if spec.kind == "memory_cloud":
+        return "memory:read"
+    if spec.kind == "aws_sts":
+        return str(spec.fields["role_arn"])
+    return None
+
+
+async def probe_provider(broker: object, name: str, *, scope: str, ttl: int = 60) -> CheckResult:
+    """Opt-in dry-mint: acquire a short-lived scoped token, then revoke it.
+
+    A mint failure is a FAIL (the provider cannot actually issue a cred). A mint
+    that succeeds but **cannot be revoked** is a loud FAIL that surfaces the
+    lease handle for manual cleanup — a live token must never leak silently. The
+    resolved token value is never placed in the output.
+    """
+    cname = f"probe:{name}"
+    try:
+        lease = await broker.acquire(name, scope=scope, ttl=ttl, budget=Budget(ttl))  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 — any mint failure is a diagnostic FAIL
+        # Mint failed → no token was issued, so the provider's error (e.g. STS
+        # AccessDenied) is the actionable answer to "why can't the agent touch X".
+        return CheckResult(cname, FAIL, f"dry-mint failed for scope {scope!r}", hint=str(exc))
+    handle = getattr(lease, "handle", None)
+    try:
+        await broker.release(lease)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        # {exc} is omitted on purpose: a revoke error could echo the just-minted
+        # token. The handle (a revoke id, not the secret) is what the operator
+        # needs for manual cleanup.
+        return CheckResult(
+            cname,
+            FAIL,
+            f"minted OK for scope {scope!r} but REVOKE FAILED — token may be live until it expires",
+            hint=f"revoke manually with handle={handle!r}",
+        )
+    except BaseException:
+        # On interrupt (Ctrl-C / SystemExit) a minted token must not vanish
+        # silently: surface the handle to stderr for manual cleanup, then let the
+        # interrupt propagate — we do not swallow control-flow exceptions.
+        sys.stderr.write(
+            f"{cname}: minted but NOT revoked (interrupted) — revoke manually "
+            f"with handle={handle!r}\n"
+        )
+        raise
+    return CheckResult(cname, OK, f"dry-mint + revoke OK for scope {scope!r}")
 
 
 _GLYPH = {OK: "OK ", WARN: "WARN", FAIL: "FAIL"}
