@@ -123,6 +123,24 @@ def test_missing_required_plain_field_is_fail_closed():
         parse_registry({"aws": {"kind": "aws_sts"}})  # role_arn missing
 
 
+@pytest.mark.parametrize("empty", ["", "   ", None])
+def test_empty_required_field_is_fail_closed(empty):
+    # A present-but-empty required field must be treated as missing (fail-closed),
+    # so a downstream consumer never receives an empty ARN.
+    with pytest.raises(ValueError, match="empty required field|role_arn"):
+        parse_registry({"aws": {"kind": "aws_sts", "role_arn": empty}})
+
+
+def test_denylist_only_key_gives_generic_message_not_dead_end_hint():
+    # 'token' is denylisted but not a declared secret of aws_sts, so the error
+    # must NOT suggest token_env/token_file (which aren't valid fields here).
+    with pytest.raises(ValueError) as exc:
+        parse_registry({"aws": {"kind": "aws_sts", "role_arn": "r", "token": "sk-live"}})
+    msg = str(exc.value)
+    assert "inline secret" in msg
+    assert "token_env" not in msg and "token_file" not in msg
+
+
 def test_missing_required_secret_is_fail_closed():
     # cloudflare requires a parent_token reference; absent → fail-closed.
     with pytest.raises(ValueError, match="required|parent_token|missing"):
@@ -282,6 +300,15 @@ def test_parse_grants_strips_whitespace():
 def test_parse_grants_malformed_is_fail_closed(bad):
     with pytest.raises(ValueError):
         parse_grants([bad])
+
+
+@pytest.mark.parametrize("bad", [42, None, "aws:s3-read"])
+def test_parse_grants_non_iterable_or_bare_string_is_fail_closed(bad):
+    # A non-iterable, or a bare 'provider:scope' string passed instead of a list
+    # (a common mistake — iterating a str yields characters), is fail-closed
+    # ValueError, not a TypeError or silently-wrong per-character parse.
+    with pytest.raises(ValueError, match="iterable|provider:scope"):
+        parse_grants(bad)
 
 
 def test_grant_and_grantset_are_frozen():

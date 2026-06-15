@@ -226,10 +226,18 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
     for key, value in table.items():
         if key == "kind":
             continue
-        if key in secret_names or key in _BARE_SECRET_DENYLIST:
+        if key in secret_names:
             raise ValueError(
                 f"inline secret {key!r} not allowed for provider {name!r}: "
                 f"the registry stores references only — use {key}_env or {key}_file"
+            )
+        if key in _BARE_SECRET_DENYLIST:
+            # A denylisted secret name this kind does NOT declare: suggesting
+            # {key}_env/{key}_file would be wrong (not a valid field here), so
+            # give the generic reference-only message instead of a dead-end hint.
+            raise ValueError(
+                f"inline secret {key!r} not allowed for provider {name!r}: "
+                f"the registry stores references only, never secret values"
             )
         if key not in allowed:
             raise ValueError(
@@ -243,6 +251,16 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
         raise ValueError(
             f"provider {name!r} (kind={kind}) is missing required field(s): {sorted(missing)}"
         )
+
+    # A present-but-empty required field (None, or a blank/whitespace string) is
+    # treated as missing — fail-closed, so a downstream consumer never receives
+    # an empty ARN/account_id where it expects a real value.
+    for req in schema.required:
+        val = fields[req]
+        if val is None or (isinstance(val, str) and not val.strip()):
+            raise ValueError(
+                f"provider {name!r} (kind={kind}) has an empty required field {req!r}"
+            )
 
     for ref in schema.secrets:
         env_key, file_key = f"{ref.name}_env", f"{ref.name}_file"
@@ -308,6 +326,10 @@ def parse_grants(specs: Iterable[str]) -> GrantSet:
     them. An empty iterable yields an empty (deny-all) GrantSet; a malformed
     entry (no colon, empty provider, or empty scope) is fail-closed ``ValueError``.
     """
+    if isinstance(specs, str) or not isinstance(specs, Iterable):
+        raise ValueError(
+            f"grants must be an iterable of 'provider:scope' strings, got {type(specs).__name__}"
+        )
     grants: set[Grant] = set()
     for raw in specs:
         if not isinstance(raw, str):
