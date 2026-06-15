@@ -67,9 +67,9 @@ omit = [
     # The real Claude Agent SDK adapter — never imported in unit tests by design
     # (needs the SDK + a subscription); exercised only by the live smoke path.
     "src/kagura_agent/core/brain/sdk_engine.py",
-    # Cloud cred transport adapters — the deployment edge (needs boto3/google-auth/
-    # httpx + live clouds); lazy-imports its SDK, exercised at deployment not here.
-    "src/kagura_agent/membrane/cloud_transports.py",
+    # NOTE: membrane/cloud_transports.py is intentionally NOT omitted — its
+    # build_broker orchestration (#58) is pure and unit-tested. The SDK-backed
+    # factory bodies in that file carry their own `# pragma: no cover`.
 ]
 
 [tool.coverage.report]

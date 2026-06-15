@@ -5,24 +5,39 @@ so the core stays dependency-free and unit-testable. This module supplies those
 callables from the real SDKs (boto3 / google-auth / httpx / PyJWT), behind the
 optional extras `aws` / `gcp` / `github` / `cloudflare`.
 
-Like `core/brain/sdk_engine.py`, this is the deployment edge: it needs live
-clouds and the optional SDKs, so it is exercised at deployment, not in unit
-tests (whole module is `# pragma: no cover`, lazy-imports its SDK, and is listed
-in the coverage `omit`). The cockpit (trusted host) constructs these and hands
-the resulting providers to the `CredentialBroker`; the agent container never
-sees the SDKs or the root credential — only the short-lived minted cred.
+Like `core/brain/sdk_engine.py`, the SDK-backed factory functions are the
+deployment edge: each needs live clouds and the optional SDKs, so it is marked
+`# pragma: no cover` and lazy-imports its SDK. The cockpit (trusted host)
+constructs these and hands the resulting providers to the `CredentialBroker`;
+the agent container never sees the SDKs or the root credential — only the
+short-lived minted cred.
+
+`build_broker` (#58) is the opposite: the *pure* orchestration that turns a
+validated registry into a live `CredentialBroker` (dedup, host-side secret
+resolution, dispatch to a provider factory, assembly). It is unit-tested with a
+stub factory, so this module is no longer wholesale coverage-omitted — only the
+`# pragma: no cover` SDK factory bodies are excluded.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import os
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
+from kagura_agent.membrane.lease import CredentialBroker, CredProvider
 from kagura_agent.membrane.providers import (
     AwsStsProvider,
     CloudflareTokenProvider,
     GcpImpersonationProvider,
     GitHubAppProvider,
+)
+from kagura_agent.membrane.registry import ProviderSpec, kind_schema
+from kagura_agent.membrane.registry_io import (
+    EnvResolver,
+    FileResolver,
+    _read_file,
+    resolve_secret_ref,
 )
 
 
@@ -124,3 +139,118 @@ def cloudflare_provider(  # pragma: no cover - needs httpx + live Cloudflare
         resp.raise_for_status()
 
     return CloudflareTokenProvider(create=create, delete=delete)
+
+
+# --------------------------------------------------------------------------
+# build_broker — the registry → live CredentialBroker deployment edge (#58)
+# --------------------------------------------------------------------------
+
+#: Construct a live provider from a validated spec and its host-resolved secrets.
+ProviderFactory = Callable[[ProviderSpec, Mapping[str, str]], CredProvider]
+
+
+def _resolve_spec_secrets(
+    spec: ProviderSpec,
+    *,
+    resolve_env: EnvResolver,
+    resolve_file: FileResolver,
+) -> dict[str, str]:
+    """Resolve every ``*_env`` / ``*_file`` secret a spec's kind declares into
+    ``{logical_name: value}`` — host-side, via #57's resolver.
+
+    Required secrets are guaranteed present by ``parse_registry``; optional ones
+    are resolved only when their reference field is present.
+    """
+    resolved: dict[str, str] = {}
+    for ref in kind_schema(spec.kind).secrets:
+        env_field, file_field = f"{ref.name}_env", f"{ref.name}_file"
+        has_env, has_file = env_field in spec.fields, file_field in spec.fields
+        if has_env and has_file:
+            # parse_registry already rejects this, but build_broker accepts any
+            # Iterable[ProviderSpec] (e.g. a hand-built spec from #59/#60), so
+            # guard here too rather than silently letting _env win and dropping
+            # the _file reference (wrong credential source, no diagnostic).
+            raise ValueError(
+                f"provider {spec.name!r}: ambiguous secret {ref.name!r} — both "
+                f"{env_field} and {file_field} are set; provide exactly one"
+            )
+        field = env_field if has_env else file_field if has_file else None
+        if field is not None:
+            resolved[ref.name] = resolve_secret_ref(
+                field, spec.fields[field], get_env=resolve_env, read_file=resolve_file
+            )
+    return resolved
+
+
+def build_broker(
+    registry: Iterable[ProviderSpec],
+    *,
+    clock: Callable[[], float],
+    resolve_env: EnvResolver = os.environ.get,
+    resolve_file: FileResolver = _read_file,
+    _factory: ProviderFactory | None = None,
+) -> CredentialBroker:
+    """Build a live ``CredentialBroker`` from a validated provider registry.
+
+    Pure orchestration: for each spec, refuse a duplicate provider name
+    fail-closed, resolve its secret references **host-side**, and dispatch to
+    ``_factory(spec, resolved_secrets)`` to construct the live provider; then
+    assemble the broker. The SDK-backed construction lives behind ``_factory``
+    (default: :func:`_default_factory`, the deployment edge).
+
+    Secrets are resolved here, on the trusted host — never inside the agent
+    container (membrane invariant). ``memory_cloud`` is read-locked by
+    construction: the registry cannot express write approval, which only ever
+    comes via the #14/#15 device-flow HITL graduation path.
+    """
+    factory = _factory if _factory is not None else _default_factory
+    providers: dict[str, CredProvider] = {}
+    for spec in registry:
+        if spec.name in providers:
+            raise ValueError(
+                f"duplicate provider name {spec.name!r} in registry — refusing to "
+                "silently override (two specs would map one name to different accounts)"
+            )
+        secrets = _resolve_spec_secrets(spec, resolve_env=resolve_env, resolve_file=resolve_file)
+        providers[spec.name] = factory(spec, secrets)
+    return CredentialBroker(providers, clock=clock)
+
+
+def _default_factory(  # pragma: no cover - deployment edge (needs cloud SDKs)
+    spec: ProviderSpec, secrets: Mapping[str, str]
+) -> CredProvider:
+    """Map a spec + host-resolved secrets onto a live provider via the SDK factories.
+
+    Handles the kinds buildable from the registry plus the host's ambient
+    credentials (``aws_sts`` / ``gcp_impersonation`` / ``github_app``). Kinds that
+    additionally need a deployment-supplied transport callable (``cloudflare`` →
+    ``token_spec``, ``memory_cloud`` → ``exchange``) or a provider not yet
+    implemented (``static_env`` → #61) raise an actionable error directing the
+    deployer to pass a custom ``_factory``.
+    """
+    kind = spec.kind
+    if kind == "aws_sts":
+        return aws_provider(session_name=str(spec.fields.get("session_name", "kagura-agent")))
+    if kind == "gcp_impersonation":
+        return gcp_provider()
+    if kind == "github_app":
+        return github_app_provider(
+            app_id=str(spec.fields["app_id"]), private_key=secrets["private_key"]
+        )
+    if kind == "cloudflare":
+        raise ValueError(
+            f"provider {spec.name!r} (cloudflare) needs a deployment-supplied token_spec "
+            "callable (the permission-group schema is account-specific) — pass a custom "
+            "_factory to build_broker"
+        )
+    if kind == "memory_cloud":
+        raise ValueError(
+            f"provider {spec.name!r} (memory_cloud) needs a deployment-supplied exchange "
+            "callable (the kagura auth session) — pass a custom _factory to build_broker"
+        )
+    if kind == "static_env":
+        raise ValueError(
+            f"provider {spec.name!r} (static_env) has no live provider yet — it lands in "
+            "#61; pass a custom _factory until then"
+        )
+    raise ValueError(f"provider {spec.name!r}: unsupported kind {kind!r}")
