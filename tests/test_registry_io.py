@@ -67,6 +67,15 @@ def test_load_registry_invalid_toml_is_actionable(tmp_path):
         load_registry(p)
 
 
+def test_load_registry_non_utf8_is_actionable(tmp_path):
+    # TOML must be UTF-8; a non-UTF-8 file must surface as an actionable ValueError
+    # naming the file, not a raw UnicodeDecodeError.
+    p = tmp_path / "kagura-agent.toml"
+    p.write_bytes(b"\xff\xfe not utf-8")
+    with pytest.raises(ValueError, match="UTF-8|utf-8"):
+        load_registry(p)
+
+
 def test_load_registry_non_mapping_providers_is_actionable(tmp_path):
     p = _write(tmp_path, 'providers = "not a table"\n')
     with pytest.raises(ValueError, match="mapping|table"):

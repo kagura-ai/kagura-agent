@@ -62,6 +62,12 @@ def load_registry(path: str | Path) -> tuple[ProviderSpec, ...]:
         raise ValueError(f"cannot read registry file {p}: {exc}") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"invalid TOML in registry {p}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        # TOML must be UTF-8; a non-UTF-8 file makes tomllib raise UnicodeDecodeError
+        # (a ValueError subclass, but not caught above and with no file path in it).
+        raise ValueError(
+            f"registry file {p} is not valid UTF-8 (TOML must be UTF-8): {exc}"
+        ) from exc
 
     providers = config.get("providers", {})
     return parse_registry(providers)
