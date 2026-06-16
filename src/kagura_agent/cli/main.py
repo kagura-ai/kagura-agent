@@ -66,7 +66,13 @@ class _AsciiFallbackStream:
 
     def write(self, text: str) -> int:
         self._stream.write(text.translate(_ASCII_FALLBACKS))
-        return len(text)
+        return len(text)  # chars consumed, per the TextIOBase.write contract
+
+    def writelines(self, lines: Any) -> None:
+        # Route through our write() so glyphs are transliterated; the inherited
+        # delegation would otherwise hit the raw stream untranslated.
+        for line in lines:
+            self.write(line)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._stream, name)
@@ -93,7 +99,9 @@ def configure_output_stream(stream: Any) -> Any:
     an unexpected character degrades to ``?`` rather than crashing) and wrapped
     so the decorative glyphs transliterate to ASCII.
     """
-    if stream is None or _encoding_handles_glyphs(stream):
+    if stream is None or isinstance(stream, _AsciiFallbackStream):
+        return stream  # already None, or already a fallback stream — don't nest
+    if _encoding_handles_glyphs(stream):
         return stream
     reconfigure = getattr(stream, "reconfigure", None)
     if reconfigure is not None:

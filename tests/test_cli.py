@@ -175,6 +175,29 @@ def test_configure_output_stream_cp932_does_not_crash_on_other_nonencodable() ->
     assert raw.getvalue()  # something was written
 
 
+def test_configure_output_stream_writelines_also_transliterates() -> None:
+    # writelines() must not bypass translation (else it would hit the raw cp932
+    # stream via attribute delegation and crash on a decorative glyph).
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp932")
+    result = configure_output_stream(stream)
+
+    result.writelines(["arrow ↳ one\n", "dash — two\n"])  # must NOT raise
+    result.flush()
+    out = raw.getvalue().decode("cp932")
+    assert "↳" not in out and "—" not in out
+    assert "->" in out and "-" in out
+
+
+def test_configure_output_stream_is_idempotent() -> None:
+    # main() runs once, but re-applying must not nest wrappers (cp932 encoding
+    # delegates through, so a naive re-wrap would stack translators).
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="cp932")
+    once = configure_output_stream(stream)
+    twice = configure_output_stream(once)
+    assert twice is once  # already a fallback stream — returned as-is
+
+
 def test_configure_output_stream_none_is_passthrough() -> None:
     # A headless process (pythonw) can have sys.stdout is None; don't crash.
     assert configure_output_stream(None) is None
