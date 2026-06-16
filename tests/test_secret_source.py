@@ -251,6 +251,14 @@ def test_default_sources_maps_every_suffix():
     assert sources["_keyring"].suffix == "_keyring"
 
 
+def test_default_sources_key_derives_from_source_suffix():
+    # The dispatch key is each source's own .suffix (not a hand-written literal),
+    # so the ClassVar can never silently disagree with the map key. This is the
+    # invariant that makes "register a source → its suffix auto-wires" true.
+    for key, source in default_sources().items():
+        assert key == source.suffix
+
+
 def test_resolve_ref_dispatches_by_suffix():
     sources = {
         "_env": EnvSource(get_env={"X": "env-val"}.get),

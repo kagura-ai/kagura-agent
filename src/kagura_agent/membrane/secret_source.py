@@ -11,10 +11,13 @@ the secret itself. The suffix selects the backend:
 :data:`SECRET_SUFFIXES` is the registry of recognized suffixes; each maps to a
 :class:`SecretSource`. :func:`resolve_ref` dispatches one reference to the right
 source; :func:`resolve_secret_field` is the host-facing convenience that wires
-the default sources. Adding a backend (e.g. Vault) is **one new SecretSource +
-one SECRET_SUFFIXES entry** — no per-kind schema change. This is the single
-suffix-dispatch resolver the validator (#63) and the run path (#65) build on;
-v0.6's ``registry_io.resolve_secret_ref`` folds into it there.
+the default sources. Adding a backend (e.g. Vault) is a **new SecretSource
+registered in** :func:`default_sources` **plus its suffix in** :data:`SECRET_SUFFIXES`
+(and, if it needs host injection, one resolver keyword) — no per-kind schema
+change, and the dispatch key derives from the source's own ``.suffix`` so it can
+never drift. This is the single suffix-dispatch resolver the validator (#63) and
+the run path (#65) build on; v0.6's ``registry_io.resolve_secret_ref`` folds into
+it there.
 
 **Membrane invariant — host-side only.** Every source reads host state (env
 vars, files, the OS keychain) in the trusted cockpit/host; the resolved value is
@@ -121,11 +124,11 @@ class FileSource:
             ) from exc
         # Secret files conventionally end with a trailing newline (LF or CRLF);
         # strip trailing line endings but preserve internal structure (e.g.
-        # multi-line PEM keys) and any meaningful trailing spaces.
+        # multi-line PEM keys) and any meaningful trailing spaces. The final
+        # non-blank assertion funnels through _require_nonblank so all three
+        # sources share one emptiness rule.
         secret = contents.rstrip("\r\n")
-        if not secret.strip():
-            raise SecretSourceError(f"secret file {ref!r} for {field_name} is empty")
-        return secret
+        return _require_nonblank(secret, what=f"secret file {ref!r} for {field_name}")
 
 
 def _import_keyring() -> Any:
@@ -203,12 +206,20 @@ def default_sources(
     substitute their own without touching the real environment, filesystem, or
     keychain. The keyring backend is lazy — its real SDK is imported only when a
     ``*_keyring`` reference is actually resolved.
+
+    The map is keyed by each source's own ``.suffix`` (not hand-written string
+    literals), so registering a new backend here auto-wires its suffix — the key
+    can never silently disagree with the source. Adding a backend is: a new
+    ``SecretSource`` added to this tuple, plus its suffix in :data:`SECRET_SUFFIXES`
+    (so :func:`_suffix_of` recognizes it) and, if it needs host injection, a
+    resolver keyword here.
     """
-    return {
-        "_env": EnvSource(get_env=get_env),
-        "_file": FileSource(read_file=read_file),
-        "_keyring": KeyringSource(get_password=get_password),
-    }
+    sources: tuple[SecretSource, ...] = (
+        EnvSource(get_env=get_env),
+        FileSource(read_file=read_file),
+        KeyringSource(get_password=get_password),
+    )
+    return {source.suffix: source for source in sources}
 
 
 def _suffix_of(field_name: str) -> str | None:
