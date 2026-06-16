@@ -160,12 +160,20 @@ def test_format_report_contains_each_check_and_overall() -> None:
 def test_parse_doctor_command() -> None:
     ns = parse_args(["doctor"])
     assert ns.command == "doctor"
+    assert ns.registry == "kagura-agent.toml"  # default registry path
+    assert ns.probe is False  # dry-mint is opt-in
+
+
+def test_parse_doctor_probe_flag() -> None:
+    ns = parse_args(["doctor", "--probe", "--registry", "custom.toml"])
+    assert ns.probe is True
+    assert ns.registry == "custom.toml"
 
 
 def test_main_doctor_returns_4_on_fail(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
     from kagura_agent.cli import main as cli_main
 
-    def _failing() -> list:  # type: ignore[type-arg]
+    def _failing(**_kwargs) -> list:  # type: ignore[type-arg, no-untyped-def]
         return [check_docker(available=False)]
 
     monkeypatch.setattr(cli_main, "run_doctor", _failing)
@@ -178,7 +186,7 @@ def test_main_doctor_returns_4_on_fail(monkeypatch, capsys) -> None:  # type: ig
 def test_main_doctor_returns_0_when_only_warn(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     from kagura_agent.cli import main as cli_main
 
-    def _warn_only() -> list:  # type: ignore[type-arg]
+    def _warn_only(**_kwargs) -> list:  # type: ignore[type-arg, no-untyped-def]
         return [check_memory(reachable=True), check_egress(configured=False)]
 
     monkeypatch.setattr(cli_main, "run_doctor", _warn_only)
