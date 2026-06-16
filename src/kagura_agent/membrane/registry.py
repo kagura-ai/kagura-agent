@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
+from kagura_agent.membrane.secret_source import SECRET_SUFFIXES
+
 # --------------------------------------------------------------------------
 # Typed per-kind schema (the stable seam #57-61 read through kind_schema())
 # --------------------------------------------------------------------------
@@ -219,7 +221,9 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
 
     schema = _KIND_FIELDS[kind]
     secret_names = {s.name for s in schema.secrets}
-    ref_keys = {f"{n}_env" for n in secret_names} | {f"{n}_file" for n in secret_names}
+    # Suffix-agnostic (#63): every SECRET_SUFFIXES variant of a declared secret
+    # name is allowed, so a new backend (e.g. *_keyring) needs no per-kind edit.
+    ref_keys = {f"{n}{suf}" for n in secret_names for suf in SECRET_SUFFIXES}
     allowed = schema.required | schema.optional | ref_keys | {"kind"}
 
     fields: dict[str, Any] = {}
@@ -263,30 +267,52 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
             )
 
     for ref in schema.secrets:
-        env_key, file_key = f"{ref.name}_env", f"{ref.name}_file"
-        has_env, has_file = env_key in fields, file_key in fields
-        if has_env and has_file:
+        # Suffix-agnostic (#63): a logical secret may be satisfied by exactly one
+        # backend suffix. Count the present variants — 0+required = missing
+        # (fail-closed), exactly 1 = validate its value, 2+ = ambiguous (reject).
+        suffix_keys = {suf: f"{ref.name}{suf}" for suf in SECRET_SUFFIXES}
+        present = [suf for suf, key in suffix_keys.items() if key in fields]
+
+        # Ambiguity is checked first, regardless of required/optional: two
+        # references for one logical secret is always a misconfiguration.
+        if len(present) > 1:
+            keys = ", ".join(suffix_keys[suf] for suf in present)
             raise ValueError(
-                f"ambiguous secret {ref.name!r} for provider {name!r}: "
-                f"set only one of {env_key} / {file_key}"
+                f"ambiguous secret {ref.name!r} for provider {name!r}: set only one of {keys}"
             )
-        if has_env:
-            env_val = fields[env_key]
-            if not isinstance(env_val, str) or not _ENV_NAME_RE.match(env_val):
-                raise ValueError(
-                    f"{env_key} for provider {name!r} must be an environment variable "
-                    f"NAME (e.g. CF_TOKEN), not a value: got {env_val!r}"
-                )
-        if has_file:
-            file_val = fields[file_key]
-            if not isinstance(file_val, str) or not file_val.strip():
-                raise ValueError(
-                    f"{file_key} for provider {name!r} must be a non-empty file path"
-                )
-        if ref.required and not (has_env or has_file):
+
+        if present:
+            suf = present[0]
+            key = suffix_keys[suf]
+            val = fields[key]
+            if suf == "_env":
+                # An *_env reference must name a host env var, not carry a value —
+                # the NAME-shape check catches a raw secret pasted into the field.
+                if not isinstance(val, str) or not _ENV_NAME_RE.match(val):
+                    raise ValueError(
+                        f"{key} for provider {name!r} must be an environment variable "
+                        f"NAME (e.g. CF_TOKEN), not a value: got {val!r}"
+                    )
+            elif suf == "_file":
+                if not isinstance(val, str) or not val.strip():
+                    raise ValueError(
+                        f"{key} for provider {name!r} must be a non-empty file path"
+                    )
+            else:
+                # _keyring today (and any future non-env/file suffix): require a
+                # non-empty reference string. The backend-specific shape — keyring's
+                # "service/username", a future Vault path — is enforced fail-closed
+                # at resolve time by secret_source, so we don't duplicate it here.
+                if not isinstance(val, str) or not val.strip():
+                    raise ValueError(
+                        f"{key} for provider {name!r} must be a non-empty keyring "
+                        f"reference ('service/username')"
+                    )
+        elif ref.required:
+            all_keys = " / ".join(suffix_keys[suf] for suf in SECRET_SUFFIXES)
             raise ValueError(
                 f"provider {name!r} (kind={kind}) is missing required secret "
-                f"{ref.name!r}: set {env_key} or {file_key}"
+                f"{ref.name!r}: set one of {all_keys}"
             )
 
     # Deep-copy so ProviderSpec is a true immutable snapshot: MappingProxyType
