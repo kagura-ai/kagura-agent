@@ -33,6 +33,27 @@ GRANT_NOT_ENFORCED_WARNING = (
 )
 
 
+def force_utf8_streams(*streams: Any) -> None:
+    """Reconfigure each text stream to UTF-8 so the CLI's non-ASCII output glyphs
+    (em-dash ``—``, status arrow ``↳``) print on a legacy console.
+
+    On a Japanese/legacy Windows console the active code page is cp932, so
+    writing those glyphs raises ``UnicodeEncodeError`` and crashes the program
+    before it can show help / doctor / setup output. We switch the streams to
+    UTF-8 with ``errors="replace"`` (a no-op on an already-UTF-8 console).
+    Streams that can't be reconfigured (no ``reconfigure``, or it raises) are
+    left as-is — best-effort, never worse than the original crash.
+    """
+    for stream in streams:
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # already-detached / mid-write / unsupported
+            pass
+
+
 def resolve_grants(grant_specs: list[str] | None) -> tuple[GrantSet, str | None]:
     """Parse ``--grant PROVIDER:SCOPE`` specs into a :class:`GrantSet`.
 
@@ -208,6 +229,10 @@ def _run_probes(registry: Any) -> list[Any]:  # pragma: no cover - deployment ed
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
+    # Before argparse (or any handler) prints help/doctor/setup text containing
+    # non-cp932 glyphs, make the console UTF-8 so it doesn't crash on a legacy
+    # Windows code page.
+    force_utf8_streams(sys.stdout, sys.stderr)
     ns = parse_args(sys.argv[1:] if argv is None else argv)
     if ns.command == "doctor":
         from pathlib import Path

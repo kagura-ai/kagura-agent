@@ -5,11 +5,12 @@ this flag is for *other* MCP servers, mirroring Claude Code's own flag) and
 `--strict-mcp-config`.
 """
 
+import io
 import json
 
 import pytest
 
-from kagura_agent.cli.main import load_mcp_config, main, parse_args
+from kagura_agent.cli.main import force_utf8_streams, load_mcp_config, main, parse_args
 from kagura_agent.core.brain.base import BrainUnavailable
 
 
@@ -130,3 +131,62 @@ def test_main_run_clean_error_on_invalid_mcp_json(tmp_path, capsys) -> None:  # 
     rc = main(["run", "do a thing", "--mcp-config", str(bad)])
     assert rc == 2
     assert "--mcp-config" in capsys.readouterr().err
+
+
+# --- UTF-8 output: CLI text uses em-dash/arrow glyphs that crash a cp932 console ---
+
+
+def test_force_utf8_streams_reconfigures_a_cp932_stream() -> None:
+    # A legacy Windows console hands us a cp932 text stream; after we reconfigure
+    # it, the non-cp932 glyphs the CLI emits (em-dash, ↳) must encode cleanly.
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="cp932")
+    assert stream.encoding.lower() in ("cp932", "shift_jis", "ms932")
+
+    force_utf8_streams(stream)
+
+    assert stream.encoding.lower() == "utf-8"
+    stream.write("em-dash — and arrow ↳")  # must NOT raise UnicodeEncodeError
+    stream.flush()
+
+
+def test_force_utf8_streams_skips_streams_without_reconfigure() -> None:
+    # A stream that can't be reconfigured (no .reconfigure) must be left alone,
+    # not crash the program before it can print anything.
+    class _Plain:
+        encoding = "cp932"
+
+    plain = _Plain()
+    force_utf8_streams(plain)  # no AttributeError
+    assert plain.encoding == "cp932"  # untouched
+
+
+def test_force_utf8_streams_tolerates_reconfigure_failure() -> None:
+    # If reconfigure raises (e.g. a stream mid-write), we swallow it — failing to
+    # set UTF-8 must never be worse than the original crash-on-print.
+    class _Hostile:
+        encoding = "cp932"
+
+        def reconfigure(self, **_kw: object) -> None:
+            raise ValueError("already started")
+
+    force_utf8_streams(_Hostile())  # must not propagate
+
+
+def test_main_help_does_not_crash_on_cp932_console(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Regression: `kagura-agent run --help` printed the em-dash in the --grant
+    # help text straight to a cp932 stdout and died with UnicodeEncodeError.
+    # main() must reconfigure the streams before argparse prints anything.
+    import sys
+
+    out = io.TextIOWrapper(io.BytesIO(), encoding="cp932")
+    err = io.TextIOWrapper(io.BytesIO(), encoding="cp932")
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["run", "--help"])
+
+    assert exc.value.code == 0  # --help is a clean exit, not a crash
+    out.flush()
+    rendered = out.buffer.getvalue().decode("utf-8")
+    assert "--grant" in rendered  # the help body actually made it out
