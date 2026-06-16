@@ -33,6 +33,85 @@ GRANT_NOT_ENFORCED_WARNING = (
 )
 
 
+#: Decorative Unicode glyphs the CLI prints in help / doctor / setup output.
+#: A legacy OEM code page — notably the Japanese-Windows cp932 console — can't
+#: encode some of these (the em-dash and arrows aren't in cp932), so writing
+#: them raises UnicodeEncodeError and crashes before any output appears. These
+#: ASCII equivalents keep such a console readable instead of mojibake.
+_ASCII_FALLBACKS = {
+    ord("—"): "-",  # — em dash
+    ord("–"): "-",  # – en dash
+    ord("‘"): "'",  # ‘ left single quote
+    ord("’"): "'",  # ’ right single quote
+    ord("“"): '"',  # “ left double quote
+    ord("”"): '"',  # ” right double quote
+    ord("…"): "...",  # … horizontal ellipsis
+    ord("→"): "->",  # → rightwards arrow
+    ord("↳"): "->",  # ↳ downwards arrow with tip rightwards
+}
+
+#: One sample of every decorative glyph, used to probe a stream's encoding.
+_DECORATIVE_GLYPHS = "".join(chr(cp) for cp in _ASCII_FALLBACKS)
+
+
+class _AsciiFallbackStream:
+    """A text-stream proxy that transliterates the CLI's decorative glyphs to
+    ASCII before writing, so a legacy console shows readable text (``-``, ``->``)
+    instead of crashing or printing mojibake. Every other attribute delegates to
+    the wrapped stream, so it stays a drop-in for ``sys.stdout``/``sys.stderr``.
+    """
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def write(self, text: str) -> int:
+        self._stream.write(text.translate(_ASCII_FALLBACKS))
+        return len(text)  # chars consumed, per the TextIOBase.write contract
+
+    def writelines(self, lines: Any) -> None:
+        # Route through our write() so glyphs are transliterated; the inherited
+        # delegation would otherwise hit the raw stream untranslated.
+        for line in lines:
+            self.write(line)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
+def _encoding_handles_glyphs(stream: Any) -> bool:
+    """True if ``stream``'s encoding can render every decorative glyph as-is."""
+    encoding = getattr(stream, "encoding", None)
+    if not encoding:
+        return True  # a str-only stream (e.g. StringIO) has no byte encoding to fail
+    try:
+        _DECORATIVE_GLYPHS.encode(encoding)
+        return True
+    except (UnicodeEncodeError, LookupError):
+        return False
+
+
+def configure_output_stream(stream: Any) -> Any:
+    """Return a crash-proof, readable version of a CLI output stream.
+
+    If the stream's encoding already covers the CLI's decorative glyphs (UTF-8
+    and friends) it is returned unchanged — the nice glyphs are preserved. On a
+    legacy code page such as cp932 the stream is set to ``errors="replace"`` (so
+    an unexpected character degrades to ``?`` rather than crashing) and wrapped
+    so the decorative glyphs transliterate to ASCII.
+    """
+    if stream is None or isinstance(stream, _AsciiFallbackStream):
+        return stream  # already None, or already a fallback stream — don't nest
+    if _encoding_handles_glyphs(stream):
+        return stream
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(errors="replace")  # keep the code page; never crash on stray chars
+        except (ValueError, OSError):  # already-detached / mid-write / unsupported
+            pass
+    return _AsciiFallbackStream(stream)
+
+
 def resolve_grants(grant_specs: list[str] | None) -> tuple[GrantSet, str | None]:
     """Parse ``--grant PROVIDER:SCOPE`` specs into a :class:`GrantSet`.
 
@@ -208,6 +287,12 @@ def _run_probes(registry: Any) -> list[Any]:  # pragma: no cover - deployment ed
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
+    # Before argparse (or any handler) prints help/doctor/setup text containing
+    # non-cp932 glyphs, install crash-proof output streams: UTF-8 consoles keep
+    # the nice glyphs; a legacy code page (cp932) gets ASCII transliteration so
+    # it neither crashes nor renders mojibake.
+    sys.stdout = configure_output_stream(sys.stdout)
+    sys.stderr = configure_output_stream(sys.stderr)
     ns = parse_args(sys.argv[1:] if argv is None else argv)
     if ns.command == "doctor":
         from pathlib import Path
