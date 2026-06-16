@@ -41,3 +41,6 @@ logs/
 
 # kagura-engineer local dev config
 repo.yaml
+
+# Operator provider registry — references only, but gitignored as defense-in-depth
+kagura-agent.toml

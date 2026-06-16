@@ -31,6 +31,7 @@ from kagura_agent.membrane.providers import (
     CloudflareTokenProvider,
     GcpImpersonationProvider,
     GitHubAppProvider,
+    StaticEnvProvider,
 )
 from kagura_agent.membrane.registry import ProviderSpec, kind_schema
 from kagura_agent.membrane.registry_io import (
@@ -249,8 +250,15 @@ def _default_factory(  # pragma: no cover - deployment edge (needs cloud SDKs)
             "callable (the kagura auth session) — pass a custom _factory to build_broker"
         )
     if kind == "static_env":
-        raise ValueError(
-            f"provider {spec.name!r} (static_env) has no live provider yet — it lands in "
-            "#61; pass a custom _factory until then"
+        value_env = spec.fields.get("value_env")
+        if value_env is None:
+            raise ValueError(
+                f"provider {spec.name!r} (static_env) needs value_env to name the container "
+                "env var; value_file is not supported for static_env"
+            )
+        return StaticEnvProvider(
+            value=secrets["value"],
+            env_var=str(value_env),
+            standing_secret=bool(spec.fields.get("standing_secret", False)),
         )
     raise ValueError(f"provider {spec.name!r}: unsupported kind {kind!r}")

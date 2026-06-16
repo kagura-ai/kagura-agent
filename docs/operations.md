@@ -156,3 +156,57 @@ backing store so a crash can't leak live cloud credentials:
 CI/CD is out of scope while the repo is a placeholder; at first code the image
 build ties to the README's digest/lockfile pinning and the "ship Dockerfiles,
 not prebuilt images" decision in `docs/legal.md`.
+
+## Credential onboarding (v0.6)
+
+Providers are declared in `kagura-agent.toml` (gitignored, defense-in-depth). The
+registry stores **references only** — a `*_env` / `*_file` reference resolved on
+the host, never a secret value. Diagnose with `kagura-agent doctor` (add
+`--probe` to dry-mint), and register providers with the operator-gated
+`kagura-agent setup` wizard (it refuses to write a secret value).
+
+### `run --grant` (parse-only in v0.6)
+
+```
+kagura-agent run "do the task" --grant aws:arn:aws:iam::123:role/agent --grant slack:chat:write
+```
+
+`--grant PROVIDER:SCOPE` (repeatable) is parsed into a default-deny, exact-match
+`GrantSet`. **In v0.6 it is validated but NOT enforced** — the CLI prints a loud
+"not enforced" warning, and all configured providers remain reachable.
+Enforcement (default-deny at the broker chokepoint) lands in v0.7.
+
+### Static long-lived tokens (Slack / Discord / Resend)
+
+Some APIs only issue a long-lived static token — there is no short-lived mint.
+Register these as a `static_env` provider. Because a standing secret violates the
+membrane's no-standing-secret default, `static_env` is **fail-closed**: the
+provider refuses to construct unless you explicitly accept the risk with
+`standing_secret = true`. Use `value_env` (not `value_file`) for this kind — the
+container env-var name is taken from `value_env`. **Always pair it with a tight
+egress allowlist (see the note below the examples).**
+
+```toml
+[providers.slack]
+kind = "static_env"
+value_env = "SLACK_BOT_TOKEN"   # host env var holding the token; the container gets the same var
+standing_secret = true          # explicit operator consent — required, else refused
+# Contain it: allow egress only to slack.com / api.slack.com.
+
+[providers.discord]
+kind = "static_env"
+value_env = "DISCORD_BOT_TOKEN"
+standing_secret = true
+
+[providers.resend]
+kind = "static_env"
+value_env = "RESEND_API_KEY"
+standing_secret = true
+```
+
+**Contain the standing secret with egress.** A static token sits in the
+container's environment for the task's lifetime — a hijacked agent holds it with
+no expiry or revocation. Always pair `static_env` with a tight egress allowlist so
+the token can only be used against the intended API (e.g. Resend → allow only
+`api.resend.com`). The egress proxy (default-deny + allowlist) is the chokepoint
+that makes a leaked standing token unexfiltratable.
