@@ -223,6 +223,25 @@ def test_ambiguous_secret_three_suffixes_is_fail_closed():
         )
 
 
+def test_keyring_reference_must_be_a_string():
+    # A non-string keyring value (e.g. a TOML integer) must fail closed at the
+    # registry, not slip through to secret_source at resolve time.
+    with pytest.raises(ValueError, match="keyring|non-empty"):
+        parse_registry(
+            {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": 42}}
+        )
+
+
+def test_missing_required_secret_message_lists_all_suffixes():
+    # The missing-required-secret message must offer every backend variant,
+    # including keyring — not just env/file.
+    with pytest.raises(ValueError) as exc:
+        parse_registry({"cf": {"kind": "cloudflare", "account_id": "a"}})
+    msg = str(exc.value)
+    assert "parent_token_keyring" in msg
+    assert "parent_token_env" in msg and "parent_token_file" in msg
+
+
 def test_optional_secret_with_two_suffixes_still_ambiguous():
     # aws_sts.parent_token is OPTIONAL, but two suffixes are still ambiguous —
     # the ambiguity check must fire regardless of required/optional.

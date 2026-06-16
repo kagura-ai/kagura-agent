@@ -7,8 +7,9 @@ providers" without ever handing a secret to the agent.
 
 Security invariant — **the registry stores references only, never secrets.**
 A provider table may carry plain config (``role_arn``, ``account_id`` …) and
-*references* to secrets (``parent_token_env`` → a host env var, or
-``parent_token_file`` → a host file path), but never a bare secret value. The
+*references* to secrets (``parent_token_env`` → a host env var,
+``parent_token_file`` → a host file path, or ``parent_token_keyring`` → a host
+OS-keychain entry), but never a bare secret value. The
 inline-secret guard enforces this fail-closed: a bare ``parent_token`` /
 ``private_key`` (or any other obviously-secret key) is a ``ValueError``, not a
 silently-stored secret.
@@ -47,8 +48,10 @@ from kagura_agent.membrane.secret_source import SECRET_SUFFIXES
 
 @dataclass(frozen=True)
 class SecretRef:
-    """A secret a kind may reference. Given as ``<name>_env`` or ``<name>_file``;
-    the bare ``<name>`` form is always rejected (inline-secret guard)."""
+    """A secret a kind may reference. Given as one of the backend-suffix forms
+    in :data:`~kagura_agent.membrane.secret_source.SECRET_SUFFIXES`
+    (``<name>_env`` / ``<name>_file`` / ``<name>_keyring``); the bare ``<name>``
+    form is always rejected (inline-secret guard)."""
 
     name: str
     required: bool
@@ -59,7 +62,8 @@ class FieldSchema:
     """The fields a provider kind accepts.
 
     - ``required`` / ``optional``: plain (non-secret) config field names.
-    - ``secrets``: secret references; each accepted only as ``*_env`` / ``*_file``.
+    - ``secrets``: secret references; each accepted as any ``SECRET_SUFFIXES``
+      variant (``*_env`` / ``*_file`` / ``*_keyring``), exactly one per secret.
     """
 
     required: frozenset[str]
@@ -173,7 +177,8 @@ class ProviderSpec:
     """A validated, reference-only provider declaration.
 
     ``fields`` is a read-only view of the operator's declared config — plain
-    values and ``*_env`` / ``*_file`` references only, never a bare secret.
+    values and ``*_env`` / ``*_file`` / ``*_keyring`` references only, never a
+    bare secret.
     """
 
     name: str
@@ -190,7 +195,8 @@ def parse_registry(providers: Mapping[str, Any]) -> tuple[ProviderSpec, ...]:
     Fail-closed (``ValueError``) on: a non-mapping provider table, an empty /
     malformed provider name, a missing or unknown ``kind``, an inline (bare)
     secret, an unknown field, a missing required field, a missing required
-    secret reference, or an ambiguous secret (both ``*_env`` and ``*_file``).
+    secret reference, or an ambiguous secret (two or more of the
+    ``*_env`` / ``*_file`` / ``*_keyring`` variants for one logical secret).
     """
     if not isinstance(providers, Mapping):
         raise ValueError(f"providers must be a table/mapping, got {type(providers).__name__}")
