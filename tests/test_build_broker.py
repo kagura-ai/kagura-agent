@@ -233,6 +233,23 @@ def test_default_factory_refuses_static_env_without_standing_secret():
         build_broker(specs, clock=_clock, resolve_env={"SLACK_BOT_TOKEN": "x"}.get)
 
 
+def test_default_factory_refuses_static_env_with_string_standing_secret():
+    # A quoted string standing_secret="false" must not be bool()-coerced to True
+    # and bypass the gate — parse_registry stores it verbatim, the factory passes
+    # it raw, and StaticEnvProvider's identity check refuses it.
+    specs = _specs(
+        {
+            "slack": {
+                "kind": "static_env",
+                "value_env": "SLACK_BOT_TOKEN",
+                "standing_secret": "false",
+            }
+        }
+    )
+    with pytest.raises(StandingSecretRefused):
+        build_broker(specs, clock=_clock, resolve_env={"SLACK_BOT_TOKEN": "x"}.get)
+
+
 def test_default_factory_static_env_requires_value_env_not_value_file():
     # static_env needs value_env to name the container env var; value_file alone
     # is accepted by parse_registry but rejected (actionably) at build time.

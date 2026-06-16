@@ -284,10 +284,13 @@ class StaticEnvProvider:
     stateful = False  # the key is long-lived — nothing to revoke
 
     def __init__(self, *, value: str, env_var: str, standing_secret: bool = False) -> None:
-        if not standing_secret:
+        # Identity check, not truthiness: only the literal bool ``True`` opens the
+        # gate. A non-bool (e.g. a quoted ``"false"`` from TOML, which is truthy)
+        # must NOT bypass it — fail-closed against a malformed consent value.
+        if standing_secret is not True:
             raise StandingSecretRefused(
                 f"static_env carries a long-lived standing secret for {env_var!r}; set "
-                "standing_secret=true in the registry to explicitly accept the risk"
+                "standing_secret = true (a bare TOML boolean) to explicitly accept the risk"
             )
         self._value = value
         self._env_var = env_var

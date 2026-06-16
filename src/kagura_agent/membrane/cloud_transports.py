@@ -259,6 +259,8 @@ def _default_factory(  # pragma: no cover - deployment edge (needs cloud SDKs)
         return StaticEnvProvider(
             value=secrets["value"],
             env_var=str(value_env),
-            standing_secret=bool(spec.fields.get("standing_secret", False)),
+            # Pass the raw value (no bool() coercion — that would make a quoted
+            # "false" truthy); StaticEnvProvider's identity gate is the guard.
+            standing_secret=spec.fields.get("standing_secret", False),
         )
     raise ValueError(f"provider {spec.name!r}: unsupported kind {kind!r}")

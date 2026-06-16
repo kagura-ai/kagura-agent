@@ -33,6 +33,14 @@ def test_static_env_refuses_with_explicit_false():
         StaticEnvProvider(value="xoxb-tok", env_var="SLACK_BOT_TOKEN", standing_secret=False)
 
 
+@pytest.mark.parametrize("truthy_non_bool", ["false", "true", "1", 1])
+def test_static_env_refuses_truthy_non_bool_standing_secret(truthy_non_bool):
+    # A non-bool consent value (e.g. a quoted TOML "false", which is truthy) must
+    # NOT open the gate — only the literal bool True does (fail-closed).
+    with pytest.raises(StandingSecretRefused):
+        StaticEnvProvider(value="t", env_var="X", standing_secret=truthy_non_bool)
+
+
 def test_static_env_constructs_with_standing_secret():
     p = StaticEnvProvider(value="xoxb-tok", env_var="SLACK_BOT_TOKEN", standing_secret=True)
     assert p.stateful is False
