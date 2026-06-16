@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from kagura_agent.cli.main import force_utf8_streams, load_mcp_config, main, parse_args
+from kagura_agent.cli.main import configure_output_stream, load_mcp_config, main, parse_args
 from kagura_agent.core.brain.base import BrainUnavailable
 
 
@@ -133,49 +133,69 @@ def test_main_run_clean_error_on_invalid_mcp_json(tmp_path, capsys) -> None:  # 
     assert "--mcp-config" in capsys.readouterr().err
 
 
-# --- UTF-8 output: CLI text uses em-dash/arrow glyphs that crash a cp932 console ---
+# --- console output: CLI text uses em-dash/arrow glyphs a cp932 console can't encode ---
 
 
-def test_force_utf8_streams_reconfigures_a_cp932_stream() -> None:
-    # A legacy Windows console hands us a cp932 text stream; after we reconfigure
-    # it, the non-cp932 glyphs the CLI emits (em-dash, ↳) must encode cleanly.
-    stream = io.TextIOWrapper(io.BytesIO(), encoding="cp932")
-    assert stream.encoding.lower() in ("cp932", "shift_jis", "ms932")
+def test_configure_output_stream_keeps_utf8_stream_and_glyphs() -> None:
+    # A UTF-8-capable stream renders the decorative glyphs natively, so it is
+    # returned unchanged — no needless wrapping, glyphs preserved.
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    result = configure_output_stream(stream)
 
-    force_utf8_streams(stream)
-
-    assert stream.encoding.lower() == "utf-8"
-    stream.write("em-dash — and arrow ↳")  # must NOT raise UnicodeEncodeError
-    stream.flush()
-
-
-def test_force_utf8_streams_skips_streams_without_reconfigure() -> None:
-    # A stream that can't be reconfigured (no .reconfigure) must be left alone,
-    # not crash the program before it can print anything.
-    class _Plain:
-        encoding = "cp932"
-
-    plain = _Plain()
-    force_utf8_streams(plain)  # no AttributeError
-    assert plain.encoding == "cp932"  # untouched
+    assert result is stream
+    result.write("em-dash — and arrow ↳")
+    result.flush()
+    assert "—" in stream.buffer.getvalue().decode("utf-8")  # not transliterated
 
 
-def test_force_utf8_streams_tolerates_reconfigure_failure() -> None:
-    # If reconfigure raises (e.g. a stream mid-write), we swallow it — failing to
-    # set UTF-8 must never be worse than the original crash-on-print.
-    class _Hostile:
-        encoding = "cp932"
+def test_configure_output_stream_transliterates_glyphs_on_cp932() -> None:
+    # A cp932 console can't encode — / ↳; instead of crashing, the wrapper maps
+    # them to readable ASCII (-, ->) so output is never mojibake.
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp932")
+    result = configure_output_stream(stream)
 
-        def reconfigure(self, **_kw: object) -> None:
-            raise ValueError("already started")
+    assert result is not stream  # wrapped
+    result.write("em — dash, arrow ↳, ellipsis …")
+    result.flush()
+    out = raw.getvalue().decode("cp932")
+    assert "—" not in out and "↳" not in out and "…" not in out
+    assert "-" in out and "->" in out and "..." in out
 
-    force_utf8_streams(_Hostile())  # must not propagate
+
+def test_configure_output_stream_cp932_does_not_crash_on_other_nonencodable() -> None:
+    # A char that is neither ASCII nor in our table nor in cp932 (e.g. an emoji)
+    # must degrade to a replacement char, never raise UnicodeEncodeError.
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp932")
+    result = configure_output_stream(stream)
+
+    result.write("rocket 🚀 done")  # must NOT raise
+    result.flush()
+    assert raw.getvalue()  # something was written
 
 
-def test_main_help_does_not_crash_on_cp932_console(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_configure_output_stream_none_is_passthrough() -> None:
+    # A headless process (pythonw) can have sys.stdout is None; don't crash.
+    assert configure_output_stream(None) is None
+
+
+def test_configure_output_stream_wrapper_delegates_attributes() -> None:
+    # The wrapper must be a drop-in for sys.stdout: undefined attributes
+    # delegate to the wrapped stream (encoding, flush, isatty, ...).
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp932")
+    result = configure_output_stream(stream)
+
+    assert result.encoding.lower() in ("cp932", "shift_jis", "ms932")
+    assert callable(result.flush)
+    assert result.writable() is True
+
+
+def test_main_help_renders_ascii_on_cp932_console(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     # Regression: `kagura-agent run --help` printed the em-dash in the --grant
     # help text straight to a cp932 stdout and died with UnicodeEncodeError.
-    # main() must reconfigure the streams before argparse prints anything.
+    # main() must install the fallback stream before argparse prints anything.
     import sys
 
     out = io.TextIOWrapper(io.BytesIO(), encoding="cp932")
@@ -188,5 +208,6 @@ def test_main_help_does_not_crash_on_cp932_console(monkeypatch) -> None:  # type
 
     assert exc.value.code == 0  # --help is a clean exit, not a crash
     out.flush()
-    rendered = out.buffer.getvalue().decode("utf-8")
+    rendered = out.buffer.getvalue().decode("cp932")
     assert "--grant" in rendered  # the help body actually made it out
+    assert "—" not in rendered  # em-dash transliterated to ASCII, not mojibake
