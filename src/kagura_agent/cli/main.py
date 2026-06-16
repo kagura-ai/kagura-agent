@@ -68,6 +68,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="opt-in: dry-mint a short-lived scoped token per provider, then revoke "
         "(performs a real mint against the live provider)",
     )
+    setup = sub.add_parser(
+        "setup", help="operator-gated wizard: guidance for memory / transport auth"
+    )
+    setup.add_argument(
+        "topic",
+        nargs="?",
+        choices=["memory", "transport"],
+        help="show CLI-first guidance for memory or transport auth (default: both)",
+    )
     return parser.parse_args(list(argv))
 
 
@@ -188,6 +197,18 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             results = results + _run_probes(registry)
         print(format_report(results))  # one coherent report, one overall verdict
         return DOCTOR_FAIL_EXIT if overall_status(results) == FAIL else 0
+    if ns.command == "setup":
+        from kagura_agent.cli.setup import setup_memory_guidance, setup_transport_guidance
+
+        if ns.topic == "memory":
+            print(setup_memory_guidance())
+        elif ns.topic == "transport":
+            print(setup_transport_guidance())
+        else:
+            print(setup_memory_guidance())
+            print()
+            print(setup_transport_guidance())
+        return 0
     if ns.command == "run":
         try:
             mcp_servers = load_mcp_config(ns.mcp_config)
