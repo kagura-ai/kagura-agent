@@ -259,3 +259,48 @@ class CloudflareTokenProvider:
 
     def cred_to_env(self, cred: str) -> dict[str, str]:
         return cloudflare_cred_env(cred)
+
+
+class StandingSecretRefused(RuntimeError):
+    """Raised when a :class:`StaticEnvProvider` is built without explicit
+    standing-secret consent (``standing_secret=True``)."""
+
+
+class StaticEnvProvider:
+    """A long-lived static API key (Slack / Discord / Resend) exposed as container env.
+
+    The membrane prefers short-lived minted creds; some APIs only ever issue a
+    static long-lived key. This provider carries one — but the **documented
+    exception** to no-standing-secret is fail-closed: it refuses to construct
+    unless the operator explicitly accepts the risk with ``standing_secret=True``,
+    so a standing secret is never used by accident.
+
+    The key is long-lived: there is nothing to mint or revoke, so ``mint`` ignores
+    scope/ttl and returns the value, and ``revoke`` is a no-op. Pair it with a
+    tight egress allowlist (see docs/operations.md) so a hijacked agent can only
+    use the token against the intended API.
+    """
+
+    stateful = False  # the key is long-lived — nothing to revoke
+
+    def __init__(self, *, value: str, env_var: str, standing_secret: bool = False) -> None:
+        # Identity check, not truthiness: only the literal bool ``True`` opens the
+        # gate. A non-bool (e.g. a quoted ``"false"`` from TOML, which is truthy)
+        # must NOT bypass it — fail-closed against a malformed consent value.
+        if standing_secret is not True:
+            raise StandingSecretRefused(
+                f"static_env carries a long-lived standing secret for {env_var!r}; set "
+                "standing_secret = true (a bare TOML boolean) to explicitly accept the risk"
+            )
+        self._value = value
+        self._env_var = env_var
+
+    async def mint(self, scope: str, ttl: int) -> tuple[str, str | None]:
+        # Static key: scope/ttl do not apply; return the value, nothing to revoke.
+        return self._value, None
+
+    async def revoke(self, handle: str | None) -> None:
+        return None
+
+    def cred_to_env(self, cred: str) -> dict[str, str]:
+        return {self._env_var: cred}

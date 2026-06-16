@@ -11,7 +11,11 @@ import pytest
 
 from kagura_agent.membrane.cloud_transports import _resolve_spec_secrets, build_broker
 from kagura_agent.membrane.lease import Budget, CredentialBroker
-from kagura_agent.membrane.providers import MemoryCloudProvider, MemoryWriteLocked
+from kagura_agent.membrane.providers import (
+    MemoryCloudProvider,
+    MemoryWriteLocked,
+    StandingSecretRefused,
+)
 from kagura_agent.membrane.registry import ProviderSpec, kind_schema, parse_registry
 
 
@@ -186,17 +190,13 @@ def test_memory_cloud_schema_has_no_write_approval_field():
 
 
 # --------------------------------------------------------------------------
-# default factory — clear errors for kinds needing deployment callables / #61
+# default factory — clear errors for kinds needing deployment callables
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "table,needle",
     [
-        (
-            {"slack": {"kind": "static_env", "value_env": "SLACK", "standing_secret": True}},
-            "#61",
-        ),
         (
             {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_env": "CF"}},
             "token_spec",
@@ -209,6 +209,52 @@ def test_memory_cloud_schema_has_no_write_approval_field():
 )
 def test_default_factory_errors_for_kinds_needing_deployment_wiring(table, needle):
     specs = _specs(table)
-    env = {"SLACK": "x", "CF": "x", "MEM": "x"}
+    env = {"CF": "x", "MEM": "x"}
     with pytest.raises(ValueError, match=needle):
         build_broker(specs, clock=_clock, resolve_env=env.get)  # default factory
+
+
+async def test_default_factory_builds_static_env_with_standing_secret():
+    # #61: static_env is now buildable by the default factory (no SDK needed) and
+    # the token must round-trip all the way to the container env var.
+    specs = _specs(
+        {"slack": {"kind": "static_env", "value_env": "SLACK_BOT_TOKEN", "standing_secret": True}}
+    )
+    broker = build_broker(specs, clock=_clock, resolve_env={"SLACK_BOT_TOKEN": "xoxb-tok"}.get)
+    lease = await broker.acquire("slack", scope="static", ttl=60, budget=Budget(60))
+    assert lease.cred == "xoxb-tok"
+    # The whole point of static_env: the container gets the named env var.
+    assert broker.container_env([lease]) == {"SLACK_BOT_TOKEN": "xoxb-tok"}
+
+
+def test_default_factory_refuses_static_env_without_standing_secret():
+    specs = _specs({"slack": {"kind": "static_env", "value_env": "SLACK_BOT_TOKEN"}})
+    with pytest.raises(StandingSecretRefused):
+        build_broker(specs, clock=_clock, resolve_env={"SLACK_BOT_TOKEN": "x"}.get)
+
+
+def test_default_factory_refuses_static_env_with_string_standing_secret():
+    # A quoted string standing_secret="false" must not be bool()-coerced to True
+    # and bypass the gate — parse_registry stores it verbatim, the factory passes
+    # it raw, and StaticEnvProvider's identity check refuses it.
+    specs = _specs(
+        {
+            "slack": {
+                "kind": "static_env",
+                "value_env": "SLACK_BOT_TOKEN",
+                "standing_secret": "false",
+            }
+        }
+    )
+    with pytest.raises(StandingSecretRefused):
+        build_broker(specs, clock=_clock, resolve_env={"SLACK_BOT_TOKEN": "x"}.get)
+
+
+def test_default_factory_static_env_requires_value_env_not_value_file():
+    # static_env needs value_env to name the container env var; value_file alone
+    # is accepted by parse_registry but rejected (actionably) at build time.
+    specs = _specs(
+        {"slack": {"kind": "static_env", "value_file": "/run/s", "standing_secret": True}}
+    )
+    with pytest.raises(ValueError, match="value_env"):
+        build_broker(specs, clock=_clock, resolve_file=lambda p: "tok\n")

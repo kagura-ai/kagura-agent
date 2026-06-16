@@ -143,3 +143,21 @@ Two guardrails that hold regardless of what the agent asks for:
 
 In every case: scope down, keep the secret off the container's standing env, and
 let the membrane bound the blast radius.
+
+## Adding a credential provider kind
+
+Provider kinds live in `membrane/registry.py` (`KNOWN_KINDS` + `_KIND_FIELDS`,
+the typed per-kind schema) and `membrane/providers.py` (the `CredProvider`
+implementation). The registry validates an operator's `[providers.<name>]` block
+into a `ProviderSpec` (references only — `*_env` / `*_file`, never a bare secret),
+`registry_io.resolve_secret_ref` resolves the reference **host-side**, and
+`cloud_transports.build_broker` maps each spec to a live provider via the
+injectable `_factory` seam.
+
+Most providers mint short-lived, scoped creds. `StaticEnvProvider` is the
+deliberate exception for APIs that only issue a long-lived static token: it is
+fail-closed on `standing_secret` (refuses to construct without explicit operator
+consent) and exposes the token as a single container env var via `cred_to_env`.
+When adding a kind, prefer short-lived minting; only reach for the static path
+when the upstream API leaves no alternative, and document the required egress
+allowlist alongside it.

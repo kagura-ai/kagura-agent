@@ -23,6 +23,27 @@ from kagura_agent.cli.doctor import (
     run_doctor,
 )
 from kagura_agent.core.brain.base import BrainUnavailable
+from kagura_agent.membrane.registry import GrantSet, parse_grants
+
+#: --grant is parse-only in v0.6; this loud warning prevents an operator from
+#: mistaking a parsed grant for an enforced one (enforcement lands in v0.7).
+GRANT_NOT_ENFORCED_WARNING = (
+    "warning: --grant is parsed for validation only and is NOT yet enforced "
+    "(enforcement lands in v0.7); all configured providers remain reachable."
+)
+
+
+def resolve_grants(grant_specs: list[str] | None) -> tuple[GrantSet, str | None]:
+    """Parse ``--grant PROVIDER:SCOPE`` specs into a :class:`GrantSet`.
+
+    **Parse-only in v0.6**: the GrantSet is validated (a malformed spec is a
+    fail-closed ``ValueError``) and returned, but it is NOT enforced yet — so
+    when any grant is given, a loud "not enforced" warning is returned alongside
+    it for the caller to surface. Returns ``(GrantSet, warning_or_None)``.
+    """
+    grants = parse_grants(grant_specs or [])
+    warning = GRANT_NOT_ENFORCED_WARNING if grant_specs else None
+    return grants, warning
 
 
 def _nonempty_task(value: str) -> str:
@@ -53,6 +74,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         dest="strict_mcp_config",
         action="store_true",
         help="reject MCP servers not present in --mcp-config (no silent passthrough)",
+    )
+    run.add_argument(
+        "--grant",
+        dest="grants",
+        action="append",
+        default=None,
+        metavar="PROVIDER:SCOPE",
+        help="grant PROVIDER:SCOPE (repeatable). PARSED FOR VALIDATION ONLY in this "
+        "release — NOT yet enforced; enforcement lands in v0.7.",
     )
     doctor = sub.add_parser(
         "doctor", help="preflight check: memory / claude / docker / egress (+ providers)"
@@ -210,6 +240,14 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             print(setup_transport_guidance())
         return 0
     if ns.command == "run":
+        try:
+            _grants, grant_warning = resolve_grants(ns.grants)
+        except ValueError as exc:
+            # Malformed --grant spec — fail-closed with a clean message (exit 2).
+            print(f"--grant: {exc}", file=sys.stderr)
+            return 2
+        if grant_warning is not None:
+            print(grant_warning, file=sys.stderr)  # never let a parsed grant look enforced
         try:
             mcp_servers = load_mcp_config(ns.mcp_config)
         except (OSError, ValueError) as exc:
