@@ -121,6 +121,25 @@ def test_render_rejects_pattern_secret_in_env_field():
         )
 
 
+def test_render_rejects_secret_in_a_list_element():
+    # The value scan must recurse into list fields (e.g. gcp delegates), not just
+    # check top-level strings.
+    with pytest.raises(ValueError, match="looks like a secret"):
+        render_provider_block(
+            "gcp",
+            "gcp_impersonation",
+            {"service_account": "sa@x", "delegates": ["ok@x", "sk-" + "A" * 24]},
+        )
+
+
+def test_render_rejects_modern_dashed_anthropic_key_in_plain_field():
+    # sk-ant-api03-* / sk-proj-* contain dashes; the scan must still catch them.
+    with pytest.raises(ValueError, match="looks like a secret"):
+        render_provider_block(
+            "aws", "aws_sts", {"role_arn": "r", "session_name": "sk-ant-api03-" + "A" * 40}
+        )
+
+
 def test_render_dotted_name_is_quoted_and_round_trips():
     # A provider name with a dot would create nested tables if rendered bare;
     # it must be quoted so it stays a single key.

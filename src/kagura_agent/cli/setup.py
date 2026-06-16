@@ -42,7 +42,7 @@ class SetupNotAuthorized(RuntimeError):
 # of the registry's key-level inline-secret guard).
 _SECRET_VALUE_RE = re.compile(
     r"AKIA[A-Z0-9]{16}"  # AWS access key id
-    r"|sk-[A-Za-z0-9]{16,}"  # OpenAI / Anthropic-style key
+    r"|sk-[A-Za-z0-9_-]{16,}"  # OpenAI / Anthropic key (incl. sk-ant-api03-*, sk-proj-*)
     r"|ghp_[A-Za-z0-9]{20,}"  # GitHub personal access token
     r"|xox[baprs]-[A-Za-z0-9-]{10,}"  # Slack token
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"  # PEM private key
@@ -82,6 +82,21 @@ def _toml_value(value: Any) -> str:
     raise ValueError(f"unsupported TOML value type {type(value).__name__} for setup")
 
 
+def _assert_no_secret_value(key: str, value: Any, provider: str) -> None:
+    """Refuse a recognizable secret in ``value`` — recursing into list/tuple
+    elements so a secret hidden in a list field (e.g. ``delegates``) is caught too."""
+    if isinstance(value, str):
+        if _SECRET_VALUE_RE.search(value):
+            raise ValueError(
+                f"field {key!r} of provider {provider!r} looks like a secret value; the "
+                "registry stores references only — put the secret in an env var / file "
+                "and reference it with *_env / *_file"
+            )
+    elif isinstance(value, (list, tuple)):
+        for element in value:
+            _assert_no_secret_value(key, element, provider)
+
+
 def _header_key(name: str) -> str:
     """The provider name as a TOML header key — quoted if it isn't a bare key."""
     return name if _BARE_KEY_RE.match(name) else _toml_value(name)
@@ -106,14 +121,10 @@ def render_provider_block(name: str, kind: str, fields: Mapping[str, Any]) -> st
     # Guard 1: reference-only / kind / shape — reuse the registry's validation.
     parse_registry({name: table})
 
-    # Guard 2: no recognizable secret value in ANY field (plain or reference).
+    # Guard 2: no recognizable secret value in ANY field (plain or reference,
+    # recursing into list elements).
     for key, value in table.items():
-        if isinstance(value, str) and _SECRET_VALUE_RE.search(value):
-            raise ValueError(
-                f"field {key!r} of provider {name!r} looks like a secret value; the "
-                "registry stores references only — put the secret in an env var / file "
-                "and reference it with *_env / *_file"
-            )
+        _assert_no_secret_value(key, value, name)
 
     lines = [f"[providers.{_header_key(name)}]", f"kind = {_toml_value(kind)}"]
     for key, value in fields.items():
