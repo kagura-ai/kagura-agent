@@ -140,6 +140,7 @@ def _run_probes(registry: Any) -> list[Any]:  # pragma: no cover - deployment ed
         probe_provider,
     )
     from kagura_agent.membrane.cloud_transports import build_broker
+    from kagura_agent.membrane.registry_io import SecretRefError
 
     async def _all() -> list[Any]:
         out: list[Any] = []
@@ -152,8 +153,11 @@ def _run_probes(registry: Any) -> list[Any]:  # pragma: no cover - deployment ed
                 )
                 continue
             try:
+                # build_broker resolves secrets host-side, so it can raise both a
+                # ValueError (unsupported kind / ambiguous) and a SecretRefError
+                # (unresolved ref) — both become a per-provider FAIL, not a crash.
                 broker = build_broker([spec], clock=time.monotonic)
-            except ValueError as exc:
+            except (ValueError, SecretRefError) as exc:
                 out.append(
                     CheckResult(cname, FAIL, "could not build provider for --probe", hint=str(exc))
                 )
