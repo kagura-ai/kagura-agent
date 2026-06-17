@@ -7,8 +7,9 @@ providers" without ever handing a secret to the agent.
 
 Security invariant — **the registry stores references only, never secrets.**
 A provider table may carry plain config (``role_arn``, ``account_id`` …) and
-*references* to secrets (``parent_token_env`` → a host env var, or
-``parent_token_file`` → a host file path), but never a bare secret value. The
+*references* to secrets (``parent_token_env`` → a host env var,
+``parent_token_file`` → a host file path, or ``parent_token_keyring`` → a host
+OS-keychain entry), but never a bare secret value. The
 inline-secret guard enforces this fail-closed: a bare ``parent_token`` /
 ``private_key`` (or any other obviously-secret key) is a ``ValueError``, not a
 silently-stored secret.
@@ -38,6 +39,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
+from kagura_agent.membrane.secret_source import SECRET_SUFFIXES
+
 # --------------------------------------------------------------------------
 # Typed per-kind schema (the stable seam #57-61 read through kind_schema())
 # --------------------------------------------------------------------------
@@ -45,8 +48,10 @@ from typing import Any
 
 @dataclass(frozen=True)
 class SecretRef:
-    """A secret a kind may reference. Given as ``<name>_env`` or ``<name>_file``;
-    the bare ``<name>`` form is always rejected (inline-secret guard)."""
+    """A secret a kind may reference. Given as one of the backend-suffix forms
+    in :data:`~kagura_agent.membrane.secret_source.SECRET_SUFFIXES`
+    (``<name>_env`` / ``<name>_file`` / ``<name>_keyring``); the bare ``<name>``
+    form is always rejected (inline-secret guard)."""
 
     name: str
     required: bool
@@ -57,7 +62,8 @@ class FieldSchema:
     """The fields a provider kind accepts.
 
     - ``required`` / ``optional``: plain (non-secret) config field names.
-    - ``secrets``: secret references; each accepted only as ``*_env`` / ``*_file``.
+    - ``secrets``: secret references; each accepted as any ``SECRET_SUFFIXES``
+      variant (``*_env`` / ``*_file`` / ``*_keyring``), exactly one per secret.
     """
 
     required: frozenset[str]
@@ -171,7 +177,8 @@ class ProviderSpec:
     """A validated, reference-only provider declaration.
 
     ``fields`` is a read-only view of the operator's declared config — plain
-    values and ``*_env`` / ``*_file`` references only, never a bare secret.
+    values and ``*_env`` / ``*_file`` / ``*_keyring`` references only, never a
+    bare secret.
     """
 
     name: str
@@ -188,7 +195,8 @@ def parse_registry(providers: Mapping[str, Any]) -> tuple[ProviderSpec, ...]:
     Fail-closed (``ValueError``) on: a non-mapping provider table, an empty /
     malformed provider name, a missing or unknown ``kind``, an inline (bare)
     secret, an unknown field, a missing required field, a missing required
-    secret reference, or an ambiguous secret (both ``*_env`` and ``*_file``).
+    secret reference, or an ambiguous secret (two or more of the
+    ``*_env`` / ``*_file`` / ``*_keyring`` variants for one logical secret).
     """
     if not isinstance(providers, Mapping):
         raise ValueError(f"providers must be a table/mapping, got {type(providers).__name__}")
@@ -219,7 +227,9 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
 
     schema = _KIND_FIELDS[kind]
     secret_names = {s.name for s in schema.secrets}
-    ref_keys = {f"{n}_env" for n in secret_names} | {f"{n}_file" for n in secret_names}
+    # Suffix-agnostic (#63): every SECRET_SUFFIXES variant of a declared secret
+    # name is allowed, so a new backend (e.g. *_keyring) needs no per-kind edit.
+    ref_keys = {f"{n}{suf}" for n in secret_names for suf in SECRET_SUFFIXES}
     allowed = schema.required | schema.optional | ref_keys | {"kind"}
 
     fields: dict[str, Any] = {}
@@ -263,30 +273,52 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
             )
 
     for ref in schema.secrets:
-        env_key, file_key = f"{ref.name}_env", f"{ref.name}_file"
-        has_env, has_file = env_key in fields, file_key in fields
-        if has_env and has_file:
+        # Suffix-agnostic (#63): a logical secret may be satisfied by exactly one
+        # backend suffix. Count the present variants — 0+required = missing
+        # (fail-closed), exactly 1 = validate its value, 2+ = ambiguous (reject).
+        suffix_keys = {suf: f"{ref.name}{suf}" for suf in SECRET_SUFFIXES}
+        present = [suf for suf, key in suffix_keys.items() if key in fields]
+
+        # Ambiguity is checked first, regardless of required/optional: two
+        # references for one logical secret is always a misconfiguration.
+        if len(present) > 1:
+            keys = ", ".join(suffix_keys[suf] for suf in present)
             raise ValueError(
-                f"ambiguous secret {ref.name!r} for provider {name!r}: "
-                f"set only one of {env_key} / {file_key}"
+                f"ambiguous secret {ref.name!r} for provider {name!r}: set only one of {keys}"
             )
-        if has_env:
-            env_val = fields[env_key]
-            if not isinstance(env_val, str) or not _ENV_NAME_RE.match(env_val):
-                raise ValueError(
-                    f"{env_key} for provider {name!r} must be an environment variable "
-                    f"NAME (e.g. CF_TOKEN), not a value: got {env_val!r}"
-                )
-        if has_file:
-            file_val = fields[file_key]
-            if not isinstance(file_val, str) or not file_val.strip():
-                raise ValueError(
-                    f"{file_key} for provider {name!r} must be a non-empty file path"
-                )
-        if ref.required and not (has_env or has_file):
+
+        if present:
+            suf = present[0]
+            key = suffix_keys[suf]
+            val = fields[key]
+            if suf == "_env":
+                # An *_env reference must name a host env var, not carry a value —
+                # the NAME-shape check catches a raw secret pasted into the field.
+                if not isinstance(val, str) or not _ENV_NAME_RE.match(val):
+                    raise ValueError(
+                        f"{key} for provider {name!r} must be an environment variable "
+                        f"NAME (e.g. CF_TOKEN), not a value: got {val!r}"
+                    )
+            elif suf == "_file":
+                if not isinstance(val, str) or not val.strip():
+                    raise ValueError(
+                        f"{key} for provider {name!r} must be a non-empty file path"
+                    )
+            else:
+                # _keyring today (and any future non-env/file suffix): require a
+                # non-empty reference string. The backend-specific shape — keyring's
+                # "service/username", a future Vault path — is enforced fail-closed
+                # at resolve time by secret_source, so we don't duplicate it here.
+                if not isinstance(val, str) or not val.strip():
+                    raise ValueError(
+                        f"{key} for provider {name!r} must be a non-empty keyring "
+                        f"reference ('service/username')"
+                    )
+        elif ref.required:
+            all_keys = " / ".join(suffix_keys[suf] for suf in SECRET_SUFFIXES)
             raise ValueError(
                 f"provider {name!r} (kind={kind}) is missing required secret "
-                f"{ref.name!r}: set {env_key} or {file_key}"
+                f"{ref.name!r}: set one of {all_keys}"
             )
 
     # Deep-copy so ProviderSpec is a true immutable snapshot: MappingProxyType
