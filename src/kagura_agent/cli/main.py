@@ -27,6 +27,7 @@ from kagura_agent.cli.doctor import (
 )
 from kagura_agent.core.brain.base import BrainInvocationError, BrainUnavailable
 from kagura_agent.core.session import SessionError
+from kagura_agent.mcp.memory_cloud import MemoryUnreachableError
 from kagura_agent.membrane.registry import GrantSet, ProviderSpec, parse_grants
 from kagura_agent.patterns.checkpoint import (
     CheckpointError,
@@ -571,6 +572,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             # own usage-error exit code (2).
             print(str(exc), file=sys.stderr)
             return 3
+        except MemoryUnreachableError as exc:
+            # The startup gate (memory must be reachable + authenticated via the
+            # kagura CLI) — surface the actionable message cleanly (exit 3, a
+            # setup-not-ready code like BrainUnavailable), never a raw traceback.
+            print(str(exc), file=sys.stderr)
+            return 3
         except CredentialSetupError as exc:
             # Credential-provisioning input error (a malformed/missing registry, a
             # --grant naming a provider absent from it, or a kind needing deploy
@@ -615,6 +622,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
                 )
             )
         except BrainUnavailable as exc:
+            print(str(exc), file=sys.stderr)
+            return 3
+        except MemoryUnreachableError as exc:
             print(str(exc), file=sys.stderr)
             return 3
         except (CheckpointError, SessionError, BrainInvocationError) as exc:
