@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from kagura_agent.cli.doctor import (
@@ -24,7 +24,7 @@ from kagura_agent.cli.doctor import (
     run_doctor,
 )
 from kagura_agent.core.brain.base import BrainUnavailable
-from kagura_agent.membrane.registry import GrantSet, parse_grants
+from kagura_agent.membrane.registry import GrantSet, ProviderSpec, parse_grants
 
 log = logging.getLogger(__name__)
 
@@ -122,6 +122,29 @@ def resolve_grants(grant_specs: list[str] | None) -> GrantSet:
     broker and acquires no credential (the empty lease plan falls out for free).
     """
     return parse_grants(grant_specs or [])
+
+
+def plan_granted_specs(
+    registry: Iterable[ProviderSpec], grants: GrantSet
+) -> list[ProviderSpec]:
+    """Select only the registry specs a grant references (deterministic order).
+
+    Building **only** the granted providers is least-privilege and keeps the run
+    honest: an ungranted provider — which may need deployment wiring the default
+    factory cannot supply — is never constructed, so it can't abort a run that
+    never asked for it (this is also why ``doctor`` predicts the run: doctor only
+    resolves references, never builds an ungranted provider). Fail-closed: a
+    granted provider with no matching spec is a clean ``ValueError`` here, not a
+    later ``KeyError`` deep inside the broker.
+    """
+    by_name = {spec.name: spec for spec in registry}
+    granted_providers = sorted({g.provider for g in grants.grants})
+    missing = [p for p in granted_providers if p not in by_name]
+    if missing:
+        raise ValueError(
+            f"--grant names provider(s) not in the registry: {', '.join(missing)}"
+        )
+    return [by_name[p] for p in granted_providers]
 
 
 def _nonempty_task(value: str) -> str:
@@ -260,9 +283,11 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
     try:
         if reqs:
             assert grants is not None  # a non-empty plan implies --grant was given
-            broker = GrantedBroker(
-                build_broker(load_registry(registry_path), clock=time.monotonic), grants
-            )
+            # Build ONLY the granted providers (plan_granted_specs) — an ungranted,
+            # possibly deployment-incomplete provider in the registry must never
+            # abort a run that did not ask for it.
+            specs = plan_granted_specs(load_registry(registry_path), grants)
+            broker = GrantedBroker(build_broker(specs, clock=time.monotonic), grants)
             for req in reqs:
                 leases.append(
                     await broker.acquire(
@@ -418,6 +443,13 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             # own usage-error exit code (2).
             print(str(exc), file=sys.stderr)
             return 3
+        except ValueError as exc:
+            # Credential-provisioning input error (a malformed/missing registry, or
+            # a --grant naming a provider absent from it) — fail-closed with a clean
+            # message and exit 2, the operator-input code (mirrors doctor and
+            # --mcp-config), never a raw traceback.
+            print(f"--grant/--registry: {exc}", file=sys.stderr)
+            return 2
         print(result)
         return 0
     return 1

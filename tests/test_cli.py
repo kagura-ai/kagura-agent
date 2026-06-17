@@ -15,10 +15,11 @@ from kagura_agent.cli.main import (
     load_mcp_config,
     main,
     parse_args,
+    plan_granted_specs,
     resolve_grants,
 )
 from kagura_agent.core.brain.base import BrainUnavailable
-from kagura_agent.membrane.registry import GrantSet
+from kagura_agent.membrane.registry import GrantSet, parse_grants, parse_registry
 
 # --- #65: --grant is now ENFORCED; resolve_grants returns a GrantSet ----------
 
@@ -36,6 +37,44 @@ def test_resolve_grants_none_is_deny_all() -> None:
     grants = resolve_grants(None)
     assert isinstance(grants, GrantSet)
     assert grants.grants == frozenset()
+
+
+# --- #65: plan_granted_specs builds ONLY granted providers, fail-closed -------
+
+
+def _registry():
+    return parse_registry(
+        {
+            "aws": {"kind": "aws_sts", "role_arn": "arn:aws:iam::1:role/a"},
+            "mem": {"kind": "memory_cloud", "parent_token_env": "MEM"},
+        }
+    )
+
+
+def test_plan_granted_specs_selects_only_granted_providers() -> None:
+    # An UNGRANTED provider (mem, which needs deployment wiring) must NOT be in
+    # the build set — only the granted one (aws) is constructed, so an
+    # ungranted/incomplete provider can never abort a run that didn't ask for it.
+    specs = plan_granted_specs(_registry(), parse_grants(["aws:arn:aws:iam::1:role/a"]))
+    assert [s.name for s in specs] == ["aws"]
+
+
+def test_plan_granted_specs_empty_grants_selects_nothing() -> None:
+    assert plan_granted_specs(_registry(), GrantSet(frozenset())) == []
+
+
+def test_plan_granted_specs_unknown_granted_provider_is_fail_closed() -> None:
+    # A --grant naming a provider absent from the registry fails closed with a
+    # clean message here, not a later KeyError deep in the broker.
+    with pytest.raises(ValueError, match="not in the registry"):
+        plan_granted_specs(_registry(), parse_grants(["typo:scope"]))
+
+
+def test_plan_granted_specs_deterministic_order() -> None:
+    specs = plan_granted_specs(
+        _registry(), parse_grants(["mem:memory:read", "aws:arn:aws:iam::1:role/a"])
+    )
+    assert [s.name for s in specs] == ["aws", "mem"]  # sorted by provider name
 
 
 def test_resolve_grants_malformed_is_fail_closed() -> None:
@@ -142,6 +181,24 @@ def test_main_run_surfaces_brain_unavailable(monkeypatch, capsys) -> None:  # ty
     assert "claude" in err.lower()
     assert "--extra claude" in err or "kagura-agent[claude]" in err
     assert "internal error" not in err.lower()  # the failure mode this issue fixes
+
+
+def test_main_run_clean_error_on_credential_provisioning_failure(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    # #65: a credential-provisioning ValueError (bad/missing registry, or a
+    # --grant naming a provider absent from it) must surface as a clean exit-2
+    # message — never a raw traceback (the run path now matches doctor's posture).
+    from kagura_agent.cli import main as cli_main
+
+    async def _boom(*_a, **_k) -> str:
+        raise ValueError("--grant names provider(s) not in the registry: typo")
+
+    monkeypatch.setattr(cli_main, "_run_task", _boom)
+    rc = main(["run", "do a thing", "--grant", "typo:scope"])
+
+    assert rc == 2  # operator-input error, same code as malformed --grant / --mcp-config
+    err = capsys.readouterr().err
+    assert "registry" in err
+    assert "Traceback" not in err
 
 
 # --- --mcp-config load failures surface cleanly, not as a raw traceback ---
