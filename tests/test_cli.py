@@ -173,6 +173,24 @@ def test_make_memory_client_is_none_seam() -> None:
     assert make_memory_client() is None
 
 
+def test_main_run_rejects_invalid_brain_backend(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    # An unknown KAGURA_AGENT_BRAIN must fail closed up front (exit 2), never run
+    # the default backend silently and never reach brain construction.
+    monkeypatch.setenv("KAGURA_AGENT_BRAIN", "kagura_brain")  # typo (underscore)
+    rc = main(["run", "do a thing"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "KAGURA_AGENT_BRAIN" in err
+    assert "Traceback" not in err
+
+
+def test_main_repl_rejects_invalid_brain_backend(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("KAGURA_AGENT_BRAIN", "bogus")
+    rc = main(["repl"])
+    assert rc == 2
+    assert "KAGURA_AGENT_BRAIN" in capsys.readouterr().err
+
+
 # --- v0.2-A6: --mcp-config / --strict-mcp-config --------------------------
 
 def test_parse_run_defaults_have_no_mcp_config() -> None:

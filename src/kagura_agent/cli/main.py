@@ -346,7 +346,7 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
 ) -> str:
     import time
 
-    from kagura_agent.core.brain.claude import make_default_brain
+    from kagura_agent.core.brain.select import make_brain
     from kagura_agent.mcp.memory_cloud import ensure_memory_reachable, memory_reachable
     from kagura_agent.membrane.cloud_transports import build_broker
     from kagura_agent.membrane.granted_broker import GrantedBroker, lease_requests
@@ -402,7 +402,7 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
                 env_restore[key] = os.environ.get(key)
                 os.environ[key] = value
 
-        brain = make_default_brain(mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
+        brain = make_brain(os.environ, mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
         # A named --session uses a persistent on-disk store (resume across runs);
         # a one-shot run uses a throwaway in-memory store (no persisted context).
         store, sid = make_run_store(session_id)
@@ -515,6 +515,13 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             print(setup_transport_guidance())
         return 0
     if ns.command == "run":
+        from kagura_agent.core.brain.select import resolve_brain_backend
+
+        try:
+            resolve_brain_backend(os.environ)  # validate KAGURA_AGENT_BRAIN up front
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         try:
             grants = resolve_grants(ns.grants)
         except ValueError as exc:
@@ -566,6 +573,13 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
         print(result)
         return 0
     if ns.command == "repl":
+        from kagura_agent.core.brain.select import resolve_brain_backend
+
+        try:
+            resolve_brain_backend(os.environ)  # validate KAGURA_AGENT_BRAIN up front
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         try:
             mcp_servers = load_mcp_config(ns.mcp_config)
         except (OSError, ValueError) as exc:
@@ -607,12 +621,12 @@ async def _run_repl(  # pragma: no cover - needs SDK + subscription + interactiv
     mcp_servers: dict[str, Any] | None = None,
     strict_mcp_config: bool = False,
 ) -> None:
-    from kagura_agent.core.brain.claude import make_default_brain
+    from kagura_agent.core.brain.select import make_brain
     from kagura_agent.mcp.memory_cloud import ensure_memory_reachable, memory_reachable
     from kagura_agent.patterns.continuity import run_repl
 
     ensure_memory_reachable(reachable=memory_reachable())
-    brain = make_default_brain(mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
+    brain = make_brain(os.environ, mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
     store = FileCheckpointStore(resolve_state_dir())
     print(f"kagura-agent repl — session {session_id!r}. /exit to quit.")
     await run_repl(
