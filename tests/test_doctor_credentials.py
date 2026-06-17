@@ -79,6 +79,30 @@ def test_run_doctor_includes_secret_backends_check():
     assert any(r.name == "secret-backends" for r in results)
 
 
+def test_run_doctor_keyring_registry_without_extra_is_warn_not_fail(monkeypatch):
+    # #66 acceptance, end-to-end: a *_keyring registry on a host WITHOUT the extra
+    # makes doctor WARN (pre-run heads-up) — it must NOT hard-fail the gate. The
+    # secret-backends check and the provider check render the SAME WARN (never
+    # WARN + FAIL), so overall_status is WARN, not FAIL. Monkeypatched for
+    # determinism regardless of whether the test host has the keyring extra.
+    from kagura_agent.cli import doctor as doc
+
+    monkeypatch.setattr(doc, "_keyring_importable", lambda: False)
+    registry = parse_registry(
+        {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": "svc/agent"}}
+    )
+    results = run_doctor(
+        memory_probe=lambda: True,
+        sdk_probe=lambda: True,
+        docker_probe=lambda: True,
+        egress_probe=lambda: True,
+        env={"CLAUDE_CODE_SUBSCRIPTION": "1"},
+        registry=registry,
+    )
+    assert doc.overall_status(results) == WARN
+    assert all(r.status != FAIL for r in results)  # keyring-extra-absent is never a FAIL
+
+
 # --------------------------------------------------------------------------
 # check_provider — required / optional / resolution
 # --------------------------------------------------------------------------
@@ -100,21 +124,37 @@ def test_check_provider_fail_when_required_reference_unresolved():
 
 def test_check_provider_ok_when_required_keyring_reference_resolves():
     # #65: doctor is suffix-agnostic — a *_keyring reference the run path can
-    # resolve must pass doctor too (doctor predicts the run).
+    # resolve must pass doctor too (doctor predicts the run). keyring_available
+    # is forced True (the extra is present), so the reference is actually resolved.
     spec = _spec(
         {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": "svc/agent"}}
     )
-    r = check_provider(spec, resolve_keyring=lambda s, u: "kr-tok")
+    r = check_provider(spec, resolve_keyring=lambda s, u: "kr-tok", keyring_available=True)
     assert r.status == OK
 
 
 def test_check_provider_fail_when_required_keyring_reference_unresolved():
+    # Extra present (keyring_available=True) but the keychain entry is absent →
+    # a genuine resolution failure is a FAIL (distinct from the missing-extra WARN).
     spec = _spec(
         {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": "svc/agent"}}
     )
-    r = check_provider(spec, resolve_keyring=lambda s, u: None)  # keychain entry absent
+    r = check_provider(spec, resolve_keyring=lambda s, u: None, keyring_available=True)
     assert r.status == FAIL
     assert "keyring" in (r.hint or "")  # names the keychain ref, not the value
+
+
+def test_check_provider_warns_keyring_ref_when_extra_absent():
+    # #66: a *_keyring reference on a host WITHOUT the keyring extra is a WARN, not
+    # a FAIL — keyring availability is host-dependent (deploy-time concern). This
+    # is what lets doctor's overall verdict stay non-FAIL, matching the
+    # secret-backends WARN rather than contradicting it.
+    spec = _spec(
+        {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": "svc/agent"}}
+    )
+    r = check_provider(spec, keyring_available=False)
+    assert r.status == WARN
+    assert "keyring" in (r.hint or "") and "install" in (r.hint or "").lower()
 
 
 def test_check_provider_optional_reference_absent_is_not_fail():

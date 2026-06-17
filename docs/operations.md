@@ -189,8 +189,11 @@ parent_token_keyring = "kagura-cf/agent"
 
 `*_keyring` needs the optional extra (`pip install 'kagura-agent[keyring]'`). If a
 registry uses a `*_keyring` reference but the extra is absent, `kagura-agent
-doctor` reports a **`secret-backends` WARN** with the install hint *before* a run
-fails — and the run itself fail-closes with the same hint, never a silent miss.
+doctor` **WARNs** (it does *not* fail the gate — keyring availability is
+host-dependent, so doctor may run on a different host than the agent): both the
+`secret-backends` check and the per-provider check report the install hint as a
+heads-up. If this host is also where the agent runs, the run then fail-closes
+with the same hint — never a silent miss.
 
 ### `run --grant` (enforced in v0.7)
 

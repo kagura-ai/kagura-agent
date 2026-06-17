@@ -185,16 +185,27 @@ def run_doctor(
     # silently make the second consumer see nothing.
     if registry is not None:
         registry = tuple(registry)
+    # Probe the optional keyring extra once and share it, so the secret-backends
+    # check and the per-provider checks render the SAME severity for a *_keyring
+    # reference on a host without the extra (both WARN, never one WARN + one FAIL).
+    keyring_available = _keyring_importable()
     results = [
         check_memory(reachable=memory_probe()),
         check_brain(sdk_available=sdk_probe(), env=resolved_env),
         check_docker(available=docker_probe()),
         check_egress(configured=egress_probe()),
-        check_secret_backends(registry),
+        check_secret_backends(registry, keyring_available=keyring_available),
     ]
     if registry is not None:
         renv = resolve_env if resolve_env is not None else resolved_env.get
-        results.extend(check_providers(registry, resolve_env=renv, resolve_file=resolve_file))
+        results.extend(
+            check_providers(
+                registry,
+                resolve_env=renv,
+                resolve_file=resolve_file,
+                keyring_available=keyring_available,
+            )
+        )
     return results
 
 
@@ -209,6 +220,7 @@ def check_provider(
     resolve_env: EnvResolver = os.environ.get,
     resolve_file: FileResolver = _read_file,
     resolve_keyring: KeyringResolver = _real_keyring_get_password,
+    keyring_available: bool | None = None,
 ) -> CheckResult:
     """Diagnose whether a provider's secret references resolve on this host.
 
@@ -219,9 +231,18 @@ def check_provider(
     provider falls back to ambient/default creds), so it stays OK. This mirrors
     the suffix-agnostic resolution the run path uses (#65), so doctor predicts the
     run. This is the pre-flight answer to "why can't the agent touch X?".
+
+    A ``*_keyring`` reference on a host where the optional ``keyring`` extra is not
+    installed is a **WARN**, not a FAIL: keyring availability is host-dependent (a
+    deploy-time concern — doctor may run on a different host than the agent), and
+    ``check_secret_backends`` carries the install hint. Escalating it to FAIL here
+    would contradict that advisory and hard-fail the gate (#66).
     """
+    if keyring_available is None:
+        keyring_available = _keyring_importable()  # pragma: no cover - real probe
     name = f"provider:{spec.name}"
     fails: list[str] = []
+    warns: list[str] = []
     optional_absent: list[str] = []
     for ref in kind_schema(spec.kind).secrets:
         suffix_fields = {suf: f"{ref.name}{suf}" for suf in SECRET_SUFFIXES}
@@ -238,6 +259,15 @@ def check_provider(
                 optional_absent.append(ref.name)
             continue
         field = suffix_fields[present[0]]
+        if present[0] == _KEYRING_SUFFIX and not keyring_available:
+            # Can't verify a keyring ref without the extra — a deploy-time concern,
+            # not a definitive failure. WARN (the run still fail-closes with the
+            # same install hint if this host is also where the agent runs).
+            warns.append(
+                f"{ref.name}: {field} present but the 'keyring' extra is not installed "
+                "on this host — install: pip install 'kagura-agent[keyring]'"
+            )
+            continue
         try:
             resolve_secret_field(
                 field,
@@ -255,6 +285,13 @@ def check_provider(
             FAIL,
             f"{spec.kind}: {len(fails)} unresolved reference(s)",
             hint="; ".join(fails),
+        )
+    if warns:
+        return CheckResult(
+            name,
+            WARN,
+            f"{spec.kind}: {len(warns)} reference(s) not verifiable on this host",
+            hint="; ".join(warns),
         )
     detail = f"{spec.kind}: all required references resolve"
     if optional_absent:
@@ -322,6 +359,7 @@ def check_providers(
     resolve_env: EnvResolver = os.environ.get,
     resolve_file: FileResolver = _read_file,
     resolve_keyring: KeyringResolver = _real_keyring_get_password,
+    keyring_available: bool | None = None,
 ) -> list[CheckResult]:
     """A reference-resolution :class:`CheckResult` per provider in the registry."""
     return [
@@ -330,6 +368,7 @@ def check_providers(
             resolve_env=resolve_env,
             resolve_file=resolve_file,
             resolve_keyring=resolve_keyring,
+            keyring_available=keyring_available,
         )
         for spec in registry
     ]
