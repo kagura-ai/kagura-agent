@@ -178,6 +178,25 @@ def kind_schema(kind: str) -> FieldSchema:
         raise ValueError(f"unknown provider kind {kind!r} (known: {sorted(KNOWN_KINDS)})") from None
 
 
+def present_suffix_field(
+    ref: SecretRef, fields: Mapping[str, Any]
+) -> tuple[list[str], dict[str, str]]:
+    """Map one secret ref over a spec's ``fields``, honoring the ref's suffix set.
+
+    Returns ``(present, suffix_fields)`` where ``suffix_fields`` is
+    ``{suffix: "<name><suffix>"}`` for every backend variant *this* secret allows
+    (``ref.suffixes`` — narrower than :data:`SECRET_SUFFIXES` for a pinned secret
+    like ``static_env``'s ``_env``-only ``value``), and ``present`` is the subset
+    of those suffixes whose field is actually set in ``fields``. 0 = absent,
+    1 = the chosen backend, 2+ = ambiguous. The single suffix-dispatch kernel the
+    validator, ``build_broker``, and ``doctor`` share, so the present-field rule
+    (and the allowed-suffix narrowing) lives in exactly one place.
+    """
+    suffix_fields = {suf: f"{ref.name}{suf}" for suf in ref.suffixes}
+    present = [suf for suf, fld in suffix_fields.items() if fld in fields]
+    return present, suffix_fields
+
+
 # --------------------------------------------------------------------------
 # ProviderSpec + parse_registry
 # --------------------------------------------------------------------------
@@ -274,12 +293,17 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
             f"provider {name!r} (kind={kind}) is missing required field(s): {sorted(missing)}"
         )
 
-    # A present-but-empty required field (None, or a blank/whitespace string) is
-    # treated as missing — fail-closed, so a downstream consumer never receives
-    # an empty ARN/account_id where it expects a real value.
+    # A present-but-empty required field is treated as missing — fail-closed, so a
+    # downstream consumer never receives an empty/placeholder ARN/account_id where
+    # it expects a real value. "Empty" covers None, a blank/whitespace string, and
+    # any *falsy* non-string (False / 0 / [] / {}) — each would otherwise reach a
+    # `str(...)` downstream as a misleading "False"/"0"/"[]" instead of failing
+    # here. A truthy int (e.g. github_app's numeric app_id) is allowed through.
     for req in schema.required:
         val = fields[req]
-        if val is None or (isinstance(val, str) and not val.strip()):
+        blank_str = isinstance(val, str) and not val.strip()
+        falsy_nonstr = not isinstance(val, str) and not val
+        if blank_str or falsy_nonstr:
             raise ValueError(
                 f"provider {name!r} (kind={kind}) has an empty required field {req!r}"
             )
@@ -288,8 +312,7 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
         # Suffix-agnostic (#63): a logical secret may be satisfied by exactly one
         # backend suffix. Count the present variants — 0+required = missing
         # (fail-closed), exactly 1 = validate its value, 2+ = ambiguous (reject).
-        suffix_keys = {suf: f"{ref.name}{suf}" for suf in ref.suffixes}
-        present = [suf for suf, key in suffix_keys.items() if key in fields]
+        present, suffix_keys = present_suffix_field(ref, fields)
 
         # Ambiguity is checked first, regardless of required/optional: two
         # references for one logical secret is always a misconfiguration.

@@ -72,7 +72,16 @@ class _AsciiFallbackStream:
         self._stream = stream
 
     def write(self, text: str) -> int:
-        self._stream.write(text.translate(_ASCII_FALLBACKS))
+        translated = text.translate(_ASCII_FALLBACKS)
+        encoding = getattr(self._stream, "encoding", None)
+        if encoding:
+            # Last-resort safety net (#82): a non-decorative char that the stream's
+            # code page still can't encode — and which reconfigure(errors="replace")
+            # may have failed to make safe — would crash a strict stream. Degrade
+            # any such char to "?" so the wrapper is crash-proof regardless of
+            # whether the earlier reconfigure succeeded.
+            translated = translated.encode(encoding, "replace").decode(encoding, "replace")
+        self._stream.write(translated)
         return len(text)  # chars consumed, per the TextIOBase.write contract
 
     def writelines(self, lines: Any) -> None:
@@ -89,7 +98,12 @@ def _encoding_handles_glyphs(stream: Any) -> bool:
     """True if ``stream``'s encoding can render every decorative glyph as-is."""
     encoding = getattr(stream, "encoding", None)
     if not encoding:
-        return True  # a str-only stream (e.g. StringIO) has no byte encoding to fail
+        # No declared encoding. A pure-text stream (e.g. StringIO — no byte buffer
+        # underneath) can never raise UnicodeEncodeError, so the glyphs are safe.
+        # But a *byte*-backed stream (has a .buffer) that simply didn't report an
+        # encoding could be a legacy code page underneath — we can't claim it
+        # handles the glyphs, so fail closed (#82) and let the fallback wrap it.
+        return not hasattr(stream, "buffer")
     try:
         _DECORATIVE_GLYPHS.encode(encoding)
         return True

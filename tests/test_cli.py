@@ -305,6 +305,71 @@ def test_configure_output_stream_none_is_passthrough() -> None:
     assert configure_output_stream(None) is None
 
 
+def test_configure_output_stream_stringio_passthrough() -> None:
+    # #82 item 8: a pure-text stream (StringIO — no byte .buffer underneath) can
+    # never raise UnicodeEncodeError, so it is returned unchanged (glyphs kept).
+    s = io.StringIO()
+    assert configure_output_stream(s) is s
+
+
+class _FakeByteStreamNoEncoding:
+    """A byte-backed stream (has .buffer) that reports no encoding and has no
+    reconfigure — models a stream we cannot verify, so the fallback must wrap it
+    (#82 item 8) and write() must tolerate the unknown encoding without crashing."""
+
+    encoding = None
+
+    def __init__(self) -> None:
+        self.buffer = io.BytesIO()
+        self.written: list[str] = []
+
+    def write(self, text: str) -> int:
+        self.written.append(text)
+        return len(text)
+
+
+def test_configure_output_stream_wraps_byte_stream_with_no_encoding() -> None:
+    # #82 item 8: a byte-backed stream that didn't report an encoding could be a
+    # legacy code page underneath — fail closed and wrap it (not pass it through),
+    # and the wrapper must not crash when the encoding is unknown.
+    fake = _FakeByteStreamNoEncoding()
+    result = configure_output_stream(fake)
+    assert result is not fake  # wrapped, not passed through
+    result.write("dash — arrow ↳")  # must not raise despite unknown encoding
+    assert "".join(fake.written) == "dash - arrow ->"  # decorative glyphs transliterated
+
+
+class _ReconfigureFailsStream:
+    """A cp932 stream whose reconfigure() raises (e.g. detached/mid-write) and
+    which encodes strictly — models the #82 item 7 case where the errors='replace'
+    reconfigure is swallowed, so the wrapper itself must stay crash-proof."""
+
+    encoding = "cp932"
+
+    def __init__(self) -> None:
+        self.buffer = io.BytesIO()
+
+    def reconfigure(self, **_kw: object) -> None:
+        raise OSError("cannot reconfigure a detached stream")
+
+    def write(self, text: str) -> int:
+        self.buffer.write(text.encode("cp932"))  # strict: raises on a non-cp932 char
+        return len(text)
+
+
+def test_configure_output_stream_stays_crash_proof_when_reconfigure_fails() -> None:
+    # #82 item 7: when reconfigure(errors="replace") fails (swallowed), the stream
+    # is still strict — so the wrapper's own encode-safe net must degrade any char
+    # the code page can't encode (beyond the 9 glyphs) to "?" rather than crash.
+    stream = _ReconfigureFailsStream()
+    result = configure_output_stream(stream)
+    assert result is not stream  # wrapped despite the reconfigure failure
+    result.write("rocket 🚀 and dash —")  # must NOT raise
+    out = stream.buffer.getvalue().decode("cp932")
+    assert "—" not in out and "🚀" not in out  # em-dash transliterated, emoji replaced
+    assert "-" in out  # the em-dash degraded to ASCII
+
+
 def test_configure_output_stream_wrapper_delegates_attributes() -> None:
     # The wrapper must be a drop-in for sys.stdout: undefined attributes
     # delegate to the wrapped stream (encoding, flush, isatty, ...).

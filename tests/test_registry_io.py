@@ -18,8 +18,12 @@ import pytest
 from kagura_agent.membrane.registry_io import (
     SecretRefError,
     load_registry,
-    resolve_secret_ref,
 )
+
+# #65 folded v0.6's registry_io.resolve_secret_ref into the unified suffix
+# resolver; #82 removed the dead pass-through. The resolver behavior is exercised
+# here against secret_source.resolve_secret_field directly.
+from kagura_agent.membrane.secret_source import resolve_secret_field as resolve_secret_ref
 
 # --------------------------------------------------------------------------
 # load_registry
