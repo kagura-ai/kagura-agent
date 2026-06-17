@@ -33,18 +33,26 @@ from pathlib import Path
 from kagura_agent.core.brain.sdk_engine import claude_sdk_available
 from kagura_agent.mcp.memory_cloud import memory_reachable
 from kagura_agent.membrane.lease import Budget
-from kagura_agent.membrane.registry import ProviderSpec, kind_schema
-from kagura_agent.membrane.registry_io import (
-    EnvResolver,
-    FileResolver,
-    SecretRefError,
-    _read_file,
-)
+from kagura_agent.membrane.registry import ProviderSpec, kind_schema, present_suffix_field
 from kagura_agent.membrane.secret_source import (
     SECRET_SUFFIXES,
+    EnvResolver,
+    FileResolver,
     KeyringResolver,
+    _read_file,
     _real_keyring_get_password,
     resolve_secret_field,
+)
+from kagura_agent.membrane.secret_source import (
+    SecretSourceError as SecretRefError,
+)
+
+# Aliased on import: the `keyring_available` *parameter* of check_provider /
+# check_secret_backends shadows the function name inside those bodies, so the
+# live probe is referenced under a private alias (doctor's single keyring probe,
+# delegating to the resolver's source of truth — no bare `import keyring` here).
+from kagura_agent.membrane.secret_source import (
+    keyring_available as _keyring_available,
 )
 
 OK = "ok"
@@ -188,13 +196,13 @@ def run_doctor(
     # Probe the optional keyring extra once and share it, so the secret-backends
     # check and the per-provider checks render the SAME severity for a *_keyring
     # reference on a host without the extra (both WARN, never one WARN + one FAIL).
-    keyring_available = _keyring_importable()
+    keyring_present = _keyring_available()
     results = [
         check_memory(reachable=memory_probe()),
         check_brain(sdk_available=sdk_probe(), env=resolved_env),
         check_docker(available=docker_probe()),
         check_egress(configured=egress_probe()),
-        check_secret_backends(registry, keyring_available=keyring_available),
+        check_secret_backends(registry, keyring_available=keyring_present),
     ]
     if registry is not None:
         renv = resolve_env if resolve_env is not None else resolved_env.get
@@ -203,7 +211,7 @@ def run_doctor(
                 registry,
                 resolve_env=renv,
                 resolve_file=resolve_file,
-                keyring_available=keyring_available,
+                keyring_available=keyring_present,
             )
         )
     return results
@@ -239,21 +247,20 @@ def check_provider(
     would contradict that advisory and hard-fail the gate (#66).
     """
     if keyring_available is None:
-        keyring_available = _keyring_importable()  # pragma: no cover - real probe
+        keyring_available = _keyring_available()  # pragma: no cover - real probe
     name = f"provider:{spec.name}"
     fails: list[str] = []
     warns: list[str] = []
     optional_absent: list[str] = []
     for ref in kind_schema(spec.kind).secrets:
-        suffix_fields = {suf: f"{ref.name}{suf}" for suf in SECRET_SUFFIXES}
-        present = [suf for suf, fld in suffix_fields.items() if fld in spec.fields]
+        present, suffix_fields = present_suffix_field(ref, spec.fields)
         if len(present) > 1:
             keys = ", ".join(suffix_fields[suf] for suf in present)
             fails.append(f"{ref.name}: more than one of {keys} set (ambiguous)")
             continue
         if not present:
             if ref.required:
-                all_fields = " / ".join(suffix_fields[suf] for suf in SECRET_SUFFIXES)
+                all_fields = " / ".join(suffix_fields[suf] for suf in ref.suffixes)
                 fails.append(f"{ref.name}: required but none of {all_fields} is set")
             else:
                 optional_absent.append(ref.name)
@@ -304,14 +311,6 @@ def check_provider(
 _KEYRING_SUFFIX = SECRET_SUFFIXES[-1]
 
 
-def _keyring_importable() -> bool:  # pragma: no cover - probes the optional extra
-    try:
-        import keyring  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
 def check_secret_backends(
     registry: Iterable[ProviderSpec] | None = None,
     *,
@@ -329,7 +328,7 @@ def check_secret_backends(
     still fail-closes with the same hint.
     """
     if keyring_available is None:
-        keyring_available = _keyring_importable()  # pragma: no cover - real probe
+        keyring_available = _keyring_available()  # pragma: no cover - real probe
     if keyring_available:
         return CheckResult(
             "secret-backends", OK, "env + file + keyring references all resolvable"

@@ -161,6 +161,22 @@ def _real_keyring_get_password(  # pragma: no cover - real OS keychain backend
     return password
 
 
+def keyring_available() -> bool:
+    """Whether the optional ``keyring`` extra is importable on this host.
+
+    The single source of truth for "can a ``*_keyring`` reference resolve here?",
+    so the rule lives next to the resolver instead of being re-derived by a bare
+    ``import keyring`` elsewhere (doctor calls this). Like the real keychain
+    backend it cannot be unit-covered on the success path — that line is reached
+    only when the extra is actually installed.
+    """
+    try:
+        import keyring  # noqa: F401
+    except ImportError:
+        return False
+    return True  # pragma: no cover - reached only when the optional 'keyring' extra is installed
+
+
 @dataclass(frozen=True)
 class KeyringSource:
     """Resolve ``*_keyring`` references against the host OS keychain.
