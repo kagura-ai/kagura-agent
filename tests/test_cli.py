@@ -184,13 +184,15 @@ def test_main_run_surfaces_brain_unavailable(monkeypatch, capsys) -> None:  # ty
 
 
 def test_main_run_clean_error_on_credential_provisioning_failure(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
-    # #65: a credential-provisioning ValueError (bad/missing registry, or a
-    # --grant naming a provider absent from it) must surface as a clean exit-2
-    # message — never a raw traceback (the run path now matches doctor's posture).
+    # A credential-provisioning failure (bad/missing registry, or a --grant naming
+    # a provider absent from it) raises CredentialSetupError and must surface as a
+    # clean exit-2 message — never a raw traceback (matches doctor's posture).
     from kagura_agent.cli import main as cli_main
 
     async def _boom(*_a, **_k) -> str:
-        raise ValueError("--grant names provider(s) not in the registry: typo")
+        raise cli_main.CredentialSetupError(
+            "--grant names provider(s) not in the registry: typo"
+        )
 
     monkeypatch.setattr(cli_main, "_run_task", _boom)
     rc = main(["run", "do a thing", "--grant", "typo:scope"])
@@ -199,6 +201,20 @@ def test_main_run_clean_error_on_credential_provisioning_failure(monkeypatch, ca
     err = capsys.readouterr().err
     assert "registry" in err
     assert "Traceback" not in err
+
+
+def test_main_run_does_not_mislabel_an_unrelated_value_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A ValueError raised LATER by the agent run (cockpit.serve / the brain) must
+    # NOT be caught and mislabeled as a --grant/--registry error — it propagates
+    # as itself. Guards against the over-broad `except ValueError` (#code-review).
+    from kagura_agent.cli import main as cli_main
+
+    async def _boom(*_a, **_k) -> str:
+        raise ValueError("a deep run-time error unrelated to credentials")
+
+    monkeypatch.setattr(cli_main, "_run_task", _boom)
+    with pytest.raises(ValueError, match="deep run-time error"):
+        main(["run", "do a thing"])
 
 
 # --- --mcp-config load failures surface cleanly, not as a raw traceback ---

@@ -28,6 +28,13 @@ from kagura_agent.membrane.registry import GrantSet, ProviderSpec, parse_grants
 
 log = logging.getLogger(__name__)
 
+
+class CredentialSetupError(RuntimeError):
+    """A run's credential provisioning failed on operator input (a malformed /
+    missing registry, a --grant naming a provider absent from it, or a provider
+    kind needing deployment wiring). Distinct from a ValueError raised later by
+    the agent run, so main() surfaces only the former as a clean exit-2 message."""
+
 #: Lease tuning for the run path's granted credentials (#65). A short TTL plus a
 #: renewable budget keeps a leaked cred short-lived; the run releases on exit.
 _LEASE_TTL_SEC = 900
@@ -285,9 +292,17 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
             assert grants is not None  # a non-empty plan implies --grant was given
             # Build ONLY the granted providers (plan_granted_specs) — an ungranted,
             # possibly deployment-incomplete provider in the registry must never
-            # abort a run that did not ask for it.
-            specs = plan_granted_specs(load_registry(registry_path), grants)
-            broker = GrantedBroker(build_broker(specs, clock=time.monotonic), grants)
+            # abort a run that did not ask for it. Wrap the config-construction
+            # ValueErrors (bad registry, unknown granted provider, unsupported
+            # kind) in CredentialSetupError so main() can give a clean exit-2
+            # message WITHOUT swallowing an unrelated ValueError raised later by
+            # the agent run (cockpit.serve / the brain).
+            try:
+                specs = plan_granted_specs(load_registry(registry_path), grants)
+                inner = build_broker(specs, clock=time.monotonic)
+            except ValueError as exc:
+                raise CredentialSetupError(str(exc)) from exc
+            broker = GrantedBroker(inner, grants)
             for req in reqs:
                 leases.append(
                     await broker.acquire(
@@ -443,11 +458,13 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             # own usage-error exit code (2).
             print(str(exc), file=sys.stderr)
             return 3
-        except ValueError as exc:
-            # Credential-provisioning input error (a malformed/missing registry, or
-            # a --grant naming a provider absent from it) — fail-closed with a clean
-            # message and exit 2, the operator-input code (mirrors doctor and
-            # --mcp-config), never a raw traceback.
+        except CredentialSetupError as exc:
+            # Credential-provisioning input error (a malformed/missing registry, a
+            # --grant naming a provider absent from it, or a kind needing deploy
+            # wiring) — fail-closed with a clean message and exit 2, the operator-
+            # input code (mirrors doctor and --mcp-config), never a raw traceback.
+            # NOT a bare `except ValueError`: a ValueError raised later by the
+            # agent run must surface as itself, not be mislabeled a --grant error.
             print(f"--grant/--registry: {exc}", file=sys.stderr)
             return 2
         print(result)

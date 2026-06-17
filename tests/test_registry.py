@@ -181,10 +181,35 @@ def test_required_secret_satisfied_by_keyring_alone():
     assert specs[0].kind == "cloudflare"
 
 
-def test_static_env_value_keyring_accepted_without_schema_edit():
-    # static_env declares the logical secret `value`; value_keyring is auto-allowed.
-    specs = parse_registry({"s": {"kind": "static_env", "value_keyring": "svc/key"}})
-    assert specs[0].fields["value_keyring"] == "svc/key"
+def test_static_env_value_is_env_only():
+    # static_env's value is _env-only: the container env-var NAME is value_env, so
+    # value_file / value_keyring have no var to name and the factory can't honor
+    # them. Reject at parse time (a SecretRef.suffixes restriction) so doctor and
+    # the run agree, rather than doctor passing a config the run aborts on.
+    specs = parse_registry({"s": {"kind": "static_env", "value_env": "SLACK_TOKEN"}})
+    assert specs[0].fields["value_env"] == "SLACK_TOKEN"
+    for bad in ("value_file", "value_keyring"):
+        with pytest.raises(ValueError, match="unknown field"):
+            parse_registry({"s": {"kind": "static_env", bad: "x"}})
+
+
+def test_static_env_missing_value_lists_only_env_variant():
+    # The missing-required message reflects the restricted suffix set (value_env),
+    # not all three variants.
+    with pytest.raises(ValueError, match="value_env") as exc:
+        parse_registry({"s": {"kind": "static_env", "standing_secret": True}})
+    assert "value_keyring" not in str(exc.value) and "value_file" not in str(exc.value)
+
+
+def test_env_reference_with_trailing_newline_is_rejected():
+    # _ENV_NAME_RE must reject a trailing newline (it documents "no newlines").
+    # `$` matched before a final \n; fullmatch closes that so the operator gets the
+    # clear "must be an environment variable NAME" error at parse time, not a
+    # confusing deferred "unset var" at resolve time.
+    with pytest.raises(ValueError, match="environment variable|NAME"):
+        parse_registry(
+            {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_env": "CF_TOKEN\n"}}
+        )
 
 
 def test_keyring_reference_must_be_non_empty():

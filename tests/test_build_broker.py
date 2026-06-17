@@ -304,10 +304,13 @@ def test_default_factory_refuses_static_env_with_string_standing_secret():
 
 
 def test_default_factory_static_env_requires_value_env_not_value_file():
-    # static_env needs value_env to name the container env var; value_file alone
-    # is accepted by parse_registry but rejected (actionably) at build time.
-    specs = _specs(
-        {"slack": {"kind": "static_env", "value_file": "/run/s", "standing_secret": True}}
+    # parse_registry now rejects value_file/value_keyring for static_env (value is
+    # _env-only), but build_broker accepts any hand-built ProviderSpec, so the
+    # factory keeps its own actionable guard as defense-in-depth for that path.
+    spec = ProviderSpec(
+        name="slack",
+        kind="static_env",
+        fields={"value_file": "/run/s", "standing_secret": True},
     )
     with pytest.raises(ValueError, match="value_env"):
-        build_broker(specs, clock=_clock, resolve_file=lambda p: "tok\n")
+        build_broker([spec], clock=_clock, resolve_file=lambda p: "tok\n")
