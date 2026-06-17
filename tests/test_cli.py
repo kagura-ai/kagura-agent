@@ -7,6 +7,7 @@ this flag is for *other* MCP servers, mirroring Claude Code's own flag) and
 
 import io
 import json
+from pathlib import Path
 
 import pytest
 
@@ -14,12 +15,16 @@ from kagura_agent.cli.main import (
     configure_output_stream,
     load_mcp_config,
     main,
+    make_memory_client,
+    make_run_store,
     parse_args,
     plan_granted_specs,
     resolve_grants,
+    resolve_state_dir,
 )
 from kagura_agent.core.brain.base import BrainUnavailable
 from kagura_agent.membrane.registry import GrantSet, parse_grants, parse_registry
+from kagura_agent.patterns.checkpoint import FileCheckpointStore, InMemoryCheckpointStore
 
 # --- #65: --grant is now ENFORCED; resolve_grants returns a GrantSet ----------
 
@@ -107,6 +112,65 @@ def test_parse_rejects_empty_task() -> None:
 def test_parse_rejects_whitespace_task() -> None:
     with pytest.raises(SystemExit):
         parse_args(["run", "   "])
+
+
+# --- context continuity: --session, repl, store selection ----------------
+
+
+def test_parse_run_session_defaults_none() -> None:
+    assert parse_args(["run", "t"]).session is None
+
+
+def test_parse_run_accepts_session() -> None:
+    assert parse_args(["run", "t", "--session", "work"]).session == "work"
+
+
+def test_parse_repl_command_defaults() -> None:
+    ns = parse_args(["repl"])
+    assert ns.command == "repl"
+    assert ns.session == "repl"  # default session id
+    assert ns.mcp_config is None and ns.strict_mcp_config is False
+
+
+def test_parse_repl_accepts_session_and_mcp() -> None:
+    ns = parse_args(["repl", "--session", "work", "--mcp-config", "/m.json", "--strict-mcp-config"])
+    assert ns.session == "work"
+    assert ns.mcp_config == "/m.json" and ns.strict_mcp_config is True
+
+
+def test_make_run_store_oneshot_is_ephemeral() -> None:
+    # No --session → a throwaway in-memory store under the fixed one-shot id, so a
+    # plain `run` keeps no cross-run context (unchanged legacy behaviour).
+    store, sid = make_run_store(None)
+    assert isinstance(store, InMemoryCheckpointStore)
+    assert sid == "cli"
+
+
+def test_make_run_store_named_is_persistent() -> None:
+    store, sid = make_run_store("work")
+    assert isinstance(store, FileCheckpointStore)
+    assert sid == "work"
+
+
+def test_resolve_state_dir_default() -> None:
+    assert resolve_state_dir({}) == Path(".kagura-agent") / "checkpoints"
+
+
+def test_resolve_state_dir_env_override() -> None:
+    out = resolve_state_dir({"KAGURA_AGENT_STATE_DIR": "/var/lib/ka"})
+    assert out == Path("/var/lib/ka") / "checkpoints"
+
+
+def test_resolve_state_dir_blank_env_is_default() -> None:
+    # A set-but-blank override must not resolve to the filesystem root.
+    out = resolve_state_dir({"KAGURA_AGENT_STATE_DIR": "   "})
+    assert out == Path(".kagura-agent") / "checkpoints"
+
+
+def test_make_memory_client_is_none_seam() -> None:
+    # The grounding seam (B): None until a trust-aware adapter is wired, so
+    # ground_and_run degrades to plain checkpoint resume.
+    assert make_memory_client() is None
 
 
 # --- v0.2-A6: --mcp-config / --strict-mcp-config --------------------------
