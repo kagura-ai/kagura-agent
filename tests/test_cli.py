@@ -10,8 +10,37 @@ import json
 
 import pytest
 
-from kagura_agent.cli.main import configure_output_stream, load_mcp_config, main, parse_args
+from kagura_agent.cli.main import (
+    configure_output_stream,
+    load_mcp_config,
+    main,
+    parse_args,
+    resolve_grants,
+)
 from kagura_agent.core.brain.base import BrainUnavailable
+from kagura_agent.membrane.registry import GrantSet
+
+# --- #65: --grant is now ENFORCED; resolve_grants returns a GrantSet ----------
+
+
+def test_resolve_grants_parses_to_grantset() -> None:
+    grants = resolve_grants(["aws:s3:read", "cf:zone:purge"])
+    assert isinstance(grants, GrantSet)
+    assert grants.allows("aws", "s3:read")
+    assert grants.allows("cf", "zone:purge")
+    assert not grants.allows("aws", "s3:write")  # exact-match, default-deny
+
+
+def test_resolve_grants_none_is_deny_all() -> None:
+    # No --grant → empty GrantSet: default-deny, nothing reachable (no broker).
+    grants = resolve_grants(None)
+    assert isinstance(grants, GrantSet)
+    assert grants.grants == frozenset()
+
+
+def test_resolve_grants_malformed_is_fail_closed() -> None:
+    with pytest.raises(ValueError):
+        resolve_grants(["no-colon-here"])
 
 
 def test_parse_run_with_task() -> None:

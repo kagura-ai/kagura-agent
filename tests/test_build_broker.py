@@ -96,6 +96,59 @@ def test_resolve_spec_secrets_ambiguous_env_and_file_is_fail_closed():
         _resolve_spec_secrets(spec, resolve_env={"CF": "v"}.get, resolve_file=lambda p: "f")
 
 
+def test_resolve_spec_secrets_keyring_form():
+    # #65: a *_keyring secret resolves host-side via the injected keyring reader —
+    # suffix-agnostic, no per-kind change.
+    spec = ProviderSpec(
+        name="cf",
+        kind="cloudflare",
+        fields={"account_id": "a", "parent_token_keyring": "svc/agent"},
+    )
+    out = _resolve_spec_secrets(
+        spec,
+        resolve_env={}.get,
+        resolve_file=lambda _p: "",
+        resolve_keyring=lambda s, u: f"kr[{s}/{u}]",
+    )
+    assert out == {"parent_token": "kr[svc/agent]"}
+
+
+def test_resolve_spec_secrets_ambiguous_env_and_keyring_is_fail_closed():
+    spec = ProviderSpec(
+        name="cf",
+        kind="cloudflare",
+        fields={"account_id": "a", "parent_token_env": "CF", "parent_token_keyring": "svc/agent"},
+    )
+    with pytest.raises(ValueError, match="ambiguous"):
+        _resolve_spec_secrets(
+            spec,
+            resolve_env={"CF": "v"}.get,
+            resolve_file=lambda _p: "",
+            resolve_keyring=lambda s, u: "x",
+        )
+
+
+async def test_build_broker_keyring_resolution_reaches_factory():
+    # End-to-end through build_broker: an injected keyring reader resolves a
+    # *_keyring secret and the resolved value reaches the provider factory.
+    specs = _specs(
+        {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": "cf-svc/agent"}}
+    )
+    seen: dict[str, str] = {}
+
+    def factory(spec, secrets):
+        seen.update(secrets)
+        return StubProvider(spec.name)
+
+    build_broker(
+        specs,
+        clock=_clock,
+        resolve_keyring=lambda s, u: f"kr-{s}-{u}",
+        _factory=factory,
+    )
+    assert seen == {"parent_token": "kr-cf-svc-agent"}
+
+
 async def test_memory_cloud_built_from_registry_is_read_locked_end_to_end():
     # A registry-derived memory_cloud carries no write signal, so a deployer
     # factory builds it read-locked; the broker then refuses memory:write.

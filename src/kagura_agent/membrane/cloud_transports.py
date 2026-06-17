@@ -34,11 +34,14 @@ from kagura_agent.membrane.providers import (
     StaticEnvProvider,
 )
 from kagura_agent.membrane.registry import ProviderSpec, kind_schema
-from kagura_agent.membrane.registry_io import (
+from kagura_agent.membrane.secret_source import (
+    SECRET_SUFFIXES,
     EnvResolver,
     FileResolver,
+    KeyringResolver,
     _read_file,
-    resolve_secret_ref,
+    _real_keyring_get_password,
+    resolve_secret_field,
 )
 
 
@@ -155,30 +158,38 @@ def _resolve_spec_secrets(
     *,
     resolve_env: EnvResolver,
     resolve_file: FileResolver,
+    resolve_keyring: KeyringResolver = _real_keyring_get_password,
 ) -> dict[str, str]:
-    """Resolve every ``*_env`` / ``*_file`` secret a spec's kind declares into
-    ``{logical_name: value}`` — host-side, via #57's resolver.
+    """Resolve every secret a spec's kind declares into ``{logical_name: value}``
+    — host-side, via the unified suffix resolver (#62/#65).
 
-    Required secrets are guaranteed present by ``parse_registry``; optional ones
-    are resolved only when their reference field is present.
+    Suffix-agnostic: whichever ``SECRET_SUFFIXES`` variant (``*_env`` / ``*_file``
+    / ``*_keyring``) the operator declared is resolved through the same
+    :func:`resolve_secret_field`, so a new backend works for every provider with
+    no per-kind change. Required secrets are guaranteed present by
+    ``parse_registry``; optional ones are resolved only when present.
     """
     resolved: dict[str, str] = {}
     for ref in kind_schema(spec.kind).secrets:
-        env_field, file_field = f"{ref.name}_env", f"{ref.name}_file"
-        has_env, has_file = env_field in spec.fields, file_field in spec.fields
-        if has_env and has_file:
+        suffix_fields = {suf: f"{ref.name}{suf}" for suf in SECRET_SUFFIXES}
+        present = [suf for suf, field in suffix_fields.items() if field in spec.fields]
+        if len(present) > 1:
             # parse_registry already rejects this, but build_broker accepts any
             # Iterable[ProviderSpec] (e.g. a hand-built spec from #59/#60), so
-            # guard here too rather than silently letting _env win and dropping
-            # the _file reference (wrong credential source, no diagnostic).
+            # guard here too rather than silently letting one suffix win and
+            # dropping the others (wrong credential source, no diagnostic).
+            keys = ", ".join(suffix_fields[suf] for suf in present)
             raise ValueError(
-                f"provider {spec.name!r}: ambiguous secret {ref.name!r} — both "
-                f"{env_field} and {file_field} are set; provide exactly one"
+                f"provider {spec.name!r}: ambiguous secret {ref.name!r} — set only one of {keys}"
             )
-        field = env_field if has_env else file_field if has_file else None
-        if field is not None:
-            resolved[ref.name] = resolve_secret_ref(
-                field, spec.fields[field], get_env=resolve_env, read_file=resolve_file
+        if present:
+            field = suffix_fields[present[0]]
+            resolved[ref.name] = resolve_secret_field(
+                field,
+                spec.fields[field],
+                get_env=resolve_env,
+                read_file=resolve_file,
+                get_password=resolve_keyring,
             )
     return resolved
 
@@ -189,6 +200,7 @@ def build_broker(
     clock: Callable[[], float],
     resolve_env: EnvResolver = os.environ.get,
     resolve_file: FileResolver = _read_file,
+    resolve_keyring: KeyringResolver = _real_keyring_get_password,
     _factory: ProviderFactory | None = None,
 ) -> CredentialBroker:
     """Build a live ``CredentialBroker`` from a validated provider registry.
@@ -212,7 +224,12 @@ def build_broker(
                 f"duplicate provider name {spec.name!r} in registry — refusing to "
                 "silently override (two specs would map one name to different accounts)"
             )
-        secrets = _resolve_spec_secrets(spec, resolve_env=resolve_env, resolve_file=resolve_file)
+        secrets = _resolve_spec_secrets(
+            spec,
+            resolve_env=resolve_env,
+            resolve_file=resolve_file,
+            resolve_keyring=resolve_keyring,
+        )
         providers[spec.name] = factory(spec, secrets)
     return CredentialBroker(providers, clock=clock)
 
