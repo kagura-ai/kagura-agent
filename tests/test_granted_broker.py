@@ -143,6 +143,30 @@ async def test_renew_fabricated_ungranted_lease_is_denied_without_minting():
     assert provider.minted == 0  # inner.renew (and its mint) never reached
 
 
+async def test_renew_fabricated_ungranted_provider_is_denied_without_minting():
+    # The renew re-check must gate on the PROVIDER axis too, not just scope: a
+    # fabricated lease naming an ungranted provider with an otherwise-granted
+    # scope must be denied. A 'gcp' provider IS registered on the inner broker
+    # (but not granted), so a dropped provider-check would reach inner.renew and
+    # mint, rather than KeyError — making this test discriminating.
+    aws = FakeStatelessProvider()
+    gcp = FakeStatelessProvider()
+    inner = CredentialBroker({"aws": aws, "gcp": gcp}, clock=_clock)
+    broker = GrantedBroker(inner, parse_grants(["aws:s3:read"]))  # only aws:s3:read
+    fabricated = Lease(
+        provider="gcp",  # NOT granted (the scope is, but under a different provider)
+        scope="s3:read",
+        budget=Budget(3600),
+        cred="forged",
+        expires_at=2000.0,
+        handle=None,
+        stateful=False,
+    )
+    with pytest.raises(GrantDenied):
+        await broker.renew(fabricated, ttl=300)
+    assert gcp.minted == 0  # inner.renew (and its mint) never reached
+
+
 # --------------------------------------------------------------------------
 # release / container_env / open_leases / sweep — delegate (no mint)
 # --------------------------------------------------------------------------
