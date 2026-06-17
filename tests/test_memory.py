@@ -9,9 +9,11 @@ externally-ingested (untrusted) memories from steering behavior.
 import pytest
 
 from kagura_agent.mcp.memory_cloud import (
+    _TOKEN_PROBE_TIMEOUT_SEC,
     LocalMemoryClient,
     MemoryClient,
     MemoryUnreachableError,
+    _token_probe_timeout,
     ensure_memory_reachable,
 )
 
@@ -54,6 +56,26 @@ def test_memory_gate_rejects_when_unreachable() -> None:
 
 def test_memory_gate_allows_when_reachable() -> None:
     ensure_memory_reachable(reachable=True)  # must not raise
+
+
+# --- memory-probe timeout (the real kagura CLI is slow: ~30s per token call) ---
+
+
+def test_token_probe_timeout_default(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("KAGURA_MEMORY_PROBE_TIMEOUT", raising=False)
+    assert _token_probe_timeout() == _TOKEN_PROBE_TIMEOUT_SEC
+    assert _TOKEN_PROBE_TIMEOUT_SEC >= 45  # headroom over the observed ~30s latency
+
+
+def test_token_probe_timeout_env_override(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_TIMEOUT", "90")
+    assert _token_probe_timeout() == 90.0
+
+
+def test_token_probe_timeout_bad_or_nonpositive_falls_back(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    for bad in ("", "   ", "abc", "0", "-5"):
+        monkeypatch.setenv("KAGURA_MEMORY_PROBE_TIMEOUT", bad)
+        assert _token_probe_timeout() == _TOKEN_PROBE_TIMEOUT_SEC
 
 
 def test_runtime_client_exposes_no_admin_methods() -> None:
