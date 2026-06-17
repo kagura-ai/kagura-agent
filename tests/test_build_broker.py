@@ -303,6 +303,46 @@ def test_default_factory_refuses_static_env_with_string_standing_secret():
         build_broker(specs, clock=_clock, resolve_env={"SLACK_BOT_TOKEN": "x"}.get)
 
 
+def test_default_factory_github_app_missing_private_key_is_valueerror():
+    # #82: a hand-built spec missing its required secret must raise the module's
+    # consistent ValueError, not a bare KeyError deep in the factory.
+    spec = ProviderSpec(
+        name="gh", kind="github_app", fields={"app_id": "1", "installation_id": "2"}
+    )
+    with pytest.raises(ValueError, match="private_key"):
+        build_broker([spec], clock=_clock)
+
+
+def test_required_secret_helper_returns_value_and_raises_when_absent():
+    from kagura_agent.membrane.cloud_transports import _required_secret
+
+    spec = ProviderSpec(name="gh", kind="github_app", fields={})
+    assert _required_secret(spec, {"private_key": "pem"}, "private_key") == "pem"
+    with pytest.raises(ValueError, match="missing its required 'private_key'"):
+        _required_secret(spec, {}, "private_key")
+
+
+def test_default_factory_aws_sts_rejects_explicit_parent_token():
+    # #82: aws_sts mints with the host's ambient credentials and cannot honor an
+    # explicit parent_token — a present one must fail loudly, not be silently
+    # dropped (which would mislead the operator into thinking they pinned a cred).
+    spec = ProviderSpec(
+        name="aws",
+        kind="aws_sts",
+        fields={"role_arn": "arn:aws:iam::1:role/a", "parent_token_env": "AWS_TOK"},
+    )
+    with pytest.raises(ValueError, match="parent_token"):
+        build_broker([spec], clock=_clock, resolve_env={"AWS_TOK": "x"}.get)
+
+
+def test_reject_unhonored_parent_token_allows_absent():
+    # The absent case (the common one) is fine: no parent_token → ambient creds.
+    from kagura_agent.membrane.cloud_transports import _reject_unhonored_parent_token
+
+    spec = ProviderSpec(name="aws", kind="aws_sts", fields={"role_arn": "r"})
+    assert _reject_unhonored_parent_token(spec) is None
+
+
 def test_default_factory_static_env_requires_value_env_not_value_file():
     # parse_registry now rejects value_file/value_keyring for static_env (value is
     # _env-only), but build_broker accepts any hand-built ProviderSpec, so the

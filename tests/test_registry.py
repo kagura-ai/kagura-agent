@@ -131,6 +131,31 @@ def test_empty_required_field_is_fail_closed(empty):
         parse_registry({"aws": {"kind": "aws_sts", "role_arn": empty}})
 
 
+@pytest.mark.parametrize("falsy", [[], False, 0, {}])
+def test_falsy_non_string_required_field_is_fail_closed(falsy):
+    # #82: a *falsy non-string* required field ([], False, 0, {}) used to slip
+    # through the None/blank-string guard and reach a downstream str(...) as a
+    # misleading "False"/"0"/"[]". It must fail closed too.
+    with pytest.raises(ValueError, match="empty required field"):
+        parse_registry({"aws": {"kind": "aws_sts", "role_arn": falsy}})
+
+
+def test_truthy_int_required_field_is_accepted():
+    # A truthy int required field (github_app's numeric app_id) must still pass —
+    # the falsy guard rejects 0/False, not every non-string.
+    specs = parse_registry(
+        {
+            "gh": {
+                "kind": "github_app",
+                "app_id": 12345,
+                "installation_id": "2",
+                "private_key_env": "K",
+            }
+        }
+    )
+    assert specs[0].fields["app_id"] == 12345
+
+
 def test_denylist_only_key_gives_generic_message_not_dead_end_hint():
     # 'token' is denylisted but not a declared secret of aws_sts, so the error
     # must NOT suggest token_env/token_file (which aren't valid fields here).

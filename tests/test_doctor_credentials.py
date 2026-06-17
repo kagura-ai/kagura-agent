@@ -87,7 +87,7 @@ def test_run_doctor_keyring_registry_without_extra_is_warn_not_fail(monkeypatch)
     # determinism regardless of whether the test host has the keyring extra.
     from kagura_agent.cli import doctor as doc
 
-    monkeypatch.setattr(doc, "_keyring_importable", lambda: False)
+    monkeypatch.setattr(doc, "_keyring_available", lambda: False)
     registry = parse_registry(
         {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": "svc/agent"}}
     )

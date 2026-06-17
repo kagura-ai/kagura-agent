@@ -1,48 +1,52 @@
-"""v0.6 (Task 4): host-side registry loader + secret-reference resolution.
+"""v0.6 (Task 4): host-side registry loader.
 
 `load_registry` reads a TOML registry file and hands its `[providers]` table to
-`parse_registry` (#56). `resolve_secret_ref` turns a single `*_env` / `*_file`
-reference from a `ProviderSpec` into its secret value.
+`parse_registry` (#56). Secret-*reference* resolution lived here in v0.6; #65
+folded it into the single suffix-dispatch resolver in
+:mod:`kagura_agent.membrane.secret_source`. This module now re-exports that
+resolver surface (so ``from registry_io import resolve_secret_field`` /
+``EnvResolver`` / ``SecretRefError`` keep working) and the byte-for-byte
+duplicate resolver code is gone (#82).
 
-**Membrane invariant — host-side only.** Resolution reads host environment
-variables and host files; it runs in the trusted cockpit/host and the resolved
-value is injected downstream as a leased container env var. This module must
+**Membrane invariant — host-side only.** `load_registry` and the re-exported
+resolvers read host files / env / keychain in the trusted cockpit/host; resolved
+values are injected downstream as leased container env vars. This module must
 **never** be imported or executed inside the agent container — doing so would
 hand the container the ability to read the host's secrets directly, collapsing
 the boundary.
-
-Fail-closed: a missing/empty env var, an unreadable/empty file, or any
-underlying error is normalized to :class:`SecretRefError` so a caller can rely
-on "either a non-empty secret, or an exception" — never a silently-empty secret.
-Error messages name the reference (env var name / file path), never the resolved
-secret value.
-
-The env getter and file reader are injectable so #58 (`build_broker`) can pass
-its own resolvers and tests need not touch the real environment or filesystem.
 """
 
 from __future__ import annotations
 
-import os
 import tomllib
-from collections.abc import Callable
 from pathlib import Path
 
 from kagura_agent.membrane.registry import ProviderSpec, parse_registry
-from kagura_agent.membrane.secret_source import SecretSourceError, resolve_secret_field
 
-#: Resolve an environment variable name to its value (or None if unset).
-EnvResolver = Callable[[str], str | None]
-#: Read a host file path and return its text contents.
-FileResolver = Callable[[str], str]
+# v0.6's resolver surface now lives in secret_source (#65 folded it in). Re-export
+# the canonical names so existing importers (cli/main.py) keep a stable path —
+# there is no second copy of the logic to drift. ``SecretRefError`` is the
+# historical name for the canonical SecretSourceError, kept so every existing
+# ``except SecretRefError`` catches unchanged. ``__all__`` makes these explicit
+# re-exports (mypy --strict otherwise treats an aliased import as private).
+from kagura_agent.membrane.secret_source import (
+    EnvResolver,
+    FileResolver,
+    _read_file,
+    resolve_secret_field,
+)
+from kagura_agent.membrane.secret_source import (
+    SecretSourceError as SecretRefError,
+)
 
-
-# v0.7 (#65): the secret-resolution logic is unified in ``secret_source``. This
-# name stays as a backward-compatible alias of the canonical
-# :class:`~kagura_agent.membrane.secret_source.SecretSourceError` so every
-# existing ``except SecretRefError`` (doctor probe, _run_probes) keeps catching,
-# and the folded resolver's error is caught unchanged.
-SecretRefError = SecretSourceError
+__all__ = [
+    "EnvResolver",
+    "FileResolver",
+    "SecretRefError",
+    "_read_file",
+    "load_registry",
+    "resolve_secret_field",
+]
 
 
 def load_registry(path: str | Path) -> tuple[ProviderSpec, ...]:
@@ -72,36 +76,3 @@ def load_registry(path: str | Path) -> tuple[ProviderSpec, ...]:
 
     providers = config.get("providers", {})
     return parse_registry(providers)
-
-
-def _read_file(path: str) -> str:
-    return Path(path).read_text(encoding="utf-8")
-
-
-def resolve_secret_ref(
-    field_name: str,
-    ref: str,
-    *,
-    get_env: EnvResolver = os.environ.get,
-    read_file: FileResolver = _read_file,
-) -> str:
-    """Resolve one ``*_env`` / ``*_file`` reference to its secret value (host-side).
-
-    - ``field_name`` ending ``_env``: ``ref`` is an environment variable name;
-      its value is returned verbatim. Unset or whitespace-only → SecretRefError.
-    - ``field_name`` ending ``_file``: ``ref`` is a host file path; its contents
-      are returned with the trailing newline stripped. Unreadable or
-      whitespace-only → SecretRefError.
-    - Any other ``field_name`` is not a reference → SecretRefError.
-
-    Every underlying failure (KeyError, OSError, decode error, a custom
-    resolver raising) is normalized to SecretRefError so the caller's fail-closed
-    contract holds. The resolved value is never included in an error message.
-
-    v0.7 (#65): this delegates to the unified suffix resolver
-    :func:`~kagura_agent.membrane.secret_source.resolve_secret_field`, so the
-    ``*_env`` / ``*_file`` logic lives in exactly one place and ``*_keyring`` (and
-    any future backend) resolves here too without changes. The default keychain
-    backend applies for ``*_keyring`` refs.
-    """
-    return resolve_secret_field(field_name, ref, get_env=get_env, read_file=read_file)

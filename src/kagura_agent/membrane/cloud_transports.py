@@ -33,9 +33,8 @@ from kagura_agent.membrane.providers import (
     GitHubAppProvider,
     StaticEnvProvider,
 )
-from kagura_agent.membrane.registry import ProviderSpec, kind_schema
+from kagura_agent.membrane.registry import ProviderSpec, kind_schema, present_suffix_field
 from kagura_agent.membrane.secret_source import (
-    SECRET_SUFFIXES,
     EnvResolver,
     FileResolver,
     KeyringResolver,
@@ -171,8 +170,7 @@ def _resolve_spec_secrets(
     """
     resolved: dict[str, str] = {}
     for ref in kind_schema(spec.kind).secrets:
-        suffix_fields = {suf: f"{ref.name}{suf}" for suf in SECRET_SUFFIXES}
-        present = [suf for suf, field in suffix_fields.items() if field in spec.fields]
+        present, suffix_fields = present_suffix_field(ref, spec.fields)
         if len(present) > 1:
             # parse_registry already rejects this, but build_broker accepts any
             # Iterable[ProviderSpec] (e.g. a hand-built spec from #59/#60), so
@@ -234,6 +232,44 @@ def build_broker(
     return CredentialBroker(providers, clock=clock)
 
 
+def _required_secret(spec: ProviderSpec, secrets: Mapping[str, str], logical: str) -> str:
+    """Look up a required resolved secret, failing with the module's consistent
+    ``ValueError`` (not a bare ``KeyError``) when it is absent.
+
+    ``parse_registry`` guarantees a required secret is present, but ``build_broker``
+    accepts any hand-built ``ProviderSpec`` (the #59/#60 paths), so a spec missing
+    its required reference must surface the same actionable error as every other
+    misconfiguration here rather than a raw ``KeyError`` deep in the factory.
+    """
+    try:
+        return secrets[logical]
+    except KeyError:
+        raise ValueError(
+            f"provider {spec.name!r} ({spec.kind}) is missing its required {logical!r} "
+            f"secret — set {logical}_env / {logical}_file / {logical}_keyring"
+        ) from None
+
+
+def _reject_unhonored_parent_token(spec: ProviderSpec) -> None:
+    """Refuse an explicit ``parent_token`` on a kind that cannot consume it.
+
+    ``aws_sts`` / ``gcp_impersonation`` mint via the host's *ambient* credential
+    chain (boto3 default chain / application-default credentials); there is no
+    plumbing to feed them an explicit ``parent_token`` (and a single token cannot
+    even satisfy AWS's key+secret auth). The schema keeps the field optional for
+    its absent-means-ambient semantics, but a *present* one would be silently
+    ignored — so fail loudly instead of misleading the operator (#82).
+    """
+    if "parent_token" in spec.fields or any(
+        f"parent_token{suf}" in spec.fields for suf in ("_env", "_file", "_keyring")
+    ):
+        raise ValueError(
+            f"provider {spec.name!r} ({spec.kind}) sets parent_token, but this kind mints "
+            "with the host's ambient credentials and cannot honor an explicit parent_token "
+            "— remove parent_token_* (or pass a custom _factory that consumes it)"
+        )
+
+
 def _default_factory(  # pragma: no cover - deployment edge (needs cloud SDKs)
     spec: ProviderSpec, secrets: Mapping[str, str]
 ) -> CredProvider:
@@ -242,18 +278,20 @@ def _default_factory(  # pragma: no cover - deployment edge (needs cloud SDKs)
     Handles the kinds buildable from the registry plus the host's ambient
     credentials (``aws_sts`` / ``gcp_impersonation`` / ``github_app``). Kinds that
     additionally need a deployment-supplied transport callable (``cloudflare`` →
-    ``token_spec``, ``memory_cloud`` → ``exchange``) or a provider not yet
-    implemented (``static_env`` → #61) raise an actionable error directing the
-    deployer to pass a custom ``_factory``.
+    ``token_spec``, ``memory_cloud`` → ``exchange``) raise an actionable error
+    directing the deployer to pass a custom ``_factory``.
     """
     kind = spec.kind
     if kind == "aws_sts":
+        _reject_unhonored_parent_token(spec)
         return aws_provider(session_name=str(spec.fields.get("session_name", "kagura-agent")))
     if kind == "gcp_impersonation":
+        _reject_unhonored_parent_token(spec)
         return gcp_provider()
     if kind == "github_app":
         return github_app_provider(
-            app_id=str(spec.fields["app_id"]), private_key=secrets["private_key"]
+            app_id=str(spec.fields["app_id"]),
+            private_key=_required_secret(spec, secrets, "private_key"),
         )
     if kind == "cloudflare":
         raise ValueError(
@@ -274,7 +312,7 @@ def _default_factory(  # pragma: no cover - deployment edge (needs cloud SDKs)
                 "env var; value_file is not supported for static_env"
             )
         return StaticEnvProvider(
-            value=secrets["value"],
+            value=_required_secret(spec, secrets, "value"),
             env_var=str(value_env),
             # Pass the raw value (no bool() coercion — that would make a quoted
             # "false" truthy); StaticEnvProvider's identity gate is the guard.
