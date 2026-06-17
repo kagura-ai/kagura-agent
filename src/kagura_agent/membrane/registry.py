@@ -51,10 +51,19 @@ class SecretRef:
     """A secret a kind may reference. Given as one of the backend-suffix forms
     in :data:`~kagura_agent.membrane.secret_source.SECRET_SUFFIXES`
     (``<name>_env`` / ``<name>_file`` / ``<name>_keyring``); the bare ``<name>``
-    form is always rejected (inline-secret guard)."""
+    form is always rejected (inline-secret guard).
+
+    ``suffixes`` restricts which backend variants are valid for *this* secret
+    (default: all of ``SECRET_SUFFIXES``). ``static_env`` pins its ``value`` to
+    ``_env`` only — the container env-var NAME is taken from ``value_env``, so a
+    ``*_file`` / ``*_keyring`` reference has no container var to name and the
+    factory cannot honor it. Restricting here keeps doctor and the run in
+    agreement (both reject it at parse time) instead of doctor passing a config
+    the run aborts on."""
 
     name: str
     required: bool
+    suffixes: tuple[str, ...] = SECRET_SUFFIXES
 
 
 @dataclass(frozen=True)
@@ -106,7 +115,9 @@ _KIND_FIELDS: dict[str, FieldSchema] = {
         # refuses to mint unless standing_secret is explicitly True.
         required=frozenset(),
         optional=frozenset({"standing_secret"}),
-        secrets=(SecretRef("value", required=True),),
+        # value is _env-only: the container env-var name IS value_env; a
+        # *_file / *_keyring reference has no container var to name.
+        secrets=(SecretRef("value", required=True, suffixes=("_env",)),),
     ),
 }
 
@@ -227,9 +238,10 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
 
     schema = _KIND_FIELDS[kind]
     secret_names = {s.name for s in schema.secrets}
-    # Suffix-agnostic (#63): every SECRET_SUFFIXES variant of a declared secret
-    # name is allowed, so a new backend (e.g. *_keyring) needs no per-kind edit.
-    ref_keys = {f"{n}{suf}" for n in secret_names for suf in SECRET_SUFFIXES}
+    # Suffix-agnostic (#63): every backend variant a secret allows is accepted,
+    # so a new backend (e.g. *_keyring) needs no per-kind edit. A secret may pin
+    # a narrower set via SecretRef.suffixes (static_env's value is _env-only).
+    ref_keys = {f"{s.name}{suf}" for s in schema.secrets for suf in s.suffixes}
     allowed = schema.required | schema.optional | ref_keys | {"kind"}
 
     fields: dict[str, Any] = {}
@@ -276,7 +288,7 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
         # Suffix-agnostic (#63): a logical secret may be satisfied by exactly one
         # backend suffix. Count the present variants — 0+required = missing
         # (fail-closed), exactly 1 = validate its value, 2+ = ambiguous (reject).
-        suffix_keys = {suf: f"{ref.name}{suf}" for suf in SECRET_SUFFIXES}
+        suffix_keys = {suf: f"{ref.name}{suf}" for suf in ref.suffixes}
         present = [suf for suf, key in suffix_keys.items() if key in fields]
 
         # Ambiguity is checked first, regardless of required/optional: two
@@ -294,7 +306,7 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
             if suf == "_env":
                 # An *_env reference must name a host env var, not carry a value —
                 # the NAME-shape check catches a raw secret pasted into the field.
-                if not isinstance(val, str) or not _ENV_NAME_RE.match(val):
+                if not isinstance(val, str) or not _ENV_NAME_RE.fullmatch(val):
                     raise ValueError(
                         f"{key} for provider {name!r} must be an environment variable "
                         f"NAME (e.g. CF_TOKEN), not a value: got {val!r}"
@@ -315,7 +327,7 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
                         f"reference ('service/username')"
                     )
         elif ref.required:
-            all_keys = " / ".join(suffix_keys[suf] for suf in SECRET_SUFFIXES)
+            all_keys = " / ".join(suffix_keys[suf] for suf in ref.suffixes)
             raise ValueError(
                 f"provider {name!r} (kind={kind}) is missing required secret "
                 f"{ref.name!r}: set one of {all_keys}"
