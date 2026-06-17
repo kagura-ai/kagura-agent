@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from kagura_agent.core.brain.base import BrainUnavailable
+from kagura_agent.core.brain.base import BrainInvocationError, BrainUnavailable
 from kagura_agent.core.brain.claude import ClaudeBrain, RawTurn
 
 _KAGURA_BRAIN_MODULE = "kagura_brain"
@@ -74,11 +74,42 @@ def require_kagura_brain(
 def resolve_kagura_brain_backend(env: Mapping[str, str]) -> str:
     """kagura-brain's own backend selector (claude | codex), default claude.
 
-    Pure (env in, value out) so it is unit-tested without the library. Anything
-    other than an explicit ``codex`` resolves to ``claude`` — the conservative
-    default, matching kagura-engineer's `select_brain`.
+    Pure (env in, value out). Fail-closed on an unknown value — consistent with
+    the ``KAGURA_AGENT_BRAIN`` selector (`select.resolve_brain_backend`): a typo
+    like ``KAGURA_AGENT_BRAIN_BACKEND=codx`` must not silently run claude. A
+    set-but-blank value is unset (→ claude).
     """
-    return "codex" if env.get(_BACKEND_ENV, "").strip().lower() == "codex" else "claude"
+    raw = env.get(_BACKEND_ENV, "").strip().lower()
+    if not raw:
+        return "claude"
+    if raw not in ("claude", "codex"):
+        raise ValueError(
+            f"{_BACKEND_ENV}={raw!r} is not a known kagura-brain backend "
+            "(expected one of: claude, codex)"
+        )
+    return raw
+
+
+def _result_to_turn(result: Any) -> RawTurn:
+    """Translate a kagura-brain ``BrainResult`` into a terminal ``RawTurn``, fail-closed.
+
+    Two contract points the live invoke must honour (both proven against the
+    kagura-engineer consumer, the authoritative reference):
+
+    - The model's reply is ``result.stdout`` (already a str). NOT ``as_text(result)``
+      — kagura-brain's ``as_text`` is a ``bytes|str|None`` stream normalizer, not a
+      ``BrainResult`` accessor, so ``as_text(result)`` would yield the dataclass
+      itself / a repr, never the answer.
+    - A non-zero exit or a timeout (``returncode != 0`` / ``timed_out``) is a real
+      failure — RAISE ``BrainInvocationError`` rather than relay it as a successful
+      turn. Otherwise a failed/timed-out CLI call would be recorded as a completed
+      run + checkpoint + grounding summary (a silent swallow).
+
+    One-shot has no resume token, so ``state`` is empty.
+    """
+    if result.returncode != 0 or result.timed_out:
+        raise BrainInvocationError(f"kagura-brain invocation failed: {result.detail()}")
+    return RawTurn(kind="result", text=result.stdout, state={})
 
 
 def kagura_brain_select_kwargs(env: Mapping[str, str]) -> dict[str, Any]:
@@ -134,18 +165,24 @@ class KaguraBrainEngine:  # pragma: no cover - requires kagura-brain + subscript
     async def query(
         self, prompt: str, *, resume_state: dict[str, Any] | None
     ) -> AsyncIterator[RawTurn]:
-        import kagura_brain
-        from kagura_brain.core import as_text
+        # Lazy import; a partial / version-skewed install where kagura_brain is
+        # top-level findable but the API surface is missing surfaces as the
+        # actionable BrainUnavailable hint, not a raw ImportError deep in the loop.
+        try:
+            import kagura_brain
+        except ImportError as exc:  # pragma: no cover - broken-install edge
+            raise BrainUnavailable(_INSTALL_HINT) from exc
 
         if self._handle is None:
             self._handle = kagura_brain.select(**self._select_kwargs)
         # kagura-brain is one-shot: no native resume, so resume_state is ignored
         # (cross-turn continuity rests on the agent's checkpoint + grounding layer).
-        # invoke() is blocking — run it off the event loop.
+        # invoke() is blocking — run it off the event loop. _result_to_turn extracts
+        # result.stdout and fails closed on a non-zero/timed-out invoke.
         result = await asyncio.to_thread(
             self._handle.invoke, prompt, cwd=self._cwd, timeout=self._timeout
         )
-        yield RawTurn(kind="result", text=as_text(result), state={})
+        yield _result_to_turn(result)
 
 
 def make_kagura_brain(

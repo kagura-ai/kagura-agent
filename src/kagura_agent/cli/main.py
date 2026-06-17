@@ -25,7 +25,7 @@ from kagura_agent.cli.doctor import (
     overall_status,
     run_doctor,
 )
-from kagura_agent.core.brain.base import BrainUnavailable
+from kagura_agent.core.brain.base import BrainInvocationError, BrainUnavailable
 from kagura_agent.core.session import SessionError
 from kagura_agent.membrane.registry import GrantSet, ProviderSpec, parse_grants
 from kagura_agent.patterns.checkpoint import (
@@ -529,10 +529,14 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             print(setup_transport_guidance())
         return 0
     if ns.command == "run":
+        from kagura_agent.core.brain.kagura_brain_engine import resolve_kagura_brain_backend
         from kagura_agent.core.brain.select import resolve_brain_backend
 
         try:
-            resolve_brain_backend(os.environ)  # validate KAGURA_AGENT_BRAIN up front
+            # Validate KAGURA_AGENT_BRAIN (+ _BACKEND for the kagura-brain backend)
+            # up front so a typo fails closed with a clean exit 2, not deep in _run_task.
+            if resolve_brain_backend(os.environ) == "kagura-brain":
+                resolve_kagura_brain_backend(os.environ)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
@@ -576,21 +580,24 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             # agent run must surface as itself, not be mislabeled a --grant error.
             print(f"--grant/--registry: {exc}", file=sys.stderr)
             return 2
-        except (CheckpointError, SessionError) as exc:
-            # A corrupt/unreadable persisted checkpoint (CheckpointError) or a brain
-            # that ended without a terminal result (SessionError) — surface a clean
-            # one-line message + exit 2, never a raw traceback. Restores the clean
-            # failure surface the old cockpit.serve() path gave before this command
-            # drove the Session directly.
+        except (CheckpointError, SessionError, BrainInvocationError) as exc:
+            # A corrupt/unreadable persisted checkpoint (CheckpointError), a brain
+            # that ended without a terminal result (SessionError), or a brain
+            # invocation that failed/timed out (BrainInvocationError) — surface a
+            # clean one-line message + exit 2, never a raw traceback. Restores the
+            # clean failure surface the old cockpit.serve() path gave before this
+            # command drove the Session directly.
             print(f"run failed: {exc}", file=sys.stderr)
             return 2
         print(result)
         return 0
     if ns.command == "repl":
+        from kagura_agent.core.brain.kagura_brain_engine import resolve_kagura_brain_backend
         from kagura_agent.core.brain.select import resolve_brain_backend
 
         try:
-            resolve_brain_backend(os.environ)  # validate KAGURA_AGENT_BRAIN up front
+            if resolve_brain_backend(os.environ) == "kagura-brain":
+                resolve_kagura_brain_backend(os.environ)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
@@ -610,7 +617,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
         except BrainUnavailable as exc:
             print(str(exc), file=sys.stderr)
             return 3
-        except (CheckpointError, SessionError) as exc:
+        except (CheckpointError, SessionError, BrainInvocationError) as exc:
             # run_repl isolates per-turn errors, but a failure outside the loop
             # (store setup, a pre-loop load) still surfaces cleanly, not as a
             # traceback.
