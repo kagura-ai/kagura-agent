@@ -87,9 +87,29 @@ def test_check_brain_kagura_backend_fail_when_extra_missing() -> None:
     assert r.hint is not None and "--extra brain" in r.hint
 
 
-def test_check_brain_kagura_backend_warns_when_present() -> None:
+def test_check_brain_kagura_backend_fail_when_cli_missing() -> None:
+    # Extra installed but the underlying claude/codex CLI is not on PATH → FAIL
+    # (the run-blocking dep), not a lenient WARN.
     r = check_brain(
-        backend="kagura-brain", sdk_available=False, kagura_brain_available=True, env={}
+        backend="kagura-brain",
+        sdk_available=True,
+        kagura_brain_available=True,
+        kagura_backend="claude",
+        kagura_cli_present=False,
+        env={},
+    )
+    assert r.status == FAIL
+    assert "claude" in r.detail and "PATH" in r.detail
+
+
+def test_check_brain_kagura_backend_warns_when_present_and_cli_on_path() -> None:
+    r = check_brain(
+        backend="kagura-brain",
+        sdk_available=False,
+        kagura_brain_available=True,
+        kagura_backend="claude",
+        kagura_cli_present=True,
+        env={},
     )
     assert r.status == WARN  # present; auth via underlying CLI not verifiable here
     assert "kagura-brain" in r.detail
@@ -166,12 +186,29 @@ def test_run_doctor_kagura_backend_checks_brain_extra() -> None:
         memory_probe=lambda: True,
         sdk_probe=lambda: True,  # SDK present, but irrelevant for this backend
         kagura_brain_probe=lambda: False,  # brain extra absent
+        kagura_cli_probe=lambda name: True,
         docker_probe=lambda: True,
         egress_probe=lambda: True,
         env={"KAGURA_AGENT_BRAIN": "kagura-brain"},
     )
     by_name = {r.name: r.status for r in results}
     assert by_name["brain"] == FAIL
+
+
+def test_run_doctor_kagura_backend_fails_when_cli_absent() -> None:
+    # Extra present but the claude CLI it shells out to is not on PATH → FAIL.
+    results = run_doctor(
+        memory_probe=lambda: True,
+        sdk_probe=lambda: True,
+        kagura_brain_probe=lambda: True,  # extra present
+        kagura_cli_probe=lambda name: False,  # but `claude` not on PATH
+        docker_probe=lambda: True,
+        egress_probe=lambda: True,
+        env={"KAGURA_AGENT_BRAIN": "kagura-brain"},
+    )
+    brain = next(r for r in results if r.name == "brain")
+    assert brain.status == FAIL
+    assert "PATH" in brain.detail
 
 
 def test_run_doctor_invalid_backend_is_brain_fail_not_crash() -> None:
@@ -185,6 +222,21 @@ def test_run_doctor_invalid_backend_is_brain_fail_not_crash() -> None:
     brain = next(r for r in results if r.name == "brain")
     assert brain.status == FAIL
     assert "KAGURA_AGENT_BRAIN" in brain.detail
+
+
+def test_run_doctor_invalid_kagura_backend_is_brain_fail() -> None:
+    results = run_doctor(
+        memory_probe=lambda: True,
+        sdk_probe=lambda: True,
+        kagura_brain_probe=lambda: True,
+        kagura_cli_probe=lambda name: True,
+        docker_probe=lambda: True,
+        egress_probe=lambda: True,
+        env={"KAGURA_AGENT_BRAIN": "kagura-brain", "KAGURA_AGENT_BRAIN_BACKEND": "codx"},
+    )
+    brain = next(r for r in results if r.name == "brain")
+    assert brain.status == FAIL
+    assert "KAGURA_AGENT_BRAIN_BACKEND" in brain.detail
 
 
 def test_format_report_contains_each_check_and_overall() -> None:

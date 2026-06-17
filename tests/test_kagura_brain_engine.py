@@ -9,13 +9,27 @@ from __future__ import annotations
 
 import pytest
 
-from kagura_agent.core.brain.base import BrainUnavailable
+from kagura_agent.core.brain.base import BrainInvocationError, BrainUnavailable
 from kagura_agent.core.brain.kagura_brain_engine import (
+    _result_to_turn,
     kagura_brain_available,
     kagura_brain_select_kwargs,
     require_kagura_brain,
     resolve_kagura_brain_backend,
 )
+
+
+class _FakeBrainResult:
+    """Duck-typed kagura-brain BrainResult for translating without the lib."""
+
+    def __init__(self, *, returncode=0, stdout="", timed_out=False, detail="detail-text"):  # type: ignore[no-untyped-def]
+        self.returncode = returncode
+        self.stdout = stdout
+        self.timed_out = timed_out
+        self._detail = detail
+
+    def detail(self) -> str:
+        return self._detail
 
 
 def test_kagura_brain_available_true_when_findable() -> None:
@@ -45,9 +59,36 @@ def test_resolve_backend_codex_explicit() -> None:
     assert resolve_kagura_brain_backend({"KAGURA_AGENT_BRAIN_BACKEND": "CODEX"}) == "codex"
 
 
-def test_resolve_backend_unknown_falls_to_claude() -> None:
-    # Conservative default: anything not explicitly codex is claude.
-    assert resolve_kagura_brain_backend({"KAGURA_AGENT_BRAIN_BACKEND": "weird"}) == "claude"
+def test_resolve_backend_unknown_fails_closed() -> None:
+    # Fail-closed (consistent with the KAGURA_AGENT_BRAIN selector): a typo must not
+    # silently run claude.
+    with pytest.raises(ValueError, match="not a known kagura-brain backend"):
+        resolve_kagura_brain_backend({"KAGURA_AGENT_BRAIN_BACKEND": "codx"})
+
+
+def test_resolve_backend_blank_is_claude() -> None:
+    assert resolve_kagura_brain_backend({"KAGURA_AGENT_BRAIN_BACKEND": "  "}) == "claude"
+
+
+# --- _result_to_turn: stdout extraction + fail-closed on a bad invoke ---------
+
+
+def test_result_to_turn_extracts_stdout() -> None:
+    # The model's reply is result.stdout — NOT as_text(result).
+    turn = _result_to_turn(_FakeBrainResult(returncode=0, stdout="the answer"))
+    assert turn.kind == "result"
+    assert turn.text == "the answer"
+    assert turn.state == {}
+
+
+def test_result_to_turn_raises_on_nonzero_exit() -> None:
+    with pytest.raises(BrainInvocationError, match="detail-text"):
+        _result_to_turn(_FakeBrainResult(returncode=1, stdout="partial", detail="detail-text"))
+
+
+def test_result_to_turn_raises_on_timeout() -> None:
+    with pytest.raises(BrainInvocationError):
+        _result_to_turn(_FakeBrainResult(returncode=0, timed_out=True))
 
 
 def test_select_kwargs_subscription_default_has_no_endpoint_or_key() -> None:

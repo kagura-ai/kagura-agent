@@ -284,6 +284,34 @@ def test_main_run_clean_error_on_corrupt_checkpoint(monkeypatch, capsys) -> None
     assert "Traceback" not in err
 
 
+def test_main_run_clean_error_on_brain_invocation_failure(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    # A failed/timed-out brain invoke (BrainInvocationError) surfaces cleanly, not
+    # as a raw traceback, and is NOT reported as a successful run.
+    from kagura_agent.cli import main as cli_main
+    from kagura_agent.core.brain.base import BrainInvocationError
+
+    async def _boom(*_a, **_k) -> str:
+        raise BrainInvocationError("kagura-brain invocation failed: exited 1")
+
+    monkeypatch.setattr(cli_main, "_run_task", _boom)
+    rc = main(["run", "do a thing"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "run failed" in err and "kagura-brain" in err
+    assert "Traceback" not in err
+
+
+def test_main_run_rejects_invalid_kagura_backend(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    # KAGURA_AGENT_BRAIN=kagura-brain + a bad KAGURA_AGENT_BRAIN_BACKEND fails
+    # closed up front (exit 2), before any brain construction.
+    monkeypatch.setenv("KAGURA_AGENT_BRAIN", "kagura-brain")
+    monkeypatch.setenv("KAGURA_AGENT_BRAIN_BACKEND", "codx")
+    rc = main(["run", "do a thing"])
+    assert rc == 2
+    assert "KAGURA_AGENT_BRAIN_BACKEND" in capsys.readouterr().err
+
+
 def test_main_run_clean_error_on_session_error(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
     # A brain that ends without a terminal result raises SessionError; surface it
     # cleanly (exit 2), not as a raw traceback.
