@@ -149,8 +149,9 @@ let the membrane bound the blast radius.
 Provider kinds live in `membrane/registry.py` (`KNOWN_KINDS` + `_KIND_FIELDS`,
 the typed per-kind schema) and `membrane/providers.py` (the `CredProvider`
 implementation). The registry validates an operator's `[providers.<name>]` block
-into a `ProviderSpec` (references only — `*_env` / `*_file`, never a bare secret),
-`registry_io.resolve_secret_ref` resolves the reference **host-side**, and
+into a `ProviderSpec` (references only — any `SECRET_SUFFIXES` variant
+`*_env` / `*_file` / `*_keyring`, never a bare secret), the unified
+`secret_source.resolve_secret_field` resolves the reference **host-side**, and
 `cloud_transports.build_broker` maps each spec to a live provider via the
 injectable `_factory` seam.
 
@@ -161,3 +162,43 @@ consent) and exposes the token as a single container env var via `cred_to_env`.
 When adding a kind, prefer short-lived minting; only reach for the static path
 when the upstream API leaves no alternative, and document the required egress
 allowlist alongside it.
+
+## Adding a secret backend (e.g. Vault)
+
+A *secret backend* is orthogonal to a provider *kind*: a kind decides **what**
+credential is minted; a backend decides **where the reference resolves from**
+(env var, file, OS keychain, …). Backends live in `membrane/secret_source.py`
+and are selected by the field **suffix**, so adding one is a small, local change
+— **no per-kind schema edit, no `_factory` change**:
+
+1. **Implement one `SecretSource`.** A frozen dataclass with a `suffix` and a
+   `resolve(field_name, ref) -> str` that reads the host backend and returns a
+   non-empty secret (or raises `SecretSourceError` — fail-closed, and never put
+   the resolved value in the error message). Keep any real-SDK call behind a
+   `# pragma: no cover` and inject the reader so it is unit-testable.
+
+   ```python
+   @dataclass(frozen=True)
+   class VaultSource:
+       suffix: ClassVar[str] = "_vault"
+       read_vault: VaultResolver = _real_vault_read  # injectable; real SDK call is pragma'd
+
+       def resolve(self, field_name: str, ref: str) -> str:
+           try:
+               value = self.read_vault(ref)          # ref e.g. "secret/data/cf#token"
+           except Exception as exc:                  # fail-closed
+               raise SecretSourceError(f"could not read vault secret for {field_name}") from exc
+           return _require_nonblank(value, what=f"vault secret {ref!r} for {field_name}")
+   ```
+
+2. **Register the suffix in two lines.** Add `"_vault"` to `SECRET_SUFFIXES` and
+   add a `VaultSource(...)` to the tuple in `default_sources()`. The dispatch map
+   is keyed by each source's own `.suffix`, so registering the source *is* wiring
+   the suffix — nothing else to keep in sync.
+
+That is the whole change. The registry validator (`#63`), `build_broker`, and
+`doctor` are all already suffix-agnostic over `SECRET_SUFFIXES`, so a
+`parent_token_vault` reference is validated, resolved, leased, and diagnosed with
+no further edits. (If the backend needs an optional dependency, add an extra in
+`pyproject.toml` and add a parallel branch to `doctor`'s `check_secret_backends`
+mirroring the `keyring` one, so it WARNs when that extra is absent but used.)

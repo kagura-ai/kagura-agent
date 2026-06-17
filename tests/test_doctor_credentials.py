@@ -16,9 +16,11 @@ import pytest
 from kagura_agent.cli.doctor import (
     FAIL,
     OK,
+    WARN,
     _probe_scope,
     check_provider,
     check_providers,
+    check_secret_backends,
     probe_provider,
     run_doctor,
 )
@@ -27,6 +29,54 @@ from kagura_agent.membrane.registry import ProviderSpec, parse_registry
 
 def _spec(table):
     return parse_registry(table)[0]
+
+
+# --------------------------------------------------------------------------
+# check_secret_backends (#66) — keyring-extra awareness
+# --------------------------------------------------------------------------
+
+
+def test_secret_backends_ok_when_keyring_available():
+    r = check_secret_backends(keyring_available=True)
+    assert r.status == OK
+    assert "keyring" in r.detail
+
+
+def test_secret_backends_warns_when_keyring_used_but_extra_absent():
+    # The acceptance: a *_keyring reference + no extra → pre-run WARN with the
+    # install hint, never an opaque run-time failure.
+    registry = parse_registry(
+        {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": "svc/agent"}}
+    )
+    r = check_secret_backends(registry, keyring_available=False)
+    assert r.status == WARN
+    assert "keyring" in (r.hint or "") and "install" in (r.hint or "").lower()
+
+
+def test_secret_backends_ok_when_keyring_absent_but_unused():
+    # env/file-only registry on a host without the keyring extra is fine — a
+    # missing optional backend you are not using must NOT warn (no noise).
+    registry = parse_registry(
+        {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_env": "CF"}}
+    )
+    r = check_secret_backends(registry, keyring_available=False)
+    assert r.status == OK
+
+
+def test_secret_backends_ok_when_no_registry_and_keyring_absent():
+    r = check_secret_backends(None, keyring_available=False)
+    assert r.status == OK
+
+
+def test_run_doctor_includes_secret_backends_check():
+    results = run_doctor(
+        memory_probe=lambda: True,
+        sdk_probe=lambda: True,
+        docker_probe=lambda: True,
+        egress_probe=lambda: True,
+        env={"CLAUDE_CODE_SUBSCRIPTION": "1"},
+    )
+    assert any(r.name == "secret-backends" for r in results)
 
 
 # --------------------------------------------------------------------------
