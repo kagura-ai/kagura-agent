@@ -11,8 +11,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from kagura_agent.cli.doctor import (
@@ -23,15 +24,14 @@ from kagura_agent.cli.doctor import (
     run_doctor,
 )
 from kagura_agent.core.brain.base import BrainUnavailable
-from kagura_agent.membrane.registry import GrantSet, parse_grants
+from kagura_agent.membrane.registry import GrantSet, ProviderSpec, parse_grants
 
-#: --grant is parse-only in v0.6; this loud warning prevents an operator from
-#: mistaking a parsed grant for an enforced one (enforcement lands in v0.7).
-GRANT_NOT_ENFORCED_WARNING = (
-    "warning: --grant is parsed for validation only and is NOT yet enforced "
-    "(enforcement lands in v0.7); all configured providers remain reachable."
-)
+log = logging.getLogger(__name__)
 
+#: Lease tuning for the run path's granted credentials (#65). A short TTL plus a
+#: renewable budget keeps a leaked cred short-lived; the run releases on exit.
+_LEASE_TTL_SEC = 900
+_LEASE_BUDGET_SEC = 3600
 
 #: Decorative Unicode glyphs the CLI prints in help / doctor / setup output.
 #: A legacy OEM code page — notably the Japanese-Windows cp932 console — can't
@@ -112,17 +112,39 @@ def configure_output_stream(stream: Any) -> Any:
     return _AsciiFallbackStream(stream)
 
 
-def resolve_grants(grant_specs: list[str] | None) -> tuple[GrantSet, str | None]:
-    """Parse ``--grant PROVIDER:SCOPE`` specs into a :class:`GrantSet`.
+def resolve_grants(grant_specs: list[str] | None) -> GrantSet:
+    """Parse ``--grant PROVIDER:SCOPE`` specs into an enforced :class:`GrantSet`.
 
-    **Parse-only in v0.6**: the GrantSet is validated (a malformed spec is a
-    fail-closed ``ValueError``) and returned, but it is NOT enforced yet — so
-    when any grant is given, a loud "not enforced" warning is returned alongside
-    it for the caller to surface. Returns ``(GrantSet, warning_or_None)``.
+    v0.7 (#65): the GrantSet is now **enforced** by
+    :class:`~kagura_agent.membrane.granted_broker.GrantedBroker` in the run path.
+    A malformed spec is a fail-closed ``ValueError``. An empty/absent list yields
+    an empty (deny-all) GrantSet — default-deny: with no grant the run builds no
+    broker and acquires no credential (the empty lease plan falls out for free).
     """
-    grants = parse_grants(grant_specs or [])
-    warning = GRANT_NOT_ENFORCED_WARNING if grant_specs else None
-    return grants, warning
+    return parse_grants(grant_specs or [])
+
+
+def plan_granted_specs(
+    registry: Iterable[ProviderSpec], grants: GrantSet
+) -> list[ProviderSpec]:
+    """Select only the registry specs a grant references (deterministic order).
+
+    Building **only** the granted providers is least-privilege and keeps the run
+    honest: an ungranted provider — which may need deployment wiring the default
+    factory cannot supply — is never constructed, so it can't abort a run that
+    never asked for it (this is also why ``doctor`` predicts the run: doctor only
+    resolves references, never builds an ungranted provider). Fail-closed: a
+    granted provider with no matching spec is a clean ``ValueError`` here, not a
+    later ``KeyError`` deep inside the broker.
+    """
+    by_name = {spec.name: spec for spec in registry}
+    granted_providers = sorted({g.provider for g in grants.grants})
+    missing = [p for p in granted_providers if p not in by_name]
+    if missing:
+        raise ValueError(
+            f"--grant names provider(s) not in the registry: {', '.join(missing)}"
+        )
+    return [by_name[p] for p in granted_providers]
 
 
 def _nonempty_task(value: str) -> str:
@@ -160,8 +182,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="append",
         default=None,
         metavar="PROVIDER:SCOPE",
-        help="grant PROVIDER:SCOPE (repeatable). PARSED FOR VALIDATION ONLY in this "
-        "release — NOT yet enforced; enforcement lands in v0.7.",
+        help="grant PROVIDER:SCOPE (repeatable). Default-deny: only granted "
+        "(provider, scope) pairs are reachable; with no --grant the run acquires "
+        "no credentials.",
+    )
+    run.add_argument(
+        "--registry",
+        default="kagura-agent.toml",
+        help="provider registry TOML the granted credentials are minted from "
+        "(default: kagura-agent.toml; only read when --grant is given)",
     )
     doctor = sub.add_parser(
         "doctor", help="preflight check: memory / claude / docker / egress (+ providers)"
@@ -213,30 +242,89 @@ def load_mcp_config(value: str | None) -> dict[str, Any] | None:
 async def _run_task(  # pragma: no cover - needs SDK + subscription
     task: str,
     *,
+    grants: GrantSet | None = None,
+    registry_path: str = "kagura-agent.toml",
     mcp_servers: dict[str, Any] | None = None,
     strict_mcp_config: bool = False,
 ) -> str:
+    import os
+    import time
+
     from kagura_agent.cockpit.core import Cockpit
     from kagura_agent.cockpit.transports.base import Event
     from kagura_agent.cockpit.transports.cli import CliTransport
     from kagura_agent.core.brain.claude import make_default_brain
     from kagura_agent.mcp.memory_cloud import ensure_memory_reachable, memory_reachable
+    from kagura_agent.membrane.cloud_transports import build_broker
+    from kagura_agent.membrane.granted_broker import GrantedBroker, lease_requests
+    from kagura_agent.membrane.lease import Budget, Lease
+    from kagura_agent.membrane.registry_io import load_registry
     from kagura_agent.patterns.checkpoint import InMemoryCheckpointStore
 
     # Redefined startup gate (v0.2-A6): memory must be reachable via the CLI,
     # independent of the brain. Fail-closed; no silent memory-less degrade.
     ensure_memory_reachable(reachable=memory_reachable())
 
-    brain = make_default_brain(
-        mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config
+    # v0.7 (#65): provision granted credentials host-side. Default-deny falls out
+    # for free — with no --grant the lease plan is empty, so no broker is built,
+    # no lease is acquired, and nothing is injected. The granted (provider, scope)
+    # pairs are enforced at the chokepoint by GrantedBroker. The leased creds are
+    # injected as the run's env (the launcher / spawned tools inherit them) and
+    # restored + released on exit so a scoped, time-boxed cred never outlives the
+    # task — even on failure (finally).
+    reqs = (
+        lease_requests(grants, ttl=_LEASE_TTL_SEC, budget_seconds=_LEASE_BUDGET_SEC)
+        if grants is not None
+        else ()
     )
+    broker: GrantedBroker | None = None
+    leases: list[Lease] = []
+    env_restore: dict[str, str | None] = {}
+    try:
+        if reqs:
+            assert grants is not None  # a non-empty plan implies --grant was given
+            # Build ONLY the granted providers (plan_granted_specs) — an ungranted,
+            # possibly deployment-incomplete provider in the registry must never
+            # abort a run that did not ask for it.
+            specs = plan_granted_specs(load_registry(registry_path), grants)
+            broker = GrantedBroker(build_broker(specs, clock=time.monotonic), grants)
+            for req in reqs:
+                leases.append(
+                    await broker.acquire(
+                        req.provider,
+                        scope=req.scope,
+                        ttl=req.ttl,
+                        budget=Budget(req.budget_seconds),
+                    )
+                )
+            for key, value in broker.container_env(leases).items():
+                env_restore[key] = os.environ.get(key)
+                os.environ[key] = value
 
-    transport = CliTransport(
-        inbox=[Event(thread_id="cli", text=task, is_thread_reply=False)]
-    )
-    cockpit = Cockpit(transport, brain, InMemoryCheckpointStore())
-    await cockpit.serve()
-    return transport.sent[-1][1] if transport.sent else ""
+        brain = make_default_brain(mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
+        transport = CliTransport(
+            inbox=[Event(thread_id="cli", text=task, is_thread_reply=False)]
+        )
+        cockpit = Cockpit(transport, brain, InMemoryCheckpointStore())
+        await cockpit.serve()
+        return transport.sent[-1][1] if transport.sent else ""
+    finally:
+        # Restore env first, then release every acquired lease. Per-lease guarded
+        # so one failing revoke does not skip the rest (the broker's sweep retries
+        # anything left tracked).
+        for key, prior in env_restore.items():
+            if prior is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prior
+        if broker is not None:
+            for lease in leases:
+                try:
+                    await broker.release(lease)
+                except Exception:
+                    log.exception(
+                        "release of lease for %s failed; left tracked for sweep", lease.provider
+                    )
 
 
 def _run_probes(registry: Any) -> list[Any]:  # pragma: no cover - deployment edge (live mint)
@@ -326,13 +414,11 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
         return 0
     if ns.command == "run":
         try:
-            _grants, grant_warning = resolve_grants(ns.grants)
+            grants = resolve_grants(ns.grants)
         except ValueError as exc:
             # Malformed --grant spec — fail-closed with a clean message (exit 2).
             print(f"--grant: {exc}", file=sys.stderr)
             return 2
-        if grant_warning is not None:
-            print(grant_warning, file=sys.stderr)  # never let a parsed grant look enforced
         try:
             mcp_servers = load_mcp_config(ns.mcp_config)
         except (OSError, ValueError) as exc:
@@ -344,6 +430,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             result = asyncio.run(
                 _run_task(
                     ns.task,
+                    grants=grants,
+                    registry_path=ns.registry,
                     mcp_servers=mcp_servers,
                     strict_mcp_config=ns.strict_mcp_config,
                 )
@@ -355,6 +443,13 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             # own usage-error exit code (2).
             print(str(exc), file=sys.stderr)
             return 3
+        except ValueError as exc:
+            # Credential-provisioning input error (a malformed/missing registry, or
+            # a --grant naming a provider absent from it) — fail-closed with a clean
+            # message and exit 2, the operator-input code (mirrors doctor and
+            # --mcp-config), never a raw traceback.
+            print(f"--grant/--registry: {exc}", file=sys.stderr)
+            return 2
         print(result)
         return 0
     return 1
