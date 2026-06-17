@@ -77,6 +77,24 @@ def test_check_brain_warns_when_auth_unverifiable() -> None:
     assert "claude" in r.hint.lower()
 
 
+def test_check_brain_kagura_backend_fail_when_extra_missing() -> None:
+    # backend=kagura-brain: the dependency that matters is the 'brain' extra, NOT
+    # the SDK (even with the SDK present). Doctor predicts the selected run.
+    r = check_brain(
+        backend="kagura-brain", sdk_available=True, kagura_brain_available=False, env={}
+    )
+    assert r.status == FAIL
+    assert r.hint is not None and "--extra brain" in r.hint
+
+
+def test_check_brain_kagura_backend_warns_when_present() -> None:
+    r = check_brain(
+        backend="kagura-brain", sdk_available=False, kagura_brain_available=True, env={}
+    )
+    assert r.status == WARN  # present; auth via underlying CLI not verifiable here
+    assert "kagura-brain" in r.detail
+
+
 # --- docker -----------------------------------------------------------------
 
 def test_check_docker_ok() -> None:
@@ -139,6 +157,34 @@ def test_run_doctor_threads_probes_into_checks() -> None:
     assert by_name["memory"] == OK
     assert by_name["docker"] == FAIL  # probe returned False
     assert overall_status(results) == FAIL
+
+
+def test_run_doctor_kagura_backend_checks_brain_extra() -> None:
+    # With KAGURA_AGENT_BRAIN=kagura-brain, the brain check follows the brain extra
+    # (absent here → FAIL) regardless of SDK presence.
+    results = run_doctor(
+        memory_probe=lambda: True,
+        sdk_probe=lambda: True,  # SDK present, but irrelevant for this backend
+        kagura_brain_probe=lambda: False,  # brain extra absent
+        docker_probe=lambda: True,
+        egress_probe=lambda: True,
+        env={"KAGURA_AGENT_BRAIN": "kagura-brain"},
+    )
+    by_name = {r.name: r.status for r in results}
+    assert by_name["brain"] == FAIL
+
+
+def test_run_doctor_invalid_backend_is_brain_fail_not_crash() -> None:
+    results = run_doctor(
+        memory_probe=lambda: True,
+        sdk_probe=lambda: True,
+        docker_probe=lambda: True,
+        egress_probe=lambda: True,
+        env={"KAGURA_AGENT_BRAIN": "bogus"},
+    )
+    brain = next(r for r in results if r.name == "brain")
+    assert brain.status == FAIL
+    assert "KAGURA_AGENT_BRAIN" in brain.detail
 
 
 def test_format_report_contains_each_check_and_overall() -> None:
