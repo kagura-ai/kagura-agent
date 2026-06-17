@@ -114,6 +114,39 @@ def _header_path(line: str) -> str | None:
     return inner.strip("[").rstrip("]").strip()
 
 
+def _bracket_delta(line: str) -> int:
+    """Net unclosed ``[`` count on a line, ignoring brackets inside strings/comments.
+
+    Used to track whether a following line is a multi-line-array continuation
+    (depth > 0) rather than a real section header. Handles single-line basic and
+    literal strings (with escapes in basic strings) and ``#`` comments, so a value
+    like ``role_arn = "a[b]"`` contributes 0 and a ``# [note]`` comment is ignored.
+    Multi-line (triple-quoted) string *values* are not expected in a generated
+    provider block and are out of scope.
+    """
+    depth = 0
+    quote: str | None = None  # active string delimiter ('"' or "'"), else None
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if quote is None:
+            if ch == "#":
+                break  # comment runs to end of line
+            elif ch in "\"'":
+                quote = ch
+            elif ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+        elif ch == "\\" and quote == '"':
+            i += 2  # skip an escaped char inside a basic string
+            continue
+        elif ch == quote:
+            quote = None
+        i += 1
+    return depth
+
+
 def render_provider_block(name: str, kind: str, fields: Mapping[str, Any]) -> str:
     """Render a validated, reference-only ``[providers.<name>]`` TOML block."""
     table = {"kind": kind, **dict(fields)}
@@ -159,14 +192,27 @@ def upsert_provider(existing_text: str, name: str, block: str) -> str:
         base = existing_text.rstrip("\n")
         return (base + "\n\n" if base else "") + "\n".join(block_lines) + "\n"
 
-    end = len(lines)
+    # Walk the section body. Two things make this non-trivial:
+    #  - A multi-line array's continuation row can start with "[" (e.g. a comma-free
+    #    last row `[3, 4]`); track bracket depth so it is never read as a header.
+    #  - Trailing blank lines and comments after the section's last key belong to
+    #    the *next* section (they often document it); they must be preserved, so
+    #    `body_end` advances only on real content (or open-array continuation).
+    depth = 0
+    body_end = start + 1  # one past the last line that belongs to this section
     for j in range(start + 1, len(lines)):
-        if _header_path(lines[j]) is not None:  # the next real section header
-            end = j
-            break
-    tail = lines[end:]
-    # One reproducible blank line before a following section (keeps it idempotent).
-    sep = [""] if tail and any(t.strip() for t in tail) else []
+        line = lines[j]
+        if depth == 0 and _header_path(line) is not None:
+            break  # the next real section header
+        stripped = line.strip()
+        if depth > 0 or (stripped and not stripped.startswith("#")):
+            body_end = j + 1  # a key/value line, or a continuation inside an array
+        depth = max(0, depth + _bracket_delta(line))
+
+    tail = lines[body_end:]  # trailing blanks/comments + the next section, preserved
+    # One reproducible blank line before following content (keeps it idempotent),
+    # but don't double-space when the tail already begins with a blank line.
+    sep = [""] if tail and tail[0].strip() else []
     new_lines = lines[:start] + block_lines + sep + tail
     return "\n".join(new_lines).rstrip("\n") + "\n"
 
@@ -185,7 +231,7 @@ def apply_provider(
     itself). Authorization does not relax the reference-only guards in
     :func:`render_provider_block`.
     """
-    if not setup_authorized:
+    if setup_authorized is not True:
         raise SetupNotAuthorized(
             "setup writes kagura-agent.toml and must be operator-authorized "
             "(setup_authorized=True); the agent cannot authorize itself"

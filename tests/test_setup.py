@@ -249,9 +249,145 @@ def test_upsert_matches_header_with_trailing_comment():
     assert parsed["aws"]["role_arn"] == "new"
 
 
+def test_upsert_survives_comma_free_multiline_array_last_row():
+    # #81-1: an array's LAST row has no trailing comma (e.g. `[3, 4]` or `["x"]`).
+    # Such a row starts with "[" but is NOT a section header — the end-scan must
+    # not stop there and orphan the array's closing lines into invalid TOML.
+    existing = (
+        "[providers.first]\n"
+        'kind = "aws_sts"\n'
+        'role_arn = "r1"\n'
+        "extra = [\n"
+        "  [1, 2],\n"
+        "  [3, 4]\n"  # no trailing comma — the array's last row
+        "]\n"
+        "\n"
+        "[providers.second]\n"
+        'kind = "aws_sts"\n'
+        'role_arn = "r2"\n'
+    )
+    new = render_provider_block("first", "aws_sts", {"role_arn": "NEW"})
+    out = upsert_provider(existing, "first", new)
+    parsed = tomllib.loads(out)["providers"]  # must remain valid TOML
+    assert parsed["first"]["role_arn"] == "NEW"
+    assert "extra" not in parsed["first"]  # the old multi-line array was fully replaced
+    assert parsed["second"]["role_arn"] == "r2"  # following section intact
+
+
+def test_upsert_survives_single_element_array_rows():
+    # #81-1: single-element rows `["x"]` / `[42]` look the most like a header
+    # (no comma to disqualify them) — depth tracking, not the regex, must save us.
+    existing = (
+        "[providers.first]\n"
+        'kind = "aws_sts"\n'
+        'role_arn = "r1"\n'
+        "nested = [\n"
+        '  ["x"],\n'
+        "  [42]\n"
+        "]\n"
+        "[providers.second]\n"
+        'kind = "aws_sts"\n'
+        'role_arn = "r2"\n'
+    )
+    new = render_provider_block("first", "aws_sts", {"role_arn": "NEW"})
+    out = upsert_provider(existing, "first", new)
+    parsed = tomllib.loads(out)["providers"]
+    assert parsed["first"]["role_arn"] == "NEW"
+    assert parsed["second"]["role_arn"] == "r2"
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("extra = [", 1),  # opens a multi-line array
+        ("  [1, 2],", 0),  # balanced row
+        ("  [3, 4]", 0),  # balanced comma-free last row
+        ("]", -1),  # closes the array
+        ('role_arn = "a[b]"', 0),  # brackets inside a basic string don't count
+        ("note = 'x[y'", 0),  # unbalanced bracket inside a literal string ignored
+        ("y = 1  # [not a header]", 0),  # bracket inside a comment ignored
+        (r'k = "a\"["', 0),  # escaped quote keeps us in-string, so [ is ignored
+    ],
+)
+def test_bracket_delta(line, expected):
+    from kagura_agent.cli.setup import _bracket_delta
+
+    assert _bracket_delta(line) == expected
+
+
+def test_upsert_survives_unbalanced_bracket_in_string_value():
+    # #81-1: a bracket inside a string value must not be counted as opening an
+    # array, or the depth tracker would swallow the following real section header.
+    existing = (
+        "[providers.first]\n"
+        'kind = "aws_sts"\n'
+        'role_arn = "has [ an open bracket"\n'
+        'weird = ["x ["]\n'
+        "[providers.second]\n"
+        'kind = "aws_sts"\n'
+        'role_arn = "r2"\n'
+    )
+    new = render_provider_block("first", "aws_sts", {"role_arn": "NEW"})
+    out = upsert_provider(existing, "first", new)
+    parsed = tomllib.loads(out)["providers"]
+    assert parsed["first"]["role_arn"] == "NEW"
+    assert parsed["second"]["role_arn"] == "r2"  # not swallowed by a phantom array
+
+
+def test_upsert_preserves_inter_section_comment():
+    # #81-2: a comment between the replaced section's last key and the NEXT header
+    # documents the following section — it must survive the upsert (the docstring
+    # promises "Other sections and comments are preserved").
+    existing = (
+        "[providers.aws]\n"
+        'kind = "aws_sts"\n'
+        'role_arn = "old"\n'
+        "\n"
+        "# this comment documents the cf section\n"
+        "[providers.cf]\n"
+        'kind = "cloudflare"\n'
+        'account_id = "a"\n'
+        'parent_token_env = "CF"\n'
+    )
+    new = render_provider_block("aws", "aws_sts", {"role_arn": "new"})
+    out = upsert_provider(existing, "aws", new)
+    assert "# this comment documents the cf section" in out
+    parsed = tomllib.loads(out)["providers"]
+    assert parsed["aws"]["role_arn"] == "new"
+    assert parsed["cf"]["account_id"] == "a"
+
+
+def test_upsert_comment_preservation_is_idempotent():
+    # The preserved-comment path must still round-trip to itself on a re-upsert.
+    existing = (
+        "[providers.aws]\n"
+        'kind = "aws_sts"\n'
+        'role_arn = "old"\n'
+        "\n"
+        "# documents cf\n"
+        "[providers.cf]\n"
+        'kind = "cloudflare"\n'
+        'account_id = "a"\n'
+        'parent_token_env = "CF"\n'
+    )
+    block = render_provider_block("aws", "aws_sts", {"role_arn": "new"})
+    once = upsert_provider(existing, "aws", block)
+    twice = upsert_provider(once, "aws", block)
+    assert once == twice
+
+
 def test_apply_provider_refuses_without_authorization():
     with pytest.raises(SetupNotAuthorized):
         apply_provider("", "aws", "aws_sts", {"role_arn": "r"}, setup_authorized=False)
+
+
+@pytest.mark.parametrize("truthy_non_true", ["false", "true", 1, [0], {"x": 1}])
+def test_apply_provider_refuses_truthy_non_bool_authorization(truthy_non_true):
+    # #81-3: the consent gate must use identity (is not True), not truthiness —
+    # consistent with StaticEnvProvider.standing_secret. A truthy non-bool (a
+    # quoted "false", 1, a non-empty container) must NOT authorize a config write.
+    with pytest.raises(SetupNotAuthorized):
+        apply_provider("", "aws", "aws_sts", {"role_arn": "r"}, setup_authorized=truthy_non_true)
 
 
 def test_apply_provider_writes_when_authorized():
