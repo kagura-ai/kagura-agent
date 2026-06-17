@@ -157,24 +157,57 @@ CI/CD is out of scope while the repo is a placeholder; at first code the image
 build ties to the README's digest/lockfile pinning and the "ship Dockerfiles,
 not prebuilt images" decision in `docs/legal.md`.
 
-## Credential onboarding (v0.6)
+## Credential onboarding (v0.6 / v0.7)
 
 Providers are declared in `kagura-agent.toml` (gitignored, defense-in-depth). The
-registry stores **references only** — a `*_env` / `*_file` reference resolved on
-the host, never a secret value. Diagnose with `kagura-agent doctor` (add
-`--probe` to dry-mint), and register providers with the operator-gated
-`kagura-agent setup` wizard (it refuses to write a secret value).
+registry stores **references only** — a pointer to where the secret lives on the
+host, never the secret value. Diagnose with `kagura-agent doctor` (add `--probe`
+to dry-mint), and register providers with the operator-gated `kagura-agent setup`
+wizard (it refuses to write a secret value).
 
-### `run --grant` (parse-only in v0.6)
+### Secret-reference backends
+
+A secret field is `<name><suffix>`; the **suffix** selects the host-side backend
+the reference resolves through. Exactly one suffix per logical secret (two is an
+ambiguous-config error). All resolution happens on the trusted host — the value
+is leased into the container as an env var, never read inside it.
+
+| Suffix | Reference value | Resolved from | Extra |
+|---|---|---|---|
+| `*_env` | an environment-variable **name** (e.g. `CF_TOKEN`) | the host env | — (stdlib) |
+| `*_file` | a host **file path** (e.g. `/run/secrets/cf`) | the file's contents (trailing newline stripped) | — (stdlib) |
+| `*_keyring` | a keychain key `"service/username"` | the host OS keychain | `kagura-agent[keyring]` |
+
+```toml
+# Resolve a Cloudflare parent token from the host OS keychain instead of an env
+# var or file. The reference is "service/username"; the secret never appears here.
+[providers.cf]
+kind = "cloudflare"
+account_id = "acct1"
+parent_token_keyring = "kagura-cf/agent"
+```
+
+`*_keyring` needs the optional extra (`pip install 'kagura-agent[keyring]'`). If a
+registry uses a `*_keyring` reference but the extra is absent, `kagura-agent
+doctor` **WARNs** (it does *not* fail the gate — keyring availability is
+host-dependent, so doctor may run on a different host than the agent): both the
+`secret-backends` check and the per-provider check report the install hint as a
+heads-up. If this host is also where the agent runs, the run then fail-closes
+with the same hint — never a silent miss.
+
+### `run --grant` (enforced in v0.7)
 
 ```
 kagura-agent run "do the task" --grant aws:arn:aws:iam::123:role/agent --grant slack:chat:write
 ```
 
 `--grant PROVIDER:SCOPE` (repeatable) is parsed into a default-deny, exact-match
-`GrantSet`. **In v0.6 it is validated but NOT enforced** — the CLI prints a loud
-"not enforced" warning, and all configured providers remain reachable.
-Enforcement (default-deny at the broker chokepoint) lands in v0.7.
+`GrantSet` that is **enforced** at the credential chokepoint (`GrantedBroker`):
+only the granted `(provider, scope)` pairs are reachable, and the run builds a
+broker and acquires leases for **only** the granted providers. With **no
+`--grant`, the run acquires no credentials at all** (default-deny — nothing is
+minted, the registry is not even read). Leases are short-lived and released when
+the run ends.
 
 ### Static long-lived tokens (Slack / Discord / Resend)
 
