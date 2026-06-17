@@ -29,6 +29,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from kagura_agent.membrane.registry import ProviderSpec, parse_registry
+from kagura_agent.membrane.secret_source import SecretSourceError, resolve_secret_field
 
 #: Resolve an environment variable name to its value (or None if unset).
 EnvResolver = Callable[[str], str | None]
@@ -36,12 +37,12 @@ EnvResolver = Callable[[str], str | None]
 FileResolver = Callable[[str], str]
 
 
-class SecretRefError(RuntimeError):
-    """A secret reference could not be resolved on the host (missing or empty).
-
-    Carries an actionable message that names the reference (env var / file path)
-    but never the resolved secret value.
-    """
+# v0.7 (#65): the secret-resolution logic is unified in ``secret_source``. This
+# name stays as a backward-compatible alias of the canonical
+# :class:`~kagura_agent.membrane.secret_source.SecretSourceError` so every
+# existing ``except SecretRefError`` (doctor probe, _run_probes) keeps catching,
+# and the folded resolver's error is caught unchanged.
+SecretRefError = SecretSourceError
 
 
 def load_registry(path: str | Path) -> tuple[ProviderSpec, ...]:
@@ -96,40 +97,11 @@ def resolve_secret_ref(
     Every underlying failure (KeyError, OSError, decode error, a custom
     resolver raising) is normalized to SecretRefError so the caller's fail-closed
     contract holds. The resolved value is never included in an error message.
+
+    v0.7 (#65): this delegates to the unified suffix resolver
+    :func:`~kagura_agent.membrane.secret_source.resolve_secret_field`, so the
+    ``*_env`` / ``*_file`` logic lives in exactly one place and ``*_keyring`` (and
+    any future backend) resolves here too without changes. The default keychain
+    backend applies for ``*_keyring`` refs.
     """
-    if field_name.endswith("_env"):
-        try:
-            value = get_env(ref)
-        except Exception as exc:  # noqa: BLE001 — fail-closed: any failure → SecretRefError
-            # Do NOT interpolate {exc} into the message: a custom resolver may
-            # raise with the secret value embedded in its text. The original is
-            # preserved as __cause__ (via `from exc`) for host-side debug logs.
-            raise SecretRefError(
-                f"could not read environment variable {ref!r} for {field_name}"
-            ) from exc
-        if value is None or not value.strip():
-            raise SecretRefError(
-                f"environment variable {ref!r} for {field_name} is unset or empty"
-            )
-        return value
-
-    if field_name.endswith("_file"):
-        try:
-            contents = read_file(ref)
-        except Exception as exc:  # noqa: BLE001 — fail-closed: any failure → SecretRefError
-            # {exc} omitted on purpose — a custom reader could embed file
-            # contents in its message. __cause__ keeps the detail for debug.
-            raise SecretRefError(
-                f"could not read secret file {ref!r} for {field_name}"
-            ) from exc
-        # Secret files conventionally end with a trailing newline (LF or CRLF);
-        # strip trailing line endings but preserve internal structure (e.g.
-        # multi-line PEM keys) and any meaningful trailing spaces.
-        secret = contents.rstrip("\r\n")
-        if not secret.strip():
-            raise SecretRefError(f"secret file {ref!r} for {field_name} is empty")
-        return secret
-
-    raise SecretRefError(
-        f"{field_name!r} is not a secret reference (expected a *_env or *_file field)"
-    )
+    return resolve_secret_field(field_name, ref, get_env=get_env, read_file=read_file)

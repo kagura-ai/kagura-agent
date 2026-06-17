@@ -39,7 +39,12 @@ from kagura_agent.membrane.registry_io import (
     FileResolver,
     SecretRefError,
     _read_file,
-    resolve_secret_ref,
+)
+from kagura_agent.membrane.secret_source import (
+    SECRET_SUFFIXES,
+    KeyringResolver,
+    _real_keyring_get_password,
+    resolve_secret_field,
 )
 
 OK = "ok"
@@ -197,39 +202,46 @@ def check_provider(
     *,
     resolve_env: EnvResolver = os.environ.get,
     resolve_file: FileResolver = _read_file,
+    resolve_keyring: KeyringResolver = _real_keyring_get_password,
 ) -> CheckResult:
     """Diagnose whether a provider's secret references resolve on this host.
 
-    A **required** reference that is absent, ambiguous (both ``*_env`` and
-    ``*_file``), or unresolvable is a FAIL with an actionable hint naming the env
-    var / file path — never the resolved secret value. An absent **optional**
-    reference is fine (the provider falls back to ambient/default creds), so it
-    stays OK. This is the pre-flight answer to "why can't the agent touch X?".
+    A **required** reference that is absent, ambiguous (two or more of the
+    ``*_env`` / ``*_file`` / ``*_keyring`` variants), or unresolvable is a FAIL
+    with an actionable hint naming the env var / file path / keychain key — never
+    the resolved secret value. An absent **optional** reference is fine (the
+    provider falls back to ambient/default creds), so it stays OK. This mirrors
+    the suffix-agnostic resolution the run path uses (#65), so doctor predicts the
+    run. This is the pre-flight answer to "why can't the agent touch X?".
     """
     name = f"provider:{spec.name}"
     fails: list[str] = []
     optional_absent: list[str] = []
     for ref in kind_schema(spec.kind).secrets:
-        env_field, file_field = f"{ref.name}_env", f"{ref.name}_file"
-        has_env, has_file = env_field in spec.fields, file_field in spec.fields
-        if has_env and has_file:
-            fails.append(f"{ref.name}: both {env_field} and {file_field} set (ambiguous)")
+        suffix_fields = {suf: f"{ref.name}{suf}" for suf in SECRET_SUFFIXES}
+        present = [suf for suf, fld in suffix_fields.items() if fld in spec.fields]
+        if len(present) > 1:
+            keys = ", ".join(suffix_fields[suf] for suf in present)
+            fails.append(f"{ref.name}: more than one of {keys} set (ambiguous)")
             continue
-        field = env_field if has_env else file_field if has_file else None
-        if field is None:
+        if not present:
             if ref.required:
-                fails.append(
-                    f"{ref.name}: required but neither {env_field} nor {file_field} is set"
-                )
+                all_fields = " / ".join(suffix_fields[suf] for suf in SECRET_SUFFIXES)
+                fails.append(f"{ref.name}: required but none of {all_fields} is set")
             else:
                 optional_absent.append(ref.name)
             continue
+        field = suffix_fields[present[0]]
         try:
-            resolve_secret_ref(
-                field, str(spec.fields[field]), get_env=resolve_env, read_file=resolve_file
+            resolve_secret_field(
+                field,
+                str(spec.fields[field]),
+                get_env=resolve_env,
+                read_file=resolve_file,
+                get_password=resolve_keyring,
             )
         except SecretRefError as exc:
-            fails.append(str(exc))  # names the env var / path, never the value
+            fails.append(str(exc))  # names the env var / path / keychain key, never the value
 
     if fails:
         return CheckResult(
@@ -249,10 +261,16 @@ def check_providers(
     *,
     resolve_env: EnvResolver = os.environ.get,
     resolve_file: FileResolver = _read_file,
+    resolve_keyring: KeyringResolver = _real_keyring_get_password,
 ) -> list[CheckResult]:
     """A reference-resolution :class:`CheckResult` per provider in the registry."""
     return [
-        check_provider(spec, resolve_env=resolve_env, resolve_file=resolve_file)
+        check_provider(
+            spec,
+            resolve_env=resolve_env,
+            resolve_file=resolve_file,
+            resolve_keyring=resolve_keyring,
+        )
         for spec in registry
     ]
 

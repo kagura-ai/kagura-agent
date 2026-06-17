@@ -6,15 +6,15 @@ long-lived static key. The provider carries one, but **refuses to construct**
 unless the operator explicitly accepts the risk with ``standing_secret=True`` —
 so a standing secret is never used by accident.
 
-`run --grant PROVIDER:SCOPE` is **parse-only** in this release (enforcement lands
-in v0.7). It validates grant syntax into a GrantSet and emits a loud
-"not enforced yet" warning so an operator is never misled into thinking the
-grants are active.
+`run --grant PROVIDER:SCOPE` validates grant syntax into a GrantSet that is
+**enforced** in the run path (v0.7 #65): only granted ``(provider, scope)`` pairs
+are reachable (default-deny), enforced at the credential chokepoint by
+``GrantedBroker``.
 """
 
 import pytest
 
-from kagura_agent.cli.main import GRANT_NOT_ENFORCED_WARNING, parse_args, resolve_grants
+from kagura_agent.cli.main import parse_args, resolve_grants
 from kagura_agent.membrane.providers import StandingSecretRefused, StaticEnvProvider
 from kagura_agent.membrane.registry import GrantSet
 
@@ -74,7 +74,7 @@ def test_static_env_is_an_env_cred_provider():
 
 
 # --------------------------------------------------------------------------
-# run --grant — parse-only, loud "not enforced" warning
+# run --grant — parsed into an ENFORCED GrantSet (v0.7 #65)
 # --------------------------------------------------------------------------
 
 
@@ -88,22 +88,15 @@ def test_grant_argparse_default_is_none():
     assert ns.grants is None
 
 
-def test_resolve_grants_none_yields_empty_set_no_warning():
-    gs, warning = resolve_grants(None)
-    assert gs == GrantSet(frozenset())
-    assert warning is None
+def test_resolve_grants_none_yields_empty_deny_all_set():
+    # No --grant → empty (deny-all) GrantSet; the run provisions no credential.
+    assert resolve_grants(None) == GrantSet(frozenset())
 
 
-def test_resolve_grants_parses_to_grantset_with_warning():
-    gs, warning = resolve_grants(["aws:arn:aws:iam::1:role/x"])
+def test_resolve_grants_parses_to_enforced_grantset():
+    gs = resolve_grants(["aws:arn:aws:iam::1:role/x"])
     assert gs.allows("aws", "arn:aws:iam::1:role/x")
-    assert warning is not None
-    assert warning == GRANT_NOT_ENFORCED_WARNING
-
-
-def test_grant_not_enforced_warning_is_loud_and_honest():
-    w = GRANT_NOT_ENFORCED_WARNING.lower()
-    assert "not" in w and "enforc" in w  # tells the operator grants aren't active yet
+    assert not gs.allows("aws", "arn:aws:iam::1:role/other")  # exact-match, default-deny
 
 
 def test_resolve_grants_malformed_is_fail_closed():

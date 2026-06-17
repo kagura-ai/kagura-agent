@@ -48,6 +48,25 @@ def test_check_provider_fail_when_required_reference_unresolved():
     assert "CF" in (r.hint or "")  # names the env var (no value exists to leak here)
 
 
+def test_check_provider_ok_when_required_keyring_reference_resolves():
+    # #65: doctor is suffix-agnostic — a *_keyring reference the run path can
+    # resolve must pass doctor too (doctor predicts the run).
+    spec = _spec(
+        {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": "svc/agent"}}
+    )
+    r = check_provider(spec, resolve_keyring=lambda s, u: "kr-tok")
+    assert r.status == OK
+
+
+def test_check_provider_fail_when_required_keyring_reference_unresolved():
+    spec = _spec(
+        {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": "svc/agent"}}
+    )
+    r = check_provider(spec, resolve_keyring=lambda s, u: None)  # keychain entry absent
+    assert r.status == FAIL
+    assert "keyring" in (r.hint or "")  # names the keychain ref, not the value
+
+
 def test_check_provider_optional_reference_absent_is_not_fail():
     # aws_sts.parent_token is OPTIONAL — its absence means "use ambient host
     # creds", so the provider must NOT be reported as broken.
