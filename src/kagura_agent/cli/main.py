@@ -26,8 +26,10 @@ from kagura_agent.cli.doctor import (
     run_doctor,
 )
 from kagura_agent.core.brain.base import BrainUnavailable
+from kagura_agent.core.session import SessionError
 from kagura_agent.membrane.registry import GrantSet, ProviderSpec, parse_grants
 from kagura_agent.patterns.checkpoint import (
+    CheckpointError,
     CheckpointStore,
     FileCheckpointStore,
     InMemoryCheckpointStore,
@@ -553,6 +555,14 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             # agent run must surface as itself, not be mislabeled a --grant error.
             print(f"--grant/--registry: {exc}", file=sys.stderr)
             return 2
+        except (CheckpointError, SessionError) as exc:
+            # A corrupt/unreadable persisted checkpoint (CheckpointError) or a brain
+            # that ended without a terminal result (SessionError) — surface a clean
+            # one-line message + exit 2, never a raw traceback. Restores the clean
+            # failure surface the old cockpit.serve() path gave before this command
+            # drove the Session directly.
+            print(f"run failed: {exc}", file=sys.stderr)
+            return 2
         print(result)
         return 0
     if ns.command == "repl":
@@ -572,6 +582,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
         except BrainUnavailable as exc:
             print(str(exc), file=sys.stderr)
             return 3
+        except (CheckpointError, SessionError) as exc:
+            # run_repl isolates per-turn errors, but a failure outside the loop
+            # (store setup, a pre-loop load) still surfaces cleanly, not as a
+            # traceback.
+            print(f"repl failed: {exc}", file=sys.stderr)
+            return 2
         return 0
     return 1
 

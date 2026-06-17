@@ -17,6 +17,7 @@ from kagura_agent.patterns.checkpoint import (
     CheckpointError,
     FileCheckpointStore,
     MemoryCloudCheckpointStore,
+    _checkpoint_filename,
 )
 
 
@@ -122,6 +123,46 @@ async def test_checkpoint_missing_field_raises(tmp_path) -> None:  # type: ignor
         await store.load("s")
 
 
+async def test_load_wrong_typed_field_raises(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # A valid JSON object with all keys present but a wrong-typed field (turn as a
+    # string, state as a list) must raise CheckpointError — NOT silently build a
+    # malformed Checkpoint whose state has no .get(), which would crash on resume.
+    base = tmp_path / "state"
+    store = FileCheckpointStore(base)
+    await store.save(Checkpoint(session_id="s", turn=1, state={}))
+    [f] = list(base.glob("*.json"))
+
+    f.write_text(json.dumps({"session_id": "s", "turn": "x", "state": {}}), encoding="utf-8")
+    with pytest.raises(CheckpointError, match="corrupt"):
+        await store.load("s")
+
+    f.write_text(json.dumps({"session_id": "s", "turn": 1, "state": [1, 2, 3]}), encoding="utf-8")
+    with pytest.raises(CheckpointError, match="corrupt"):
+        await store.load("s")
+
+
+async def test_load_non_object_json_raises(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    base = tmp_path / "state"
+    store = FileCheckpointStore(base)
+    await store.save(Checkpoint(session_id="s", turn=1, state={}))
+    [f] = list(base.glob("*.json"))
+    f.write_text(json.dumps([1, 2, 3]), encoding="utf-8")  # JSON array, not object
+
+    with pytest.raises(CheckpointError, match="not a JSON object"):
+        await store.load("s")
+
+
+async def test_load_unreadable_path_raises_checkpoint_error(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # A present-but-unreadable checkpoint (here: a DIRECTORY at the hashed path)
+    # must surface as CheckpointError, not a raw OSError and not None.
+    base = tmp_path / "state"
+    base.mkdir(parents=True)
+    (base / _checkpoint_filename("s")).mkdir()  # a dir where the file should be
+
+    with pytest.raises(CheckpointError, match="unreadable"):
+        await FileCheckpointStore(base).load("s")
+
+
 # --- MemoryCloudCheckpointStore (B2): checkpoint over the KV state API --------
 
 
@@ -167,5 +208,13 @@ async def test_memorycloud_store_missing_is_none() -> None:
 async def test_memorycloud_store_corrupt_raises() -> None:
     backend = _FakeStateBackend()
     backend.kv["checkpoint:s"] = "not json {"
+    with pytest.raises(CheckpointError, match="corrupt"):
+        await MemoryCloudCheckpointStore(backend).load("s")
+
+
+async def test_memorycloud_store_wrong_typed_field_raises() -> None:
+    # Same type-validation guard as the file store (shared _decode_checkpoint).
+    backend = _FakeStateBackend()
+    backend.kv["checkpoint:s"] = json.dumps({"session_id": "s", "turn": "x", "state": {}})
     with pytest.raises(CheckpointError, match="corrupt"):
         await MemoryCloudCheckpointStore(backend).load("s")

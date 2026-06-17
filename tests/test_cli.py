@@ -247,6 +247,43 @@ def test_main_run_surfaces_brain_unavailable(monkeypatch, capsys) -> None:  # ty
     assert "internal error" not in err.lower()  # the failure mode this issue fixes
 
 
+def test_main_run_clean_error_on_corrupt_checkpoint(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    # A corrupt persisted checkpoint raises CheckpointError; the run handler must
+    # surface a clean exit-2 message, never a raw traceback (matches the rest of
+    # the CLI and replaces the old cockpit.serve() isolation).
+    from kagura_agent.cli import main as cli_main
+    from kagura_agent.patterns.checkpoint import CheckpointError
+
+    async def _boom(*_a, **_k) -> str:
+        raise CheckpointError("checkpoint for session 'work' at ... is corrupt: ...")
+
+    monkeypatch.setattr(cli_main, "_run_task", _boom)
+    rc = main(["run", "do a thing", "--session", "work"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "run failed" in err and "corrupt" in err
+    assert "Traceback" not in err
+
+
+def test_main_run_clean_error_on_session_error(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    # A brain that ends without a terminal result raises SessionError; surface it
+    # cleanly (exit 2), not as a raw traceback.
+    from kagura_agent.cli import main as cli_main
+    from kagura_agent.core.session import SessionError
+
+    async def _boom(*_a, **_k) -> str:
+        raise SessionError("brain ended without DoneEvent for session 'cli'")
+
+    monkeypatch.setattr(cli_main, "_run_task", _boom)
+    rc = main(["run", "do a thing"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "run failed" in err
+    assert "Traceback" not in err
+
+
 def test_main_run_clean_error_on_credential_provisioning_failure(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
     # A credential-provisioning failure (bad/missing registry, or a --grant naming
     # a provider absent from it) raises CredentialSetupError and must surface as a

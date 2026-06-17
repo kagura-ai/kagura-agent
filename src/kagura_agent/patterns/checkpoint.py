@@ -34,6 +34,43 @@ class CheckpointError(RuntimeError):
     resume does not quietly lose the task's context and start over."""
 
 
+def _decode_checkpoint(raw: str, *, where: str) -> Checkpoint:
+    """Parse a persisted checkpoint payload into a Checkpoint, fail-closed.
+
+    Raises ``CheckpointError`` on anything malformed — non-JSON, a non-object top
+    level, a missing key, OR a **wrong-typed field** (a valid JSON object whose
+    ``turn`` is a string or ``state`` is a list). The type checks matter: without
+    them a wrong-typed payload would build a Checkpoint whose ``state`` is not a
+    dict and crash only later, far away, when a brain does ``state.get(...)`` on
+    resume. Shared by every serializing store so they validate identically.
+    """
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise CheckpointError(f"checkpoint {where} is corrupt (not JSON): {exc}") from exc
+    if not isinstance(data, dict):
+        raise CheckpointError(f"checkpoint {where} is corrupt: top level is not a JSON object")
+    try:
+        session_id = data["session_id"]
+        turn = data["turn"]
+        state = data["state"]
+    except KeyError as exc:
+        raise CheckpointError(f"checkpoint {where} is corrupt (missing {exc} field)") from exc
+    # bool is an int subclass — exclude it so a JSON `true`/`false` turn is rejected.
+    if (
+        not isinstance(session_id, str)
+        or not isinstance(turn, int)
+        or isinstance(turn, bool)
+        or not isinstance(state, dict)
+    ):
+        raise CheckpointError(
+            f"checkpoint {where} is corrupt: expected {{session_id:str, turn:int, "
+            f"state:object}}, got {{session_id:{type(session_id).__name__}, "
+            f"turn:{type(turn).__name__}, state:{type(state).__name__}}}"
+        )
+    return Checkpoint(session_id=session_id, turn=turn, state=state)
+
+
 class CheckpointStore(Protocol):
     async def save(self, checkpoint: Checkpoint) -> None: ...
 
@@ -91,9 +128,12 @@ class FileCheckpointStore:
             }
         )
         target = self._path(checkpoint.session_id)
-        # Atomic publish: write a sibling temp file, fsync-free rename onto the
-        # target. os.replace is atomic on the same filesystem (and overwrites),
-        # so a reader never sees a partially written file.
+        # Atomic publish: write a sibling temp file, then rename onto the target.
+        # os.replace is atomic + overwrites on the same filesystem, so a reader
+        # never sees a partially written file. This rests on the documented
+        # single-writer contract (the session is the only writer): on Windows,
+        # os.replace raises a sharing violation if the target is concurrently
+        # open, so a same-session concurrent writer is out of contract by design.
         fd, tmp = tempfile.mkstemp(dir=self._base, suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -110,20 +150,16 @@ class FileCheckpointStore:
         try:
             raw = path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            return None
-        try:
-            data = json.loads(raw)
-            return Checkpoint(
-                session_id=data["session_id"],
-                turn=data["turn"],
-                state=data["state"],
-            )
-        except (ValueError, KeyError, TypeError) as exc:
-            # A present-but-unreadable checkpoint is NOT "no checkpoint" — surface
-            # it so a resume doesn't silently start over and lose the task.
+            return None  # genuinely absent — not an error
+        except OSError as exc:
+            # Present but unreadable (a directory at the path, a permission / AV
+            # lock, …) is NOT "no checkpoint" — surface it rather than silently
+            # starting the task over. FileNotFoundError is a *sibling* OSError, so
+            # this clause must come AFTER it to keep absent → None.
             raise CheckpointError(
-                f"checkpoint for session {session_id!r} at {path} is corrupt: {exc}"
+                f"checkpoint for session {session_id!r} at {path} is unreadable: {exc}"
             ) from exc
+        return _decode_checkpoint(raw, where=f"for session {session_id!r} at {path}")
 
 
 class StateBackend(Protocol):
@@ -171,14 +207,6 @@ class MemoryCloudCheckpointStore:
         raw = await self._backend.get_state(self._PREFIX + session_id)
         if raw is None:
             return None
-        try:
-            data = json.loads(raw)
-            return Checkpoint(
-                session_id=data["session_id"],
-                turn=data["turn"],
-                state=data["state"],
-            )
-        except (ValueError, KeyError, TypeError) as exc:
-            raise CheckpointError(
-                f"checkpoint for session {session_id!r} in memory-cloud state is corrupt: {exc}"
-            ) from exc
+        return _decode_checkpoint(
+            raw, where=f"for session {session_id!r} in memory-cloud state"
+        )
