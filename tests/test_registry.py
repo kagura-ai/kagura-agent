@@ -161,6 +161,103 @@ def test_ambiguous_secret_both_env_and_file_is_fail_closed():
         )
 
 
+# --- #63: suffix-agnostic validator (env/file/keyring), exactly-one-suffix ---
+
+
+def test_accepts_secret_reference_keyring_form():
+    # #63: a *_keyring variant is accepted with NO per-kind schema edit — the
+    # validator allows every SECRET_SUFFIXES variant of a declared secret name.
+    specs = parse_registry(
+        {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": "cf-svc/agent"}}
+    )
+    assert specs[0].fields["parent_token_keyring"] == "cf-svc/agent"
+
+
+def test_required_secret_satisfied_by_keyring_alone():
+    # cloudflare's parent_token is required; a lone *_keyring reference satisfies it.
+    specs = parse_registry(
+        {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": "svc/agent"}}
+    )
+    assert specs[0].kind == "cloudflare"
+
+
+def test_static_env_value_keyring_accepted_without_schema_edit():
+    # static_env declares the logical secret `value`; value_keyring is auto-allowed.
+    specs = parse_registry({"s": {"kind": "static_env", "value_keyring": "svc/key"}})
+    assert specs[0].fields["value_keyring"] == "svc/key"
+
+
+def test_keyring_reference_must_be_non_empty():
+    with pytest.raises(ValueError, match="keyring|non-empty"):
+        parse_registry(
+            {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": "   "}}
+        )
+
+
+def test_ambiguous_secret_env_and_keyring_is_fail_closed():
+    with pytest.raises(ValueError, match="ambiguous"):
+        parse_registry(
+            {
+                "cf": {
+                    "kind": "cloudflare",
+                    "account_id": "a",
+                    "parent_token_env": "CF_TOKEN",
+                    "parent_token_keyring": "svc/agent",
+                }
+            }
+        )
+
+
+def test_ambiguous_secret_three_suffixes_is_fail_closed():
+    with pytest.raises(ValueError, match="ambiguous"):
+        parse_registry(
+            {
+                "cf": {
+                    "kind": "cloudflare",
+                    "account_id": "a",
+                    "parent_token_env": "CF_TOKEN",
+                    "parent_token_file": "/run/secrets/cf",
+                    "parent_token_keyring": "svc/agent",
+                }
+            }
+        )
+
+
+def test_keyring_reference_must_be_a_string():
+    # A non-string keyring value (e.g. a TOML integer) must fail closed at the
+    # registry, not slip through to secret_source at resolve time.
+    with pytest.raises(ValueError, match="keyring|non-empty"):
+        parse_registry(
+            {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_keyring": 42}}
+        )
+
+
+def test_missing_required_secret_message_lists_all_suffixes():
+    # The missing-required-secret message must offer every backend variant,
+    # including keyring — not just env/file.
+    with pytest.raises(ValueError) as exc:
+        parse_registry({"cf": {"kind": "cloudflare", "account_id": "a"}})
+    msg = str(exc.value)
+    assert "parent_token_keyring" in msg
+    assert "parent_token_env" in msg and "parent_token_file" in msg
+
+
+def test_optional_secret_with_two_suffixes_still_ambiguous():
+    # aws_sts.parent_token is OPTIONAL, but two suffixes are still ambiguous —
+    # the ambiguity check must fire regardless of required/optional.
+    with pytest.raises(ValueError, match="ambiguous"):
+        parse_registry(
+            {
+                "aws": {
+                    "kind": "aws_sts",
+                    "role_arn": "arn:aws:iam::1:role/x",
+                    "parent_token_env": "AWS_TOK",
+                    "parent_token_keyring": "svc/agent",
+                }
+            }
+        )
+
+
 def test_unknown_field_is_fail_closed():
     with pytest.raises(ValueError, match="unknown field|unexpected"):
         parse_registry({"aws": {"kind": "aws_sts", "role_arn": "r", "bogus_field": "x"}})
