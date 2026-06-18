@@ -39,6 +39,14 @@ class Session:
     async def run(self, task: Task) -> SessionResult:
         return await self._drive(task, resume=None)
 
+    async def drive(self, task: Task, *, resume: Checkpoint | None) -> SessionResult:
+        """Run ``task``, resuming from an already-loaded ``resume`` checkpoint when
+        given (else a fresh launch). The public seam for callers that have already
+        loaded the checkpoint (e.g. ``drive_task``) — it avoids the second store
+        read ``resume(session_id, ...)`` would do, and the race that re-load opens.
+        """
+        return await self._drive(task, resume=resume)
+
     async def resume(self, session_id: str, prompt: str) -> SessionResult:
         prior = await self._checkpoints.load(session_id)
         if prior is None:
