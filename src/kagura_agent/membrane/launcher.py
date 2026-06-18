@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import PurePath
 
-from kagura_agent.membrane.egress import EGRESS_NETWORK, EgressPolicy
+from kagura_agent.membrane.egress import EGRESS_ALLOW_LABEL, EGRESS_NETWORK, EgressPolicy
 
 # Stamped on every launched container so the cockpit can reconstruct the session
 # registry from Docker alone after a restart (docs/operations.md). MUST match the
@@ -278,6 +278,49 @@ def _network_args(spec: LaunchSpec) -> list[str]:
     return ["--network", "none"]
 
 
+#: Default endpoint the container is pointed at for HTTP(S)_PROXY when egress is
+#: granted: the compose `egress-proxy` service on the agent-egress network, at the
+#: conventional proxy port. Deploy-overridable via KAGURA_EGRESS_PROXY for a
+#: different sidecar name/port. The proxy host/port is a deployment detail, so it
+#: is configurable rather than hard-coded.
+_DEFAULT_EGRESS_PROXY = "http://egress-proxy:3128"
+
+
+def _egress_proxy_endpoint() -> str:
+    # A set-but-blank override falls back to the default (an empty proxy URL would
+    # disable proxying — the opposite of what egress enforcement wants).
+    return os.environ.get("KAGURA_EGRESS_PROXY", "").strip() or _DEFAULT_EGRESS_PROXY
+
+
+def _egress_enforcement_args(spec: LaunchSpec) -> list[str]:
+    """Per-run egress enforcement, layered on the network seal (#92).
+
+    Only for an egress-GRANTED spec (a sealed `--network none` run reaches nothing,
+    so there is nothing to broker). Two mechanisms, both fail-closed by omission on
+    a sealed run:
+
+    1. **Per-run allowlist propagation** — stamp the container with its own
+       ``EGRESS_ALLOW_LABEL`` (the validated `from_spec` allowlist), so the proxy
+       enforces *this run's* hosts looked up per source container, instead of a
+       single static compose-wide `EGRESS_ALLOWLIST`. This is the per-run
+       least-privilege the membrane validates but the static env could not deliver.
+    2. **App-layer proxy routing** — inject ``HTTP(S)_PROXY`` so even an app that
+       ignores routing is funnelled through the proxy, defense-in-depth atop the
+       network seal (`internal: true` on the proxy network). ``NO_PROXY`` keeps
+       loopback direct.
+    """
+    if not spec.egress_allow:
+        return []
+    policy = EgressPolicy.from_spec(spec)
+    endpoint = _egress_proxy_endpoint()
+    args = ["--label", f"{EGRESS_ALLOW_LABEL}={policy.as_label()}"]
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        args += ["-e", f"{var}={endpoint}"]
+    for var in ("NO_PROXY", "no_proxy"):
+        args += ["-e", f"{var}=localhost,127.0.0.1"]
+    return args
+
+
 def docker_run_args(spec: LaunchSpec) -> list[str]:
     args = ["docker", "run", "--rm"]
     args += ["--label", AGENT_LABEL]  # so reconcile()/list() can find this container
@@ -288,6 +331,9 @@ def docker_run_args(spec: LaunchSpec) -> list[str]:
     # intentionally carries no `device`/`add_host` field; if one is ever added
     # it MUST be denied here rather than forwarded. Locked by a regression test.
     args += _network_args(spec)
+    # Per-run egress enforcement (allowlist label + app-layer proxy), only when
+    # egress is granted — sealed runs get nothing, by omission (fail-closed).
+    args += _egress_enforcement_args(spec)
     for mount in spec.mounts:
         ro = ":ro" if mount.read_only else ""
         # `mount.source` is already the canonical realpath (resolved once by

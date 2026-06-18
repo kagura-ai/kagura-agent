@@ -12,6 +12,7 @@ from kagura_agent.cli.doctor import (
     FAIL,
     OK,
     WARN,
+    _compose_declares_sealed_egress,
     check_brain,
     check_docker,
     check_egress,
@@ -129,15 +130,53 @@ def test_check_docker_fail_is_actionable() -> None:
 
 # --- egress -----------------------------------------------------------------
 
-def test_check_egress_ok() -> None:
-    assert check_egress(configured=True).status == OK
+def test_check_egress_ok_when_present_and_sealed() -> None:
+    assert check_egress(configured=True, sealed=True).status == OK
 
 
 def test_check_egress_warns_when_unconfigured() -> None:
     # Egress proxy is a deploy-time concern; its absence is a warning, not a hard
-    # fail of the local toolchain.
-    r = check_egress(configured=False)
-    assert r.status == WARN
+    # fail of the local toolchain. (sealed is irrelevant when nothing is provisioned.)
+    assert check_egress(configured=False, sealed=False).status == WARN
+    assert check_egress(configured=False, sealed=True).status == WARN
+
+
+def test_check_egress_fails_when_present_but_unsealed() -> None:
+    # The escalation (#92): a present-but-unsealed proxy network is worse than
+    # absent — an egress-granted container reaches any host directly via NAT, so the
+    # allowlist is decorative. Fail-closed, not warn.
+    r = check_egress(configured=True, sealed=False)
+    assert r.status == FAIL
+    assert "internal: true" in (r.hint or "")
+
+
+def test_compose_seal_parser_detects_internal_true() -> None:
+    sealed = (
+        "services:\n"
+        "  egress-proxy:\n"
+        "    image: x\n"
+        "networks:\n"
+        "  agent-egress:\n"
+        "    driver: bridge\n"
+        "    internal: true\n"
+    )
+    assert _compose_declares_sealed_egress(sealed) is True
+
+
+def test_compose_seal_parser_rejects_unsealed_or_missing() -> None:
+    unsealed = "networks:\n  agent-egress:\n    driver: bridge\n"
+    assert _compose_declares_sealed_egress(unsealed) is False
+    # internal:true on a DIFFERENT network must not count for agent-egress.
+    other = (
+        "networks:\n"
+        "  agent-egress:\n"
+        "    driver: bridge\n"
+        "  some-other:\n"
+        "    internal: true\n"
+    )
+    assert _compose_declares_sealed_egress(other) is False
+    # no agent-egress network at all.
+    assert _compose_declares_sealed_egress("networks:\n  other:\n    internal: true\n") is False
 
 
 # --- overall ----------------------------------------------------------------
@@ -153,7 +192,7 @@ def test_overall_fail_when_any_fail() -> None:
 def test_overall_warn_when_any_warn_but_no_fail() -> None:
     results = [
         check_memory(reachable=True),
-        check_egress(configured=False),  # WARN
+        check_egress(configured=False, sealed=False),  # WARN
     ]
     assert overall_status(results) == WARN
 
@@ -285,7 +324,7 @@ def test_main_doctor_returns_0_when_only_warn(monkeypatch) -> None:  # type: ign
     from kagura_agent.cli import main as cli_main
 
     def _warn_only(**_kwargs) -> list:  # type: ignore[type-arg, no-untyped-def]
-        return [check_memory(reachable=True), check_egress(configured=False)]
+        return [check_memory(reachable=True), check_egress(configured=False, sealed=False)]
 
     monkeypatch.setattr(cli_main, "run_doctor", _warn_only)
     rc = main(["doctor"])

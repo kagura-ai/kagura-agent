@@ -18,11 +18,24 @@ services:
     image: ghcr.io/kagura-ai/egress-proxy:pinned-by-digest
     networks: [agent-egress]
     environment:
+      # Bootstrap / fallback allowlist. The launcher ALSO stamps each egress-granted
+      # container with a per-run `kagura.egress-allow` label (membrane.egress
+      # EGRESS_ALLOW_LABEL); the proxy SHOULD prefer that per-source label so each
+      # run is scoped to its OWN validated allowlist (least privilege) rather than
+      # this single static list. See membrane.launcher._egress_enforcement_args and
+      # issue #94 (make the proxy consume the per-run label).
       EGRESS_ALLOWLIST: "api.anthropic.com,memory.kagura-ai.com"
     restart: unless-stopped
 
 networks:
   agent-egress:
     driver: bridge
+    # SEALED: an internal network has no external route, so a container on it
+    # cannot reach the internet directly and bypass the proxy — the proxy (the only
+    # peer with an upstream) becomes the mandatory egress chokepoint. WITHOUT this,
+    # a plain bridge's default NAT would let an egress-granted container reach ANY
+    # host directly, making the allowlist decorative. Defense in depth: the launcher
+    # also injects HTTP(S)_PROXY into the container (membrane.launcher).
+    internal: true
 # No agent service: agent containers are ephemeral, launched by the trusted
 # host-side cockpit, and removed on completion (--rm).
