@@ -12,6 +12,7 @@ surface.
 from __future__ import annotations
 
 import itertools
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -286,7 +287,9 @@ def _token_probe_timeout() -> float:
         value = float(raw)
     except ValueError:
         return _TOKEN_PROBE_TIMEOUT_SEC
-    return value if value > 0 else _TOKEN_PROBE_TIMEOUT_SEC
+    # Reject non-finite (inf/nan): inf would pass `> 0` and make subprocess.run wait
+    # forever, defeating the fail-closed timeout this value exists to enforce.
+    return value if (math.isfinite(value) and value > 0) else _TOKEN_PROBE_TIMEOUT_SEC
 
 
 #: How many times the reachability gate retries the `kagura auth token` probe
@@ -329,7 +332,9 @@ def _probe_backoff() -> float:
         value = float(raw)
     except ValueError:
         return _PROBE_BACKOFF_SEC
-    return value if value >= 0 else _PROBE_BACKOFF_SEC
+    # Reject non-finite (inf/nan): inf would pass `>= 0` and make _sleep(inf) hang the
+    # gate forever between attempts — the opposite of riding out a momentary blip.
+    return value if (math.isfinite(value) and value >= 0) else _PROBE_BACKOFF_SEC
 
 
 def _probe_token_once() -> bool:  # pragma: no cover - shells out to the kagura CLI
@@ -354,6 +359,7 @@ def _probe_token_once() -> bool:  # pragma: no cover - shells out to the kagura 
 
 def memory_reachable(
     *,
+    attempts: int | None = None,
     _probe: Callable[[], bool] = _probe_token_once,
     _sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
@@ -361,14 +367,21 @@ def memory_reachable(
 
     Asks the CLI for a short-lived access token (`kagura auth token`) and treats a
     success (exit 0 + non-empty token) as reachable. The check is retried up to
-    ``_probe_attempts()`` times with ``_probe_backoff()`` seconds between attempts:
-    the access token is ~1h and the first run after expiry forces a refresh, so a
-    single transient failure at that boundary (slow cold start, a momentary network
-    blip, a transient 401 mid-refresh) must NOT hard-refuse the run. Once the
-    attempts are exhausted the gate stays **fail-closed** (returns False) — a real
-    outage or a logged-out host still refuses, with no silent degrade. The retry IS
-    the handling of the "expired-but-refreshable" case: a refresh that needs a
-    moment succeeds on a later attempt.
+    ``attempts`` times (default: ``_probe_attempts()``) with ``_probe_backoff()``
+    seconds between attempts: the access token is ~1h and the first run after expiry
+    forces a refresh, so a single transient failure at that boundary (slow cold
+    start, a momentary network blip, a transient 401 mid-refresh) must NOT
+    hard-refuse the run. Once the attempts are exhausted the gate stays
+    **fail-closed** (returns False) — a real outage or a logged-out host still
+    refuses, with no silent degrade. The retry IS the handling of the
+    "expired-but-refreshable" case: a refresh that needs a moment succeeds on a
+    later attempt.
+
+    **Latency note.** Each attempt can cost up to ``_token_probe_timeout()`` (60s),
+    so retry multiplies the worst case on a *hung* outage. The run path opts into
+    that to absorb transients; latency-sensitive *diagnostic* callers (doctor) pass
+    ``attempts=1`` for a one-shot, fast probe. ``attempts`` is clamped to >= 1 so a
+    stray 0/negative can never turn the loop into an unconditional "unreachable".
 
     The minted token is intentionally **not** threaded back into the process: this
     is a reachability gate only, and the live memory path (the kagura CLI / MCP
@@ -379,11 +392,12 @@ def memory_reachable(
     without shelling out (the real probe, ``_probe_token_once``, is the only part
     that touches the CLI).
     """
-    attempts = _probe_attempts()
+    n = _probe_attempts() if attempts is None else attempts
+    n = max(1, n)
     backoff = _probe_backoff()
-    for attempt in range(attempts):
+    for attempt in range(n):
         if _probe():
             return True
-        if attempt + 1 < attempts:
+        if attempt + 1 < n:
             _sleep(backoff)
     return False

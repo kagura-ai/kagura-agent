@@ -222,9 +222,19 @@ def _cli_on_path(name: str) -> bool:  # pragma: no cover - PATH lookup
     return shutil.which(name) is not None
 
 
+def _memory_reachable_once() -> bool:  # pragma: no cover - shells out to the kagura CLI
+    """One-shot reachability probe for the diagnostic path.
+
+    doctor is a fast preflight: the run path's bounded retry (which can multiply the
+    60s probe timeout on a hung outage) would make the very command you run to
+    *diagnose* a memory outage stall for minutes. ``attempts=1`` keeps doctor a
+    single, fast probe — still fail-closed, just not retried."""
+    return memory_reachable(attempts=1)
+
+
 def run_doctor(
     *,
-    memory_probe: Callable[[], bool] = memory_reachable,
+    memory_probe: Callable[[], bool] = _memory_reachable_once,
     sdk_probe: Callable[[], bool] = claude_sdk_available,
     kagura_brain_probe: Callable[[], bool] = kagura_brain_available,
     kagura_cli_probe: Callable[[str], bool] = _cli_on_path,
