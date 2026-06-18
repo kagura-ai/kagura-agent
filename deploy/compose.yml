@@ -15,7 +15,13 @@ services:
     # attaches to this `agent-egress` network (whose only reachable peer is the
     # proxy) when a run carries an egress allowlist. This network name MUST match
     # membrane.egress.EGRESS_NETWORK.
-    image: ghcr.io/kagura-ai/egress-proxy:pinned-by-digest
+    # Built from vendored, auditable source (deploy/images/egress-proxy) instead of
+    # an opaque ghcr image (#94): the enforcement is proxy.py, which delegates to the
+    # unit-tested kagura_agent.membrane.egress_proxy (same EgressPolicy the membrane
+    # validates with). Pin the base digest in that Dockerfile before deploying —
+    # `kagura-agent doctor` flags the placeholder.
+    build:
+      context: ./images/egress-proxy
     # TWO networks on purpose: `agent-egress` (internal, agent-facing) is how
     # agents reach the proxy; `egress-upstream` (external) is the proxy's OWN route
     # to the allowed hosts. An internal network has no upstream, so a proxy attached

@@ -13,9 +13,11 @@ from kagura_agent.cli.doctor import (
     OK,
     WARN,
     _compose_declares_sealed_egress,
+    _dockerfile_is_pinned,
     check_brain,
     check_docker,
     check_egress,
+    check_egress_proxy_image,
     check_memory,
     format_report,
     overall_status,
@@ -219,6 +221,35 @@ def test_compose_seal_parser_matches_real_deploy_compose() -> None:
     assert _compose_declares_sealed_egress(text) is True
 
 
+def test_check_egress_proxy_image_states() -> None:
+    assert check_egress_proxy_image(present=True, pinned=True).status == OK
+    # placeholder digest → WARN (pin before deploy), like base/python images.
+    assert check_egress_proxy_image(present=True, pinned=False).status == WARN
+    # not vendored locally → WARN, never FAIL (it's a deploy-readiness heads-up).
+    assert check_egress_proxy_image(present=False, pinned=False).status == WARN
+
+
+def test_dockerfile_pin_parser() -> None:
+    placeholder = "FROM python:3.11-slim@sha256:" + "0" * 64 + "\n"
+    assert _dockerfile_is_pinned(placeholder) is False  # all-zero placeholder
+    real = "FROM python:3.11-slim@sha256:" + "a" * 64 + "\n"
+    assert _dockerfile_is_pinned(real) is True
+    assert _dockerfile_is_pinned("FROM python:3.11-slim\n") is False  # floating tag, no digest
+
+
+def test_vendored_egress_proxy_dockerfile_exists_and_is_buildable_source() -> None:
+    # #94: the proxy must be vendored, auditable source — not an opaque image ref.
+    from pathlib import Path
+
+    dockerfile = Path("deploy/images/egress-proxy/Dockerfile")
+    proxy = Path("deploy/images/egress-proxy/proxy.py")
+    assert dockerfile.is_file() and proxy.is_file()
+    # The compose builds from it rather than pulling the old ghcr placeholder.
+    compose = Path("deploy/compose.yml").read_text(encoding="utf-8")
+    assert "build:" in compose and "images/egress-proxy" in compose
+    assert "ghcr.io/kagura-ai/egress-proxy:pinned-by-digest" not in compose
+
+
 def test_real_compose_gives_the_proxy_an_upstream_network() -> None:
     # Code-review (Finding 1): a SEALED agent-egress is only correct if the proxy
     # ALSO sits on a non-internal network for its OWN upstream — otherwise the proxy
@@ -263,6 +294,8 @@ def test_run_doctor_threads_probes_into_checks() -> None:
         docker_probe=lambda: False,
         egress_probe=lambda: True,
         egress_sealed_probe=lambda: True,
+        egress_proxy_present_probe=lambda: True,
+        egress_proxy_pinned_probe=lambda: True,
         env={"CLAUDE_CODE_SUBSCRIPTION": "1"},
     )
     by_name = {r.name: r.status for r in results}
@@ -282,6 +315,8 @@ def test_run_doctor_kagura_backend_checks_brain_extra() -> None:
         docker_probe=lambda: True,
         egress_probe=lambda: True,
         egress_sealed_probe=lambda: True,
+        egress_proxy_present_probe=lambda: True,
+        egress_proxy_pinned_probe=lambda: True,
         env={"KAGURA_AGENT_BRAIN": "kagura-brain"},
     )
     by_name = {r.name: r.status for r in results}
@@ -298,6 +333,8 @@ def test_run_doctor_kagura_backend_fails_when_cli_absent() -> None:
         docker_probe=lambda: True,
         egress_probe=lambda: True,
         egress_sealed_probe=lambda: True,
+        egress_proxy_present_probe=lambda: True,
+        egress_proxy_pinned_probe=lambda: True,
         env={"KAGURA_AGENT_BRAIN": "kagura-brain"},
     )
     brain = next(r for r in results if r.name == "brain")
@@ -312,6 +349,8 @@ def test_run_doctor_invalid_backend_is_brain_fail_not_crash() -> None:
         docker_probe=lambda: True,
         egress_probe=lambda: True,
         egress_sealed_probe=lambda: True,
+        egress_proxy_present_probe=lambda: True,
+        egress_proxy_pinned_probe=lambda: True,
         env={"KAGURA_AGENT_BRAIN": "bogus"},
     )
     brain = next(r for r in results if r.name == "brain")
@@ -328,6 +367,8 @@ def test_run_doctor_invalid_kagura_backend_is_brain_fail() -> None:
         docker_probe=lambda: True,
         egress_probe=lambda: True,
         egress_sealed_probe=lambda: True,
+        egress_proxy_present_probe=lambda: True,
+        egress_proxy_pinned_probe=lambda: True,
         env={"KAGURA_AGENT_BRAIN": "kagura-brain", "KAGURA_AGENT_BRAIN_BACKEND": "codx"},
     )
     brain = next(r for r in results if r.name == "brain")
@@ -342,6 +383,8 @@ def test_format_report_contains_each_check_and_overall() -> None:
         docker_probe=lambda: True,
         egress_probe=lambda: True,
         egress_sealed_probe=lambda: True,
+        egress_proxy_present_probe=lambda: True,
+        egress_proxy_pinned_probe=lambda: True,
         env={"CLAUDE_CODE_SUBSCRIPTION": "1"},
     )
     text = format_report(results)
