@@ -127,3 +127,21 @@ async def test_agent_load_pinned_reads_host_curated_guardrails() -> None:
 
     pinned = await agent.load_pinned()
     assert [m.text for m in pinned] == ["never promise refunds"]
+
+
+# --- #90: retrieval feedback is host-side only — no ranking path on the agent ---
+
+
+async def test_agent_surface_has_no_record_feedback_path() -> None:
+    # A ranking-affecting signal the confined agent could emit would let a hijacked
+    # agent up/down-rank a memory it recalled. Like promote(), record_feedback is
+    # host-side ONLY — not on the protocol, not on the confined client.
+    agent = QuarantinedMemoryClient(LocalMemoryClient())
+    assert not hasattr(agent, "record_feedback")
+    assert not hasattr(agent, "feedback_for")
+
+
+def test_record_feedback_is_not_on_the_memory_client_protocol() -> None:
+    # The protocol is the agent surface; the ranking-feedback verb must not be on it
+    # (so no confined client can be relied on to expose it).
+    assert not hasattr(MemoryClient, "record_feedback")
