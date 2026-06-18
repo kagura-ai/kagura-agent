@@ -314,13 +314,44 @@ async def test_ground_and_run_provenance_is_optional() -> None:
     assert result.text.startswith("done:")  # ran fine, no provenance needed
 
 
-async def test_ground_and_run_without_memory_degrades_to_drive_task() -> None:
+async def test_ground_and_run_recalls_a_prior_trusted_remember_across_runs() -> None:
+    # #104 end-to-end (unit level): the backbone is LIVE, not just reachable. Two
+    # runs share one memory client (≈ two invocations against the same backbone);
+    # a trusted memory present before run 2 is recalled into run 2's prompt. Proves
+    # grounding actually feeds prior context — the headline value the old `None`
+    # degrade silently withheld.
+    brain = FakeBrain()
+    store = InMemoryCheckpointStore()
+    memory = LocalMemoryClient()
+
+    # Run 1 establishes a trusted fact (e.g. a promoted prior outcome).
+    await ground_and_run(brain, store, memory, session_id="s1", prompt="first task")
+    await memory.remember(
+        "the deploy uses a Caddyfile permission trap", trust_tier="trusted"
+    )
+
+    # Run 2 (different session) recalls it — the brain sees the grounded prompt.
+    await ground_and_run(
+        brain, store, memory, session_id="s2", prompt="explain the Caddyfile trap"
+    )
+
+    grounded_prompt = brain.calls[-1][0]
+    assert "Relevant context from prior work" in grounded_prompt
+    assert "Caddyfile permission trap" in grounded_prompt
+
+
+async def test_ground_and_run_with_fresh_memory_passes_prompt_through() -> None:
+    # With an empty backbone (no trusted recall, nothing pinned) the brain still
+    # sees the bare prompt — grounding adds nothing it shouldn't, but memory is
+    # always present (no `None` branch).
     brain = FakeBrain()
     store = InMemoryCheckpointStore()
 
-    result = await ground_and_run(brain, store, None, session_id="s", prompt="raw prompt")
+    result = await ground_and_run(
+        brain, store, LocalMemoryClient(), session_id="s", prompt="raw prompt"
+    )
 
-    assert brain.calls == [("raw prompt", False)]  # no preamble, no grounding
+    assert brain.calls == [("raw prompt", False)]  # no preamble on an empty backbone
     assert result.text == "done: raw prompt"
 
 
@@ -346,7 +377,10 @@ async def test_run_repl_continues_same_session_across_lines() -> None:
     store = InMemoryCheckpointStore()
     out: list[str] = []
 
-    await run_repl(brain, store, ["first", "second"], out.append, session_id="repl")
+    await run_repl(
+        brain, store, ["first", "second"], out.append,
+        session_id="repl", memory=LocalMemoryClient(),
+    )
 
     # first line launches, second resumes the same session
     assert brain.calls == [("first", False), ("second", True)]
@@ -358,7 +392,10 @@ async def test_run_repl_ignores_blank_and_stops_on_exit() -> None:
     store = InMemoryCheckpointStore()
     out: list[str] = []
 
-    await run_repl(brain, store, ["", "  ", "hello", "/exit", "after"], out.append, session_id="r")
+    await run_repl(
+        brain, store, ["", "  ", "hello", "/exit", "after"], out.append,
+        session_id="r", memory=LocalMemoryClient(),
+    )
 
     assert brain.calls == [("hello", False)]  # blanks skipped, nothing after /exit
     assert out == ["done: hello"]
@@ -371,7 +408,10 @@ async def test_run_repl_isolates_a_failing_turn_and_continues() -> None:
     store = InMemoryCheckpointStore()
     out: list[str] = []
 
-    await run_repl(brain, store, ["ok one", "BOOM", "ok two"], out.append, session_id="r")
+    await run_repl(
+        brain, store, ["ok one", "BOOM", "ok two"], out.append,
+        session_id="r", memory=LocalMemoryClient(),
+    )
 
     assert brain.calls == [("ok one", False), ("BOOM", True), ("ok two", True)]
     assert out[0] == "done: ok one"
