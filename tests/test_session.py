@@ -36,6 +36,28 @@ class FakeBrain:
         yield DoneEvent(result=f"done: {task.prompt}", state={"turn": prior + 1})
 
 
+async def test_session_drive_with_checkpoint_resumes() -> None:
+    # Session.drive runs with an already-loaded checkpoint (no second store read).
+    brain = FakeBrain()
+    session = Session(brain=brain, checkpoints=InMemoryCheckpointStore())
+    prior = Checkpoint(session_id="s1", turn=4, state={"turn": 4})
+
+    result = await session.drive(Task(prompt="go", session_id="s1"), resume=prior)
+
+    assert brain.resumed_from is prior  # the passed checkpoint was used, not re-loaded
+    assert result.text == "done: go"
+
+
+async def test_session_drive_none_launches_fresh() -> None:
+    brain = FakeBrain()
+    session = Session(brain=brain, checkpoints=InMemoryCheckpointStore())
+
+    result = await session.drive(Task(prompt="go", session_id="s1"), resume=None)
+
+    assert brain.resumed_from is None  # fresh launch
+    assert result.text == "done: go"
+
+
 async def test_session_run_returns_result_and_persists_checkpoint() -> None:
     store = InMemoryCheckpointStore()
     session = Session(brain=FakeBrain(), checkpoints=store)

@@ -12,8 +12,10 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from kagura_agent.cli.doctor import (
@@ -24,7 +26,14 @@ from kagura_agent.cli.doctor import (
     run_doctor,
 )
 from kagura_agent.core.brain.base import BrainUnavailable
+from kagura_agent.core.session import SessionError
 from kagura_agent.membrane.registry import GrantSet, ProviderSpec, parse_grants
+from kagura_agent.patterns.checkpoint import (
+    CheckpointError,
+    CheckpointStore,
+    FileCheckpointStore,
+    InMemoryCheckpointStore,
+)
 
 log = logging.getLogger(__name__)
 
@@ -168,6 +177,41 @@ def plan_granted_specs(
     return [by_name[p] for p in granted_providers]
 
 
+#: Default on-disk home for persisted session checkpoints (relative to cwd). An
+#: operator can relocate it with KAGURA_AGENT_STATE_DIR (e.g. an XDG path).
+_DEFAULT_STATE_DIR = ".kagura-agent"
+
+#: The session id a one-shot `run` (no --session) uses — its checkpoint lives in
+#: a throwaway in-memory store, so it never persists (old one-shot behaviour).
+_ONESHOT_SESSION = "cli"
+
+#: Default session for `repl` when --session is omitted.
+_DEFAULT_REPL_SESSION = "repl"
+
+
+def resolve_state_dir(env: Mapping[str, str] | None = None) -> Path:
+    """Where persisted checkpoints live: ``$KAGURA_AGENT_STATE_DIR/checkpoints``
+    or ``./.kagura-agent/checkpoints``. A set-but-blank override is treated as
+    unset (so an empty env var doesn't resolve to the filesystem root)."""
+    environ = os.environ if env is None else env
+    override = environ.get("KAGURA_AGENT_STATE_DIR", "").strip()
+    base = Path(override) if override else Path(_DEFAULT_STATE_DIR)
+    return base / "checkpoints"
+
+
+def make_run_store(session_id: str | None) -> tuple[CheckpointStore, str]:
+    """Pick the checkpoint store + effective session id for a ``run``.
+
+    No ``--session`` → a throwaway in-memory store under a fixed id: a pure
+    one-shot with no cross-run memory (unchanged legacy behaviour). A named
+    ``--session ID`` → a persistent on-disk store, so a later ``run --session ID``
+    in a fresh process resumes this one's checkpoint (the continuity feature).
+    """
+    if session_id is None:
+        return InMemoryCheckpointStore(), _ONESHOT_SESSION
+    return FileCheckpointStore(resolve_state_dir()), session_id
+
+
 def _nonempty_task(value: str) -> str:
     """Reject an empty/whitespace-only task at parse time.
 
@@ -212,6 +256,36 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default="kagura-agent.toml",
         help="provider registry TOML the granted credentials are minted from "
         "(default: kagura-agent.toml; only read when --grant is given)",
+    )
+    run.add_argument(
+        "--session",
+        default=None,
+        metavar="ID",
+        help="continue (or start) a named, persisted session: a later "
+        "`run --session ID` resumes this run's checkpoint. Omit for a one-shot "
+        "run that keeps no cross-run context.",
+    )
+    repl = sub.add_parser(
+        "repl", help="interactive session: each line continues the same context"
+    )
+    repl.add_argument(
+        "--session",
+        default=_DEFAULT_REPL_SESSION,
+        metavar="ID",
+        help=f"session id to drive (default: {_DEFAULT_REPL_SESSION}); its "
+        "checkpoint persists, so re-entering resumes where you left off",
+    )
+    repl.add_argument(
+        "--mcp-config",
+        dest="mcp_config",
+        default=None,
+        help="path to a JSON file of MCP server configs (non-memory MCP servers)",
+    )
+    repl.add_argument(
+        "--strict-mcp-config",
+        dest="strict_mcp_config",
+        action="store_true",
+        help="reject MCP servers not present in --mcp-config (no silent passthrough)",
     )
     doctor = sub.add_parser(
         "doctor", help="preflight check: memory / claude / docker / egress (+ providers)"
@@ -260,27 +334,39 @@ def load_mcp_config(value: str | None) -> dict[str, Any] | None:
     return dict(servers)
 
 
+def make_memory_client() -> Any | None:
+    """The grounding seam (B): the MemoryClient used to recall prior context and
+    persist task summaries around a run.
+
+    Returns ``None`` for now → ``ground_and_run`` degrades to plain checkpoint
+    resume (A). A real client MUST honour ``recall(trusted_only=True)`` so an
+    externally-ingested / quarantined memory is never fed back as behaviour-
+    influencing context (membrane memory-provenance rule). The kagura CLI's
+    ``recall`` exposes neither a machine-readable output nor a trust-tier filter,
+    so a trust-aware MCP/SDK-backed adapter is the remaining deployment edge; this
+    factory is where it gets wired in.
+    """
+    return None
+
+
 async def _run_task(  # pragma: no cover - needs SDK + subscription
     task: str,
     *,
+    session_id: str | None = None,
     grants: GrantSet | None = None,
     registry_path: str = "kagura-agent.toml",
     mcp_servers: dict[str, Any] | None = None,
     strict_mcp_config: bool = False,
 ) -> str:
-    import os
     import time
 
-    from kagura_agent.cockpit.core import Cockpit
-    from kagura_agent.cockpit.transports.base import Event
-    from kagura_agent.cockpit.transports.cli import CliTransport
     from kagura_agent.core.brain.claude import make_default_brain
     from kagura_agent.mcp.memory_cloud import ensure_memory_reachable, memory_reachable
     from kagura_agent.membrane.cloud_transports import build_broker
     from kagura_agent.membrane.granted_broker import GrantedBroker, lease_requests
     from kagura_agent.membrane.lease import Budget, Lease
     from kagura_agent.membrane.registry_io import load_registry
-    from kagura_agent.patterns.checkpoint import InMemoryCheckpointStore
+    from kagura_agent.patterns.continuity import ground_and_run
 
     # Redefined startup gate (v0.2-A6): memory must be reachable via the CLI,
     # independent of the brain. Fail-closed; no silent memory-less degrade.
@@ -331,12 +417,13 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
                 os.environ[key] = value
 
         brain = make_default_brain(mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
-        transport = CliTransport(
-            inbox=[Event(thread_id="cli", text=task, is_thread_reply=False)]
+        # A named --session uses a persistent on-disk store (resume across runs);
+        # a one-shot run uses a throwaway in-memory store (no persisted context).
+        store, sid = make_run_store(session_id)
+        result = await ground_and_run(
+            brain, store, make_memory_client(), session_id=sid, prompt=task
         )
-        cockpit = Cockpit(transport, brain, InMemoryCheckpointStore())
-        await cockpit.serve()
-        return transport.sent[-1][1] if transport.sent else ""
+        return result.text
     finally:
         # Restore env first, then release every acquired lease. Per-lease guarded
         # so one failing revoke does not skip the rest (the broker's sweep retries
@@ -459,6 +546,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             result = asyncio.run(
                 _run_task(
                     ns.task,
+                    session_id=ns.session,
                     grants=grants,
                     registry_path=ns.registry,
                     mcp_servers=mcp_servers,
@@ -481,6 +569,71 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             # agent run must surface as itself, not be mislabeled a --grant error.
             print(f"--grant/--registry: {exc}", file=sys.stderr)
             return 2
+        except (CheckpointError, SessionError) as exc:
+            # A corrupt/unreadable persisted checkpoint (CheckpointError) or a brain
+            # that ended without a terminal result (SessionError) — surface a clean
+            # one-line message + exit 2, never a raw traceback. Restores the clean
+            # failure surface the old cockpit.serve() path gave before this command
+            # drove the Session directly.
+            print(f"run failed: {exc}", file=sys.stderr)
+            return 2
         print(result)
         return 0
+    if ns.command == "repl":
+        try:
+            mcp_servers = load_mcp_config(ns.mcp_config)
+        except (OSError, ValueError) as exc:
+            print(f"--mcp-config {ns.mcp_config!r}: {exc}", file=sys.stderr)
+            return 2
+        try:
+            asyncio.run(
+                _run_repl(
+                    session_id=ns.session,
+                    mcp_servers=mcp_servers,
+                    strict_mcp_config=ns.strict_mcp_config,
+                )
+            )
+        except BrainUnavailable as exc:
+            print(str(exc), file=sys.stderr)
+            return 3
+        except (CheckpointError, SessionError) as exc:
+            # run_repl isolates per-turn errors, but a failure outside the loop
+            # (store setup, a pre-loop load) still surfaces cleanly, not as a
+            # traceback.
+            print(f"repl failed: {exc}", file=sys.stderr)
+            return 2
+        return 0
     return 1
+
+
+def _stdin_lines(prompt: str) -> Iterable[str]:  # pragma: no cover - interactive stdin
+    """Yield typed lines until EOF (Ctrl-D / Ctrl-Z), printing a prompt each turn."""
+    while True:
+        try:
+            yield input(prompt)
+        except EOFError:
+            return
+
+
+async def _run_repl(  # pragma: no cover - needs SDK + subscription + interactive stdin
+    *,
+    session_id: str,
+    mcp_servers: dict[str, Any] | None = None,
+    strict_mcp_config: bool = False,
+) -> None:
+    from kagura_agent.core.brain.claude import make_default_brain
+    from kagura_agent.mcp.memory_cloud import ensure_memory_reachable, memory_reachable
+    from kagura_agent.patterns.continuity import run_repl
+
+    ensure_memory_reachable(reachable=memory_reachable())
+    brain = make_default_brain(mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
+    store = FileCheckpointStore(resolve_state_dir())
+    print(f"kagura-agent repl — session {session_id!r}. /exit to quit.")
+    await run_repl(
+        brain,
+        store,
+        _stdin_lines(f"[{session_id}] "),
+        print,
+        session_id=session_id,
+        memory=make_memory_client(),
+    )
