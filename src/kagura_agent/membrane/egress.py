@@ -21,6 +21,14 @@ if TYPE_CHECKING:
 # `networks:` key the proxy sidecar is attached to in deploy/compose.yml.
 EGRESS_NETWORK = "agent-egress"
 
+#: Docker label carrying a container's PER-RUN egress allowlist. The launcher
+#: stamps it on every egress-granted container so the proxy enforces *that run's*
+#: hosts (looked up by source container via the Docker API) instead of a single
+#: static compose-wide list — the per-run least-privilege the membrane validates
+#: but the static `EGRESS_ALLOWLIST` env could not deliver. Sealed runs carry no
+#: label (they reach nothing). See deploy/compose.yml.
+EGRESS_ALLOW_LABEL = "kagura.egress-allow"
+
 
 class EgressDecision(Enum):
     ALLOW = "allow"
@@ -103,3 +111,10 @@ class EgressPolicy:
         )
         self.log.append((normalized, decision))
         return decision
+
+    def as_label(self) -> str:
+        """The allowlist as a deterministic, comma-joined string for the per-run
+        ``EGRESS_ALLOW_LABEL``. Sorted so the same allowlist always renders the same
+        label (stable across runs / reproducible in tests). Empty for a default-deny
+        (no-host) policy."""
+        return ",".join(sorted(self._allow))
