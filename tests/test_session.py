@@ -7,6 +7,8 @@ checkpoints, never individual tool calls.
 
 from collections.abc import AsyncIterator
 
+import pytest
+
 from kagura_agent.core.brain.base import (
     BrainCaps,
     BrainEvent,
@@ -15,7 +17,7 @@ from kagura_agent.core.brain.base import (
     MessageEvent,
     Task,
 )
-from kagura_agent.core.session import Session
+from kagura_agent.core.session import Session, SessionError
 from kagura_agent.patterns.checkpoint import InMemoryCheckpointStore
 
 
@@ -130,6 +132,78 @@ async def test_session_drains_stream_after_done_not_break() -> None:
     assert result.text == "r"
     assert result.messages == ["a"]  # post-Done narration ignored
     assert brain.exhausted is True  # consumed to exhaustion, not broken mid-stream
+
+
+# --- fail-closed terminal handling --------------------------------------------
+
+
+async def test_session_resume_without_checkpoint_raises() -> None:
+    session = Session(brain=FakeBrain(), checkpoints=InMemoryCheckpointStore())
+    with pytest.raises(SessionError, match="no checkpoint to resume"):
+        await session.resume("missing", prompt="go")
+
+
+class _NoDoneBrain:
+    """A brain that ends its stream without ever emitting a DoneEvent."""
+
+    caps = BrainCaps(name="nodone")
+
+    async def run(
+        self, task: Task, *, resume: Checkpoint | None = None
+    ) -> AsyncIterator[BrainEvent]:
+        yield MessageEvent(text="working but never finishing")
+
+
+async def test_session_brain_without_done_raises() -> None:
+    session = Session(brain=_NoDoneBrain(), checkpoints=InMemoryCheckpointStore())
+    with pytest.raises(SessionError, match="without DoneEvent"):
+        await session.run(Task(prompt="x", session_id="s1"))
+
+
+# --- #105: live narration via on_message --------------------------------------
+
+
+class _ChattyBrain:
+    """Emits several MessageEvents before Done (to test live streaming order)."""
+
+    caps = BrainCaps(name="chatty")
+
+    async def run(
+        self, task: Task, *, resume: Checkpoint | None = None
+    ) -> AsyncIterator[BrainEvent]:
+        yield MessageEvent(text="step 1: plan")
+        yield MessageEvent(text="step 2: call tool")
+        yield DoneEvent(result="final answer", state={"turn": 1})
+
+
+async def test_session_drive_streams_each_message_to_on_message() -> None:
+    streamed: list[str] = []
+    session = Session(brain=_ChattyBrain(), checkpoints=InMemoryCheckpointStore())
+
+    result = await session.drive(
+        Task(prompt="go", session_id="s1"), resume=None, on_message=streamed.append
+    )
+
+    # every MessageEvent was delivered live, in order...
+    assert streamed == ["step 1: plan", "step 2: call tool"]
+    # ...and still collected into the result (so non-verbose callers are unchanged).
+    assert result.messages == ["step 1: plan", "step 2: call tool"]
+    assert result.text == "final answer"
+
+
+async def test_session_on_message_not_called_for_post_done_narration() -> None:
+    # The terminal-Done drain must also gate the live hook: a post-Done MessageEvent
+    # is neither recorded NOR streamed.
+    streamed: list[str] = []
+    session = Session(brain=_MisbehavingBrain(), checkpoints=InMemoryCheckpointStore())
+
+    await session.run(Task(prompt="x", session_id="s1"))  # baseline (no hook) still works
+    result = await session.drive(
+        Task(prompt="x", session_id="s2"), resume=None, on_message=streamed.append
+    )
+
+    assert streamed == ["working"]  # "LATE" (post-Done) not streamed
+    assert result.messages == ["working"]
 
 
 async def test_session_resume_feeds_prior_checkpoint_to_brain() -> None:

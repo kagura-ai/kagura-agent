@@ -20,6 +20,7 @@ from kagura_agent.cli.main import (
     parse_args,
     plan_granted_specs,
     resolve_grants,
+    resolve_log_level,
     resolve_state_dir,
 )
 from kagura_agent.core.brain.base import BrainUnavailable
@@ -177,6 +178,38 @@ def test_make_memory_client_is_always_present_never_none() -> None:
     client = make_memory_client()
     assert client is not None
     assert isinstance(client, MemoryClient)  # satisfies the narrow protocol
+
+
+def test_run_and_repl_accept_verbose_and_log_level() -> None:
+    # #105: both run and repl gain --verbose/-v and --log-level (in lockstep).
+    ns = parse_args(["run", "do a thing", "-v", "--log-level", "debug"])
+    assert ns.verbose is True and ns.log_level == "debug"
+    ns = parse_args(["run", "do a thing"])
+    assert ns.verbose is False and ns.log_level is None  # default: quiet, no narration
+    ns = parse_args(["repl", "--verbose"])
+    assert ns.verbose is True
+
+
+def test_log_level_invalid_choice_is_rejected_by_argparse() -> None:
+    # An unknown --log-level fails closed at parse time (argparse exits 2).
+    with pytest.raises(SystemExit):
+        parse_args(["run", "x", "--log-level", "loud"])
+
+
+def test_resolve_log_level_precedence_and_default() -> None:
+    import logging
+
+    # default: quiet (WARNING) when neither flag nor env is set.
+    assert resolve_log_level(None, {}) == logging.WARNING
+    # --log-level wins over env...
+    assert resolve_log_level("debug", {"KAGURA_LOG": "error"}) == logging.DEBUG
+    # ...env used when the flag is absent...
+    assert resolve_log_level(None, {"KAGURA_LOG": "info"}) == logging.INFO
+    # ...case-insensitive...
+    assert resolve_log_level("ERROR", {}) == logging.ERROR
+    # ...unrecognized value falls back to the quiet default, never errors.
+    assert resolve_log_level("loud", {}) == logging.WARNING
+    assert resolve_log_level(None, {"KAGURA_LOG": "   "}) == logging.WARNING
 
 
 async def test_make_memory_client_fallback_honours_trusted_only() -> None:

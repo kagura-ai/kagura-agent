@@ -340,6 +340,33 @@ async def test_ground_and_run_recalls_a_prior_trusted_remember_across_runs() -> 
     assert "Caddyfile permission trap" in grounded_prompt
 
 
+async def test_ground_and_run_streams_narration_to_on_message() -> None:
+    # #105: the verbose hook threads through ground_and_run → drive_task → Session.
+    brain = FakeBrain()  # emits MessageEvent("thinking") before Done
+    store = InMemoryCheckpointStore()
+    streamed: list[str] = []
+
+    await ground_and_run(
+        brain, store, LocalMemoryClient(), session_id="s", prompt="go",
+        on_message=streamed.append,
+    )
+
+    assert streamed == ["thinking"]
+
+
+async def test_run_repl_streams_narration_each_turn() -> None:
+    brain = FakeBrain()
+    store = InMemoryCheckpointStore()
+    streamed: list[str] = []
+
+    await run_repl(
+        brain, store, ["one", "two"], lambda _: None,
+        session_id="r", memory=LocalMemoryClient(), on_message=streamed.append,
+    )
+
+    assert streamed == ["thinking", "thinking"]  # one narration per turn
+
+
 async def test_ground_and_run_with_fresh_memory_passes_prompt_through() -> None:
     # With an empty backbone (no trusted recall, nothing pinned) the brain still
     # sees the bare prompt — grounding adds nothing it shouldn't, but memory is

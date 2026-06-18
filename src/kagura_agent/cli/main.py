@@ -223,6 +223,25 @@ def _nonempty_task(value: str) -> str:
     return value
 
 
+def _add_observability_args(p: argparse.ArgumentParser) -> None:
+    """Shared --verbose / --log-level for run + repl (#105), so they stay in lockstep."""
+    p.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="stream the run's step-by-step narration (SDK engine) to stderr as it "
+        "progresses; the final result still goes to stdout. One-shot backends "
+        "(kagura-brain) have no mid-stream narration, so this simply shows less.",
+    )
+    p.add_argument(
+        "--log-level",
+        dest="log_level",
+        default=None,
+        choices=["debug", "info", "warning", "error", "critical"],
+        help="surface internal logs at this level (or set KAGURA_LOG); default: quiet",
+    )
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="kagura-agent")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -266,6 +285,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "`run --session ID` resumes this run's checkpoint. Omit for a one-shot "
         "run that keeps no cross-run context.",
     )
+    _add_observability_args(run)
     repl = sub.add_parser(
         "repl", help="interactive session: each line continues the same context"
     )
@@ -288,6 +308,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="reject MCP servers not present in --mcp-config (no silent passthrough)",
     )
+    _add_observability_args(repl)
     doctor = sub.add_parser(
         "doctor", help="preflight check: memory / claude / docker / egress (+ providers)"
     )
@@ -335,6 +356,28 @@ def load_mcp_config(value: str | None) -> dict[str, Any] | None:
     return dict(servers)
 
 
+_LOG_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+    "critical": logging.CRITICAL,
+}
+
+
+def resolve_log_level(arg: str | None, env: Mapping[str, str]) -> int:
+    """The logging level for a run (#105): ``--log-level`` wins, else ``KAGURA_LOG``,
+    else WARNING (quiet).
+
+    Internal logs (``log = logging.getLogger(__name__)``) are silent by default —
+    there is no ``basicConfig`` until a run configures one at this level, so an
+    operator opts in with ``--log-level debug`` / ``KAGURA_LOG=debug`` to see them.
+    An unrecognized value falls back to the quiet default rather than erroring.
+    """
+    raw = (arg or env.get("KAGURA_LOG", "")).strip().lower()
+    return _LOG_LEVELS.get(raw, logging.WARNING)
+
+
 def make_memory_client() -> MemoryClient:
     """The grounding seam (B): the MemoryClient used to recall prior context and
     persist task summaries around a run.
@@ -361,6 +404,12 @@ def make_memory_client() -> MemoryClient:
     return LocalMemoryClient()
 
 
+def _narrate(text: str) -> None:  # pragma: no cover - I/O
+    """Stream a narration line to stderr (keeps stdout = the final result, so a
+    script capturing the result is unaffected by --verbose)."""
+    print(text, file=sys.stderr, flush=True)
+
+
 async def _run_task(  # pragma: no cover - needs SDK + subscription
     task: str,
     *,
@@ -369,6 +418,7 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
     registry_path: str = "kagura-agent.toml",
     mcp_servers: dict[str, Any] | None = None,
     strict_mcp_config: bool = False,
+    verbose: bool = False,
 ) -> str:
     import time
 
@@ -433,7 +483,12 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
         # a one-shot run uses a throwaway in-memory store (no persisted context).
         store, sid = make_run_store(session_id)
         result = await ground_and_run(
-            brain, store, make_memory_client(), session_id=sid, prompt=task
+            brain,
+            store,
+            make_memory_client(),
+            session_id=sid,
+            prompt=task,
+            on_message=_narrate if verbose else None,
         )
         return result.text
     finally:
@@ -544,6 +599,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
         from kagura_agent.core.brain.kagura_brain_engine import resolve_kagura_brain_backend
         from kagura_agent.core.brain.select import resolve_brain_backend
 
+        # Wire logging once, up front (#105): internal logs stay quiet unless
+        # --log-level / KAGURA_LOG asks for them.
+        logging.basicConfig(level=resolve_log_level(ns.log_level, os.environ))
         try:
             # Validate KAGURA_AGENT_BRAIN (+ _BACKEND for the kagura-brain backend)
             # up front so a typo fails closed with a clean exit 2, not deep in _run_task.
@@ -574,6 +632,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
                     registry_path=ns.registry,
                     mcp_servers=mcp_servers,
                     strict_mcp_config=ns.strict_mcp_config,
+                    verbose=ns.verbose,
                 )
             )
         except BrainUnavailable as exc:
@@ -613,6 +672,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
         from kagura_agent.core.brain.kagura_brain_engine import resolve_kagura_brain_backend
         from kagura_agent.core.brain.select import resolve_brain_backend
 
+        logging.basicConfig(level=resolve_log_level(ns.log_level, os.environ))
         try:
             if resolve_brain_backend(os.environ) == "kagura-brain":
                 resolve_kagura_brain_backend(os.environ)
@@ -630,6 +690,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
                     session_id=ns.session,
                     mcp_servers=mcp_servers,
                     strict_mcp_config=ns.strict_mcp_config,
+                    verbose=ns.verbose,
                 )
             )
         except BrainUnavailable as exc:
@@ -662,6 +723,7 @@ async def _run_repl(  # pragma: no cover - needs SDK + subscription + interactiv
     session_id: str,
     mcp_servers: dict[str, Any] | None = None,
     strict_mcp_config: bool = False,
+    verbose: bool = False,
 ) -> None:
     from kagura_agent.core.brain.select import make_brain
     from kagura_agent.mcp.memory_cloud import ensure_memory_reachable, memory_reachable
@@ -678,4 +740,5 @@ async def _run_repl(  # pragma: no cover - needs SDK + subscription + interactiv
         print,
         session_id=session_id,
         memory=make_memory_client(),
+        on_message=_narrate if verbose else None,
     )
