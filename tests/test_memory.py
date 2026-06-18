@@ -11,7 +11,9 @@ import pytest
 from kagura_agent.mcp.memory_cloud import (
     _TOKEN_PROBE_TIMEOUT_SEC,
     ALWAYS_DELIVERY,
+    FeedbackRecord,
     LocalMemoryClient,
+    Memory,
     MemoryClient,
     MemoryUnreachableError,
     _token_probe_timeout,
@@ -74,6 +76,43 @@ async def test_remember_rejects_unknown_delivery_mode() -> None:
     mc = LocalMemoryClient()
     with pytest.raises(ValueError, match="unknown delivery_mode"):
         await mc.remember("escalate over $1000", delivery_mode="Always")  # casing typo
+
+
+# --- #90: retrieval feedback — host-side side lane, never in the recall space ---
+
+
+async def test_record_feedback_lives_in_side_lane_not_recall() -> None:
+    mc = LocalMemoryClient()
+    mid = await mc.remember("the auth flow uses refresh tokens")
+
+    mc.record_feedback(mid, query="how does auth work", helpful=True)
+
+    # recorded in the side lane...
+    assert mc.feedback_for(mid) == [
+        FeedbackRecord(memory_id=mid, query="how does auth work", helpful=True)
+    ]
+    # ...and NEVER surfaced by recall (recall returns only Memory objects)
+    hits = await mc.recall("how does auth work")
+    assert hits and all(isinstance(h, Memory) for h in hits)
+    assert not any(isinstance(h, FeedbackRecord) for h in hits)
+
+
+async def test_record_feedback_unknown_id_is_fail_closed() -> None:
+    mc = LocalMemoryClient()
+    with pytest.raises(KeyError):
+        mc.record_feedback("m999", query="x", helpful=False)
+
+
+async def test_feedback_for_filters_by_memory() -> None:
+    mc = LocalMemoryClient()
+    a = await mc.remember("alpha")
+    b = await mc.remember("beta")
+    mc.record_feedback(a, query="q1", helpful=True)
+    mc.record_feedback(a, query="q2", helpful=False)
+    mc.record_feedback(b, query="q3", helpful=True)
+
+    assert [f.query for f in mc.feedback_for(a)] == ["q1", "q2"]
+    assert [f.helpful for f in mc.feedback_for(b)] == [True]
 
 
 # --- memory reachability gate (v0.2-A6) -----------------------------------
