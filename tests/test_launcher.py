@@ -56,6 +56,27 @@ async def test_launch_resolves_each_mount_once(tmp_path) -> None:  # type: ignor
     assert f"{real}:/w:ro" in runtime.ran[0]  # the validated, resolved path is mounted
 
 
+async def test_launch_enforces_egress_in_path_end_to_end() -> None:
+    # Integration (#92): an egress-granted launch goes validate_spec -> docker_run_args
+    # and the args the runtime receives carry the FULL in-path enforcement — joins
+    # the proxy network (not host/none), is routed through the proxy at the app layer,
+    # and carries its per-run allowlist label. Proves the membrane launch path itself
+    # enforces egress, not just the standalone arg builder.
+    from kagura_agent.membrane.egress import EGRESS_ALLOW_LABEL, EGRESS_NETWORK
+
+    runtime = FakeRuntime()
+    launcher = Launcher(runtime=runtime, project_root="/work/project")
+    spec = LaunchSpec(image="kagura-agent:python", egress_allow=("api.anthropic.com",))
+
+    await launcher.launch(spec)
+
+    args = runtime.ran[0]
+    joined = " ".join(args)
+    assert f"--network {EGRESS_NETWORK}" in joined and "--network host" not in joined
+    assert "-e" in args and "HTTP_PROXY=http://egress-proxy:3128" in args
+    assert f"{EGRESS_ALLOW_LABEL}=api.anthropic.com" in args
+
+
 async def test_launcher_reconcile_and_kill_delegate_to_runtime() -> None:
     runtime = FakeRuntime()
     launcher = Launcher(runtime=runtime, project_root="/work/project")

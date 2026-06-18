@@ -74,6 +74,7 @@ def test_run_doctor_includes_secret_backends_check():
         sdk_probe=lambda: True,
         docker_probe=lambda: True,
         egress_probe=lambda: True,
+        egress_sealed_probe=lambda: True,
         env={"CLAUDE_CODE_SUBSCRIPTION": "1"},
     )
     assert any(r.name == "secret-backends" for r in results)
@@ -96,6 +97,7 @@ def test_run_doctor_keyring_registry_without_extra_is_warn_not_fail(monkeypatch)
         sdk_probe=lambda: True,
         docker_probe=lambda: True,
         egress_probe=lambda: True,
+        egress_sealed_probe=lambda: True,
         env={"CLAUDE_CODE_SUBSCRIPTION": "1"},
         registry=registry,
     )
@@ -208,12 +210,15 @@ def test_check_providers_one_result_per_provider():
 # --------------------------------------------------------------------------
 
 
-def _probes(memory=True, sdk=True, docker=True, egress=True):
+def _probes(memory=True, sdk=True, docker=True, egress=True, egress_sealed=True):
     return dict(
         memory_probe=lambda: memory,
         sdk_probe=lambda: sdk,
         docker_probe=lambda: docker,
         egress_probe=lambda: egress,
+        # Hermetic: never fall back to the live _egress_sealed (which read_text()s
+        # the real deploy/compose.yml relative to CWD).
+        egress_sealed_probe=lambda: egress_sealed,
     )
 
 

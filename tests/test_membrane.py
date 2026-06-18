@@ -14,7 +14,12 @@ import socket
 
 import pytest
 
-from kagura_agent.membrane.egress import EGRESS_NETWORK, EgressDecision, EgressPolicy
+from kagura_agent.membrane.egress import (
+    EGRESS_ALLOW_LABEL,
+    EGRESS_NETWORK,
+    EgressDecision,
+    EgressPolicy,
+)
 from kagura_agent.membrane.launcher import (
     LaunchSpec,
     MembraneViolation,
@@ -470,6 +475,95 @@ def test_egress_allowlist_joins_proxy_network_not_none() -> None:
     assert f"--network {EGRESS_NETWORK}" in joined
     assert "--network none" not in joined
     assert "--network host" not in joined
+
+
+# --- egress IN-PATH enforcement (#92): per-run label + app-layer proxy ---------
+
+
+def _env_pairs(args: list[str]) -> dict[str, str]:
+    """Collect `-e KEY=VALUE` env pairs emitted into a docker run argv."""
+    out: dict[str, str] = {}
+    for flag, val in zip(args, args[1:], strict=False):
+        if flag == "-e" and "=" in val:
+            k, v = val.split("=", 1)
+            out[k] = v
+    return out
+
+
+def _label_value(args: list[str], key: str) -> str | None:
+    for flag, val in zip(args, args[1:], strict=False):
+        if flag == "--label" and val.startswith(f"{key}="):
+            return val.split("=", 1)[1]
+    return None
+
+
+def test_egress_granted_injects_proxy_env_and_per_run_label() -> None:
+    spec = LaunchSpec(image="kagura-agent:python", egress_allow=("api.anthropic.com",))
+    args = docker_run_args(spec)
+    env = _env_pairs(args)
+    # App-layer proxy routing (defense in depth atop the internal network seal).
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        assert env.get(var) == "http://egress-proxy:3128"
+    assert env.get("NO_PROXY") == "localhost,127.0.0.1"
+    # Per-run allowlist propagated as a label the proxy can enforce per source.
+    assert _label_value(args, EGRESS_ALLOW_LABEL) == "api.anthropic.com"
+
+
+def test_sealed_run_injects_no_proxy_env_or_egress_label() -> None:
+    # A `--network none` run reaches nothing — no proxy env, no allowlist label.
+    args = docker_run_args(LaunchSpec(image="kagura-agent:python", egress_allow=()))
+    env = _env_pairs(args)
+    assert "HTTP_PROXY" not in env and "http_proxy" not in env
+    assert _label_value(args, EGRESS_ALLOW_LABEL) is None
+
+
+def test_per_run_label_scopes_to_this_runs_allowlist_host_a_not_b() -> None:
+    # The AC's regression: a run granted egress to host A must not be able to reach
+    # host B. The per-run label carries ONLY A (sorted, deterministic), and the
+    # policy the proxy derives from it allows A and denies B — so B is unreachable
+    # in-path even though egress is granted.
+    spec = LaunchSpec(image="x", egress_allow=("a-host.example.com",))
+    args = docker_run_args(spec)
+    assert _label_value(args, EGRESS_ALLOW_LABEL) == "a-host.example.com"  # B absent
+
+    policy = EgressPolicy.from_spec(spec)
+    assert policy.decide("a-host.example.com") is EgressDecision.ALLOW
+    assert policy.decide("b-host.example.com") is EgressDecision.DENY
+
+
+def test_per_run_label_is_sorted_and_deterministic() -> None:
+    spec = LaunchSpec(image="x", egress_allow=("z.example.com", "a.example.com"))
+    assert _label_value(docker_run_args(spec), EGRESS_ALLOW_LABEL) == (
+        "a.example.com,z.example.com"
+    )
+
+
+def test_injected_proxy_wins_over_a_spec_env_proxy_var() -> None:
+    # Fail-OPEN guard (code-review): a caller-supplied HTTP_PROXY in spec.env must
+    # NOT override the membrane's injected routing. Enforcement env is emitted AFTER
+    # spec.env, and docker keeps the LAST -e for a key, so the membrane value wins.
+    spec = LaunchSpec(
+        image="x",
+        egress_allow=("api.anthropic.com",),
+        env={"HTTP_PROXY": "http://attacker-controlled:9999"},
+    )
+    args = docker_run_args(spec)
+    # both -e pairs are present; the membrane's is last → effective.
+    pairs = [
+        v
+        for f, v in zip(args, args[1:], strict=False)
+        if f == "-e" and v.startswith("HTTP_PROXY=")
+    ]
+    assert pairs[-1] == "HTTP_PROXY=http://egress-proxy:3128"
+
+
+def test_egress_proxy_endpoint_is_env_overridable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("KAGURA_EGRESS_PROXY", "http://proxy.internal:8080")
+    spec = LaunchSpec(image="x", egress_allow=("api.anthropic.com",))
+    assert _env_pairs(docker_run_args(spec))["HTTP_PROXY"] == "http://proxy.internal:8080"
+    # blank override falls back to the default (an empty proxy would disable routing)
+    monkeypatch.setenv("KAGURA_EGRESS_PROXY", "   ")
+    assert _env_pairs(docker_run_args(spec))["HTTP_PROXY"] == "http://egress-proxy:3128"
 
 
 def test_egress_policy_derived_from_spec_matches_allowlist() -> None:

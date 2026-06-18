@@ -177,15 +177,36 @@ def check_docker(*, available: bool) -> CheckResult:
     )
 
 
-def check_egress(*, configured: bool) -> CheckResult:
-    if configured:
-        return CheckResult("egress", OK, "egress proxy compose file present")
-    return CheckResult(
-        "egress",
-        WARN,
-        f"egress proxy not provisioned locally ({_COMPOSE_PATH} not found)",
-        hint="provision the default-deny egress proxy from deploy/compose.yml before deploying",
-    )
+def check_egress(*, configured: bool, sealed: bool) -> CheckResult:
+    """Egress-proxy preflight, escalated from warn-only (#92).
+
+    Three states, fail-closed on the dangerous middle one:
+
+    - not provisioned locally → WARN (a dev box without the proxy compose; not a
+      deployment, so don't hard-fail).
+    - provisioned but the `agent-egress` network is NOT `internal: true` → **FAIL**.
+      This is worse than absent: an egress-granted container on a non-internal
+      bridge reaches the internet directly via NAT and bypasses the proxy, so the
+      allowlist is decorative — present-but-unsealed gives false confidence.
+    - provisioned AND sealed → OK (the proxy is the enforced chokepoint).
+    """
+    if not configured:
+        return CheckResult(
+            "egress",
+            WARN,
+            f"egress proxy not provisioned locally ({_COMPOSE_PATH} not found)",
+            hint="provision the default-deny egress proxy from deploy/compose.yml before deploying",
+        )
+    if not sealed:
+        return CheckResult(
+            "egress",
+            FAIL,
+            f"egress proxy present but the agent-egress network is not sealed "
+            f"({_COMPOSE_PATH} lacks `internal: true`)",
+            hint="add `internal: true` to the agent-egress network so the proxy is the "
+            "only egress route — without it an egress-granted container reaches any host directly",
+        )
+    return CheckResult("egress", OK, "egress proxy present and the agent-egress network is sealed")
 
 
 def overall_status(results: list[CheckResult]) -> str:
@@ -216,6 +237,54 @@ def _egress_configured(*, path: Path = _COMPOSE_PATH) -> bool:  # pragma: no cov
     return path.is_file()
 
 
+def _compose_declares_sealed_egress(text: str) -> bool:
+    """Whether the compose text marks the agent-egress network ``internal: true``.
+
+    A deliberately small, dependency-free heuristic (no PyYAML dep): find the
+    ``agent-egress:`` key, collect its block (lines indented deeper, up to the next
+    same-or-lower-indented sibling), and require ``internal: true`` as a **direct
+    child** of that key. Pure + unit-tested.
+
+    Two guards matter for a security gate:
+    - **Direct-child only** (fail-open guard): ``internal: true`` must sit at the
+      block's own field indent, not nested arbitrarily deeper under some sub-map
+      (e.g. ``labels:``), so a coincidental nested token cannot be read as a seal.
+    - **Trailing inline comment allowed** (fail-closed guard): ``internal: true
+      # …`` is a natural edit in this heavily-commented file and must still count,
+      or doctor would FAIL a genuinely-sealed network. Only the literal ``true`` is
+      accepted (``false`` / ``True`` / ``yes`` do not seal).
+    """
+    import re
+
+    m = re.search(r"^(\s*)agent-egress:[^\n]*$", text, re.MULTILINE)
+    if m is None:
+        return False
+    key_indent = len(m.group(1))
+    block: list[tuple[int, str]] = []  # (indent, stripped) for real (non-comment) lines
+    for line in text[m.end():].splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue  # blanks/comments never bound the block
+        cur_indent = len(line) - len(line.lstrip())
+        if cur_indent <= key_indent:  # a sibling/parent key — end of the block
+            break
+        block.append((cur_indent, stripped))
+    if not block:
+        return False
+    child_indent = min(indent for indent, _ in block)  # agent-egress's own fields
+    return any(
+        indent == child_indent and re.fullmatch(r"internal:\s*true(\s+#.*)?", stripped)
+        for indent, stripped in block
+    )
+
+
+def _egress_sealed(*, path: Path = _COMPOSE_PATH) -> bool:  # pragma: no cover - fs read
+    try:
+        return _compose_declares_sealed_egress(path.read_text(encoding="utf-8"))
+    except OSError:
+        return False
+
+
 def _cli_on_path(name: str) -> bool:  # pragma: no cover - PATH lookup
     """Whether a CLI binary (`claude` / `codex`) the kagura-brain backend shells
     out to is resolvable on PATH."""
@@ -240,6 +309,7 @@ def run_doctor(
     kagura_cli_probe: Callable[[str], bool] = _cli_on_path,
     docker_probe: Callable[[], bool] = _docker_available,
     egress_probe: Callable[[], bool] = _egress_configured,
+    egress_sealed_probe: Callable[[], bool] = _egress_sealed,
     env: Mapping[str, str] | None = None,
     registry: Iterable[ProviderSpec] | None = None,
     resolve_env: EnvResolver | None = None,
@@ -294,7 +364,7 @@ def run_doctor(
         check_memory(reachable=memory_probe()),
         brain_result,
         check_docker(available=docker_probe()),
-        check_egress(configured=egress_probe()),
+        check_egress(configured=egress_probe(), sealed=egress_sealed_probe()),
         check_secret_backends(registry, keyring_available=keyring_present),
     ]
     if registry is not None:
