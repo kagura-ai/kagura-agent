@@ -72,6 +72,9 @@ DOCTOR_FAIL_EXIT = 4
 #: Default location of the egress-proxy compose file (relative to repo root).
 _COMPOSE_PATH = Path("deploy/compose.yml")
 
+#: Default location of the vendored egress-proxy Dockerfile (#94).
+_EGRESS_PROXY_DOCKERFILE = Path("deploy/images/egress-proxy/Dockerfile")
+
 
 @dataclass(frozen=True)
 class CheckResult:
@@ -209,6 +212,34 @@ def check_egress(*, configured: bool, sealed: bool) -> CheckResult:
     return CheckResult("egress", OK, "egress proxy present and the agent-egress network is sealed")
 
 
+def check_egress_proxy_image(*, present: bool, pinned: bool) -> CheckResult:
+    """Whether the vendored egress-proxy image is pinned for reproducible deploys (#94).
+
+    The proxy is built from in-repo source (`deploy/images/egress-proxy`) instead of
+    an opaque registry image, so its enforcement is auditable. Its base image must
+    still be **pinned by digest** before deployment — an unpinned (placeholder /
+    floating-tag) base is a supply-chain + reproducibility gap. A WARN, not a FAIL:
+    like `Dockerfile.base`/`Dockerfile.python`, the repo ships a placeholder digest
+    pre-deploy, so this is a pin-before-you-ship heads-up, not a broken toolchain.
+    """
+    if not present:
+        return CheckResult(
+            "egress-proxy-image",
+            WARN,
+            f"vendored egress proxy not found ({_EGRESS_PROXY_DOCKERFILE} missing)",
+            hint="the auditable egress proxy lives at deploy/images/egress-proxy",
+        )
+    if not pinned:
+        return CheckResult(
+            "egress-proxy-image",
+            WARN,
+            "egress-proxy base image is not pinned (placeholder digest)",
+            hint="pin the FROM digest in deploy/images/egress-proxy/Dockerfile "
+            "before deploying (replace the all-zero sha256 placeholder)",
+        )
+    return CheckResult("egress-proxy-image", OK, "egress-proxy base image is pinned by digest")
+
+
 def overall_status(results: list[CheckResult]) -> str:
     """FAIL if any check failed, else WARN if any warned, else OK."""
     statuses = {r.status for r in results}
@@ -285,6 +316,44 @@ def _egress_sealed(*, path: Path = _COMPOSE_PATH) -> bool:  # pragma: no cover -
         return False
 
 
+def _dockerfile_is_pinned(text: str) -> bool:
+    """Whether EVERY ``FROM`` in a Dockerfile is pinned to a real digest (#94).
+
+    Pinned = each ``FROM`` carries a ``@sha256:<64 hex>`` digest that is NOT the
+    all-zero placeholder the repo ships pre-deploy (same convention as
+    Dockerfile.base/python). **Multi-stage safe**: a pinned builder stage does not
+    make an unpinned *runtime* stage "pinned" — the runtime stage is the image that
+    actually ships, so a single unpinned/placeholder FROM fails the whole check
+    (a supply-chain gate must not false-OK). No FROM at all → unpinned.
+    """
+    import re
+
+    placeholder = "0" * 64
+    from_lines = re.findall(r"^\s*FROM\s+.*$", text, re.MULTILINE | re.IGNORECASE)
+    if not from_lines:
+        return False
+    for line in from_lines:
+        m = re.search(r"@sha256:([0-9a-fA-F]{64})", line)
+        if m is None or m.group(1) == placeholder:
+            return False  # an unpinned or placeholder stage → whole file unpinned
+    return True
+
+
+def _egress_proxy_present(  # pragma: no cover - fs stat
+    *, path: Path = _EGRESS_PROXY_DOCKERFILE
+) -> bool:
+    return path.is_file()
+
+
+def _egress_proxy_pinned(  # pragma: no cover - fs read
+    *, path: Path = _EGRESS_PROXY_DOCKERFILE
+) -> bool:
+    try:
+        return _dockerfile_is_pinned(path.read_text(encoding="utf-8"))
+    except OSError:
+        return False
+
+
 def _cli_on_path(name: str) -> bool:  # pragma: no cover - PATH lookup
     """Whether a CLI binary (`claude` / `codex`) the kagura-brain backend shells
     out to is resolvable on PATH."""
@@ -310,6 +379,8 @@ def run_doctor(
     docker_probe: Callable[[], bool] = _docker_available,
     egress_probe: Callable[[], bool] = _egress_configured,
     egress_sealed_probe: Callable[[], bool] = _egress_sealed,
+    egress_proxy_present_probe: Callable[[], bool] = _egress_proxy_present,
+    egress_proxy_pinned_probe: Callable[[], bool] = _egress_proxy_pinned,
     env: Mapping[str, str] | None = None,
     registry: Iterable[ProviderSpec] | None = None,
     resolve_env: EnvResolver | None = None,
@@ -365,6 +436,9 @@ def run_doctor(
         brain_result,
         check_docker(available=docker_probe()),
         check_egress(configured=egress_probe(), sealed=egress_sealed_probe()),
+        check_egress_proxy_image(
+            present=egress_proxy_present_probe(), pinned=egress_proxy_pinned_probe()
+        ),
         check_secret_backends(registry, keyring_available=keyring_present),
     ]
     if registry is not None:

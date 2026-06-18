@@ -22,11 +22,13 @@ if TYPE_CHECKING:
 EGRESS_NETWORK = "agent-egress"
 
 #: Docker label carrying a container's PER-RUN egress allowlist. The launcher
-#: stamps it on every egress-granted container so the proxy enforces *that run's*
-#: hosts (looked up by source container via the Docker API) instead of a single
-#: static compose-wide list — the per-run least-privilege the membrane validates
-#: but the static `EGRESS_ALLOWLIST` env could not deliver. Sealed runs carry no
-#: label (they reach nothing). See deploy/compose.yml.
+#: stamps it on every egress-granted container so the proxy CAN enforce *that
+#: run's* hosts (resolved by source container) instead of a single static
+#: compose-wide list — the per-run least-privilege the membrane validates but the
+#: static `EGRESS_ALLOWLIST` env could not deliver. The reference proxy's decision
+#: core consumes it (membrane.egress_proxy.policy_from_label); wiring the
+#: source→label lookup is the deploy integration seam (deploy/images/egress-proxy).
+#: Sealed runs carry no label (they reach nothing).
 EGRESS_ALLOW_LABEL = "kagura.egress-allow"
 
 
