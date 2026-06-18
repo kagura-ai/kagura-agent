@@ -241,25 +241,41 @@ def _compose_declares_sealed_egress(text: str) -> bool:
     """Whether the compose text marks the agent-egress network ``internal: true``.
 
     A deliberately small, dependency-free heuristic (no PyYAML dep): find the
-    ``agent-egress:`` network key and look for an ``internal: true`` before the next
-    same-or-lower-indented sibling key. Good enough to catch the present-but-unsealed
-    misconfiguration the egress check escalates on; pure + unit-tested.
+    ``agent-egress:`` key, collect its block (lines indented deeper, up to the next
+    same-or-lower-indented sibling), and require ``internal: true`` as a **direct
+    child** of that key. Pure + unit-tested.
+
+    Two guards matter for a security gate:
+    - **Direct-child only** (fail-open guard): ``internal: true`` must sit at the
+      block's own field indent, not nested arbitrarily deeper under some sub-map
+      (e.g. ``labels:``), so a coincidental nested token cannot be read as a seal.
+    - **Trailing inline comment allowed** (fail-closed guard): ``internal: true
+      # …`` is a natural edit in this heavily-commented file and must still count,
+      or doctor would FAIL a genuinely-sealed network. Only the literal ``true`` is
+      accepted (``false`` / ``True`` / ``yes`` do not seal).
     """
     import re
 
-    m = re.search(r"^(\s*)agent-egress:\s*$", text, re.MULTILINE)
+    m = re.search(r"^(\s*)agent-egress:[^\n]*$", text, re.MULTILINE)
     if m is None:
         return False
-    indent = len(m.group(1))
-    block: list[str] = []
+    key_indent = len(m.group(1))
+    block: list[tuple[int, str]] = []  # (indent, stripped) for real (non-comment) lines
     for line in text[m.end():].splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue  # blanks/comments never bound the block
         cur_indent = len(line) - len(line.lstrip())
-        if cur_indent <= indent:  # back to a sibling/parent — end of the block
+        if cur_indent <= key_indent:  # a sibling/parent key — end of the block
             break
-        block.append(line)
-    return any(re.match(r"\s*internal:\s*true\s*$", line) for line in block)
+        block.append((cur_indent, stripped))
+    if not block:
+        return False
+    child_indent = min(indent for indent, _ in block)  # agent-egress's own fields
+    return any(
+        indent == child_indent and re.fullmatch(r"internal:\s*true(\s+#.*)?", stripped)
+        for indent, stripped in block
+    )
 
 
 def _egress_sealed(*, path: Path = _COMPOSE_PATH) -> bool:  # pragma: no cover - fs read

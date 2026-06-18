@@ -16,7 +16,13 @@ services:
     # proxy) when a run carries an egress allowlist. This network name MUST match
     # membrane.egress.EGRESS_NETWORK.
     image: ghcr.io/kagura-ai/egress-proxy:pinned-by-digest
-    networks: [agent-egress]
+    # TWO networks on purpose: `agent-egress` (internal, agent-facing) is how
+    # agents reach the proxy; `egress-upstream` (external) is the proxy's OWN route
+    # to the allowed hosts. An internal network has no upstream, so a proxy attached
+    # only to it could not reach api.anthropic.com either — egress would be dead, not
+    # just default-denied. The proxy bridges the two; agents are attached (by the
+    # launcher) to `agent-egress` ONLY, so they stay sealed.
+    networks: [agent-egress, egress-upstream]
     environment:
       # Bootstrap / fallback allowlist. The launcher ALSO stamps each egress-granted
       # container with a per-run `kagura.egress-allow` label (membrane.egress
@@ -32,10 +38,15 @@ networks:
     driver: bridge
     # SEALED: an internal network has no external route, so a container on it
     # cannot reach the internet directly and bypass the proxy — the proxy (the only
-    # peer with an upstream) becomes the mandatory egress chokepoint. WITHOUT this,
-    # a plain bridge's default NAT would let an egress-granted container reach ANY
-    # host directly, making the allowlist decorative. Defense in depth: the launcher
-    # also injects HTTP(S)_PROXY into the container (membrane.launcher).
+    # peer that ALSO sits on egress-upstream) becomes the mandatory egress
+    # chokepoint. WITHOUT this, a plain bridge's default NAT would let an
+    # egress-granted container reach ANY host directly, making the allowlist
+    # decorative. Defense in depth: the launcher also injects HTTP(S)_PROXY into the
+    # container (membrane.launcher).
     internal: true
+  egress-upstream:
+    # The proxy's route to the internet. NOT internal — only the proxy is attached,
+    # so giving it an upstream does not give agents one.
+    driver: bridge
 # No agent service: agent containers are ephemeral, launched by the trusted
 # host-side cockpit, and removed on completion (--rm).

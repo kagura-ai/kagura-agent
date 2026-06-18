@@ -331,9 +331,6 @@ def docker_run_args(spec: LaunchSpec) -> list[str]:
     # intentionally carries no `device`/`add_host` field; if one is ever added
     # it MUST be denied here rather than forwarded. Locked by a regression test.
     args += _network_args(spec)
-    # Per-run egress enforcement (allowlist label + app-layer proxy), only when
-    # egress is granted — sealed runs get nothing, by omission (fail-closed).
-    args += _egress_enforcement_args(spec)
     for mount in spec.mounts:
         ro = ":ro" if mount.read_only else ""
         # `mount.source` is already the canonical realpath (resolved once by
@@ -342,5 +339,11 @@ def docker_run_args(spec: LaunchSpec) -> list[str]:
         args += ["-v", f"{mount.source}:{mount.target}{ro}"]
     for key, value in spec.env.items():
         args += ["-e", f"{key}={value}"]
+    # Per-run egress enforcement (allowlist label + app-layer proxy env) — only when
+    # egress is granted; sealed runs get nothing, by omission (fail-closed). Emitted
+    # AFTER spec.env so the membrane's HTTP(S)_PROXY value wins on a duplicate key
+    # (docker keeps the last -e): a caller-supplied proxy var in spec.env must never
+    # be able to override and defeat the injected routing.
+    args += _egress_enforcement_args(spec)
     args.append(spec.image)
     return args

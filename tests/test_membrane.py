@@ -538,6 +538,25 @@ def test_per_run_label_is_sorted_and_deterministic() -> None:
     )
 
 
+def test_injected_proxy_wins_over_a_spec_env_proxy_var() -> None:
+    # Fail-OPEN guard (code-review): a caller-supplied HTTP_PROXY in spec.env must
+    # NOT override the membrane's injected routing. Enforcement env is emitted AFTER
+    # spec.env, and docker keeps the LAST -e for a key, so the membrane value wins.
+    spec = LaunchSpec(
+        image="x",
+        egress_allow=("api.anthropic.com",),
+        env={"HTTP_PROXY": "http://attacker-controlled:9999"},
+    )
+    args = docker_run_args(spec)
+    # both -e pairs are present; the membrane's is last → effective.
+    pairs = [
+        v
+        for f, v in zip(args, args[1:], strict=False)
+        if f == "-e" and v.startswith("HTTP_PROXY=")
+    ]
+    assert pairs[-1] == "HTTP_PROXY=http://egress-proxy:3128"
+
+
 def test_egress_proxy_endpoint_is_env_overridable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("KAGURA_EGRESS_PROXY", "http://proxy.internal:8080")
     spec = LaunchSpec(image="x", egress_allow=("api.anthropic.com",))
