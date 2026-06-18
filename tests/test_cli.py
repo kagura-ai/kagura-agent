@@ -173,6 +173,24 @@ def test_make_memory_client_is_none_seam() -> None:
     assert make_memory_client() is None
 
 
+def test_main_run_rejects_invalid_brain_backend(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    # An unknown KAGURA_AGENT_BRAIN must fail closed up front (exit 2), never run
+    # the default backend silently and never reach brain construction.
+    monkeypatch.setenv("KAGURA_AGENT_BRAIN", "kagura_brain")  # typo (underscore)
+    rc = main(["run", "do a thing"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "KAGURA_AGENT_BRAIN" in err
+    assert "Traceback" not in err
+
+
+def test_main_repl_rejects_invalid_brain_backend(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("KAGURA_AGENT_BRAIN", "bogus")
+    rc = main(["repl"])
+    assert rc == 2
+    assert "KAGURA_AGENT_BRAIN" in capsys.readouterr().err
+
+
 # --- v0.2-A6: --mcp-config / --strict-mcp-config --------------------------
 
 def test_parse_run_defaults_have_no_mcp_config() -> None:
@@ -263,6 +281,55 @@ def test_main_run_clean_error_on_corrupt_checkpoint(monkeypatch, capsys) -> None
     assert rc == 2
     err = capsys.readouterr().err
     assert "run failed" in err and "corrupt" in err
+    assert "Traceback" not in err
+
+
+def test_main_run_clean_error_on_brain_invocation_failure(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    # A failed/timed-out brain invoke (BrainInvocationError) surfaces cleanly, not
+    # as a raw traceback, and is NOT reported as a successful run.
+    from kagura_agent.cli import main as cli_main
+    from kagura_agent.core.brain.base import BrainInvocationError
+
+    async def _boom(*_a, **_k) -> str:
+        raise BrainInvocationError("kagura-brain invocation failed: exited 1")
+
+    monkeypatch.setattr(cli_main, "_run_task", _boom)
+    rc = main(["run", "do a thing"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "run failed" in err and "kagura-brain" in err
+    assert "Traceback" not in err
+
+
+def test_main_run_rejects_invalid_kagura_backend(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    # KAGURA_AGENT_BRAIN=kagura-brain + a bad KAGURA_AGENT_BRAIN_BACKEND fails
+    # closed up front (exit 2), before any brain construction.
+    monkeypatch.setenv("KAGURA_AGENT_BRAIN", "kagura-brain")
+    monkeypatch.setenv("KAGURA_AGENT_BRAIN_BACKEND", "codx")
+    rc = main(["run", "do a thing"])
+    assert rc == 2
+    assert "KAGURA_AGENT_BRAIN_BACKEND" in capsys.readouterr().err
+
+
+def test_main_run_clean_error_on_memory_unreachable(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    # The startup memory gate must surface a clean, actionable message + exit 3,
+    # not a raw MemoryUnreachableError traceback.
+    from kagura_agent.cli import main as cli_main
+    from kagura_agent.mcp.memory_cloud import MemoryUnreachableError
+
+    async def _boom(*_a, **_k) -> str:
+        raise MemoryUnreachableError(
+            "memory-cloud is not reachable/authenticated via the kagura CLI; "
+            "refusing to start. Run `kagura auth login` on the host."
+        )
+
+    monkeypatch.setattr(cli_main, "_run_task", _boom)
+    rc = main(["run", "do a thing"])
+
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "kagura auth login" in err
     assert "Traceback" not in err
 
 

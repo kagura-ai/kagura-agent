@@ -15,6 +15,13 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 
+class BrainInvocationError(RuntimeError):
+    """A brain backend ran but the underlying invocation failed (non-zero exit,
+    timeout, …). Distinct from `BrainUnavailable` (a missing dependency): the brain
+    is present and was called, but the call did not succeed, so the run must fail
+    rather than relay a failed/partial result as a successful turn (fail-closed)."""
+
+
 class BrainUnavailable(RuntimeError):
     """A brain cannot run because its backing dependency is not installed.
 

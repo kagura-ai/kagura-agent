@@ -25,8 +25,9 @@ from kagura_agent.cli.doctor import (
     overall_status,
     run_doctor,
 )
-from kagura_agent.core.brain.base import BrainUnavailable
+from kagura_agent.core.brain.base import BrainInvocationError, BrainUnavailable
 from kagura_agent.core.session import SessionError
+from kagura_agent.mcp.memory_cloud import MemoryUnreachableError
 from kagura_agent.membrane.registry import GrantSet, ProviderSpec, parse_grants
 from kagura_agent.patterns.checkpoint import (
     CheckpointError,
@@ -360,7 +361,7 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
 ) -> str:
     import time
 
-    from kagura_agent.core.brain.claude import make_default_brain
+    from kagura_agent.core.brain.select import make_brain
     from kagura_agent.mcp.memory_cloud import ensure_memory_reachable, memory_reachable
     from kagura_agent.membrane.cloud_transports import build_broker
     from kagura_agent.membrane.granted_broker import GrantedBroker, lease_requests
@@ -416,7 +417,7 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
                 env_restore[key] = os.environ.get(key)
                 os.environ[key] = value
 
-        brain = make_default_brain(mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
+        brain = make_brain(os.environ, mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
         # A named --session uses a persistent on-disk store (resume across runs);
         # a one-shot run uses a throwaway in-memory store (no persisted context).
         store, sid = make_run_store(session_id)
@@ -529,6 +530,17 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             print(setup_transport_guidance())
         return 0
     if ns.command == "run":
+        from kagura_agent.core.brain.kagura_brain_engine import resolve_kagura_brain_backend
+        from kagura_agent.core.brain.select import resolve_brain_backend
+
+        try:
+            # Validate KAGURA_AGENT_BRAIN (+ _BACKEND for the kagura-brain backend)
+            # up front so a typo fails closed with a clean exit 2, not deep in _run_task.
+            if resolve_brain_backend(os.environ) == "kagura-brain":
+                resolve_kagura_brain_backend(os.environ)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         try:
             grants = resolve_grants(ns.grants)
         except ValueError as exc:
@@ -560,6 +572,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             # own usage-error exit code (2).
             print(str(exc), file=sys.stderr)
             return 3
+        except MemoryUnreachableError as exc:
+            # The startup gate (memory must be reachable + authenticated via the
+            # kagura CLI) — surface the actionable message cleanly (exit 3, a
+            # setup-not-ready code like BrainUnavailable), never a raw traceback.
+            print(str(exc), file=sys.stderr)
+            return 3
         except CredentialSetupError as exc:
             # Credential-provisioning input error (a malformed/missing registry, a
             # --grant naming a provider absent from it, or a kind needing deploy
@@ -569,17 +587,27 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             # agent run must surface as itself, not be mislabeled a --grant error.
             print(f"--grant/--registry: {exc}", file=sys.stderr)
             return 2
-        except (CheckpointError, SessionError) as exc:
-            # A corrupt/unreadable persisted checkpoint (CheckpointError) or a brain
-            # that ended without a terminal result (SessionError) — surface a clean
-            # one-line message + exit 2, never a raw traceback. Restores the clean
-            # failure surface the old cockpit.serve() path gave before this command
-            # drove the Session directly.
+        except (CheckpointError, SessionError, BrainInvocationError) as exc:
+            # A corrupt/unreadable persisted checkpoint (CheckpointError), a brain
+            # that ended without a terminal result (SessionError), or a brain
+            # invocation that failed/timed out (BrainInvocationError) — surface a
+            # clean one-line message + exit 2, never a raw traceback. Restores the
+            # clean failure surface the old cockpit.serve() path gave before this
+            # command drove the Session directly.
             print(f"run failed: {exc}", file=sys.stderr)
             return 2
         print(result)
         return 0
     if ns.command == "repl":
+        from kagura_agent.core.brain.kagura_brain_engine import resolve_kagura_brain_backend
+        from kagura_agent.core.brain.select import resolve_brain_backend
+
+        try:
+            if resolve_brain_backend(os.environ) == "kagura-brain":
+                resolve_kagura_brain_backend(os.environ)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         try:
             mcp_servers = load_mcp_config(ns.mcp_config)
         except (OSError, ValueError) as exc:
@@ -596,7 +624,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
         except BrainUnavailable as exc:
             print(str(exc), file=sys.stderr)
             return 3
-        except (CheckpointError, SessionError) as exc:
+        except MemoryUnreachableError as exc:
+            print(str(exc), file=sys.stderr)
+            return 3
+        except (CheckpointError, SessionError, BrainInvocationError) as exc:
             # run_repl isolates per-turn errors, but a failure outside the loop
             # (store setup, a pre-loop load) still surfaces cleanly, not as a
             # traceback.
@@ -621,12 +652,12 @@ async def _run_repl(  # pragma: no cover - needs SDK + subscription + interactiv
     mcp_servers: dict[str, Any] | None = None,
     strict_mcp_config: bool = False,
 ) -> None:
-    from kagura_agent.core.brain.claude import make_default_brain
+    from kagura_agent.core.brain.select import make_brain
     from kagura_agent.mcp.memory_cloud import ensure_memory_reachable, memory_reachable
     from kagura_agent.patterns.continuity import run_repl
 
     ensure_memory_reachable(reachable=memory_reachable())
-    brain = make_default_brain(mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
+    brain = make_brain(os.environ, mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
     store = FileCheckpointStore(resolve_state_dir())
     print(f"kagura-agent repl — session {session_id!r}. /exit to quit.")
     await run_repl(
