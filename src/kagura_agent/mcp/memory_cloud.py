@@ -12,6 +12,8 @@ surface.
 from __future__ import annotations
 
 import itertools
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
 
@@ -287,14 +289,55 @@ def _token_probe_timeout() -> float:
     return value if value > 0 else _TOKEN_PROBE_TIMEOUT_SEC
 
 
-def memory_reachable() -> bool:  # pragma: no cover - shells out to the kagura CLI
-    """Whether memory is reachable: can the host mint a token via the CLI?
+#: How many times the reachability gate retries the `kagura auth token` probe
+#: before refusing. The access token is short-lived (~1h); the first run after it
+#: expires forces a refresh, and a single transient hiccup at that hourly boundary
+#: — a slow cold start near the timeout, a momentary network blip, a transient 401
+#: mid-refresh — would otherwise hard-refuse the run on a one-shot probe. Bounded
+#: retry absorbs the transient case; the gate still fails closed once exhausted.
+#: Override via KAGURA_MEMORY_PROBE_ATTEMPTS.
+_PROBE_ATTEMPTS = 3
 
-    Asks the CLI for a short-lived access token (`kagura auth token`). Memory is
-    reachable only when the CLI exits zero AND actually prints a token — a zero
-    exit with empty stdout (e.g. a CLI that no-ops) is treated as unreachable, so
-    the gate stays fail-closed. This is the CLI-primary replacement for the old
-    `KAGURA_MEMORY_MCP_URL` env probe.
+#: Seconds between probe attempts. Kept small — the point is to ride out a momentary
+#: blip / let an in-flight refresh settle, not to mask a real outage (which still
+#: fails closed after the attempts run out). Override via KAGURA_MEMORY_PROBE_BACKOFF.
+_PROBE_BACKOFF_SEC = 1.5
+
+
+def _probe_attempts() -> int:
+    """Probe attempt count, env-overridable (KAGURA_MEMORY_PROBE_ATTEMPTS), >= 1."""
+    import os
+
+    raw = os.environ.get("KAGURA_MEMORY_PROBE_ATTEMPTS", "").strip()
+    if not raw:
+        return _PROBE_ATTEMPTS
+    try:
+        value = int(raw)
+    except ValueError:
+        return _PROBE_ATTEMPTS
+    return value if value >= 1 else _PROBE_ATTEMPTS
+
+
+def _probe_backoff() -> float:
+    """Backoff seconds between probe attempts, env-overridable, fail-safe to default."""
+    import os
+
+    raw = os.environ.get("KAGURA_MEMORY_PROBE_BACKOFF", "").strip()
+    if not raw:
+        return _PROBE_BACKOFF_SEC
+    try:
+        value = float(raw)
+    except ValueError:
+        return _PROBE_BACKOFF_SEC
+    return value if value >= 0 else _PROBE_BACKOFF_SEC
+
+
+def _probe_token_once() -> bool:  # pragma: no cover - shells out to the kagura CLI
+    """One `kagura auth token` call: True iff it exits 0 AND prints a token.
+
+    A zero exit with empty stdout (e.g. a CLI that no-ops) is treated as a miss so
+    the gate stays fail-closed; an OSError / subprocess error (incl. timeout) is a
+    miss too. This is the only part of the gate that touches the CLI.
     """
     import subprocess
 
@@ -307,3 +350,40 @@ def memory_reachable() -> bool:  # pragma: no cover - shells out to the kagura C
     except (OSError, subprocess.SubprocessError):
         return False
     return proc.returncode == 0 and bool(proc.stdout.strip())
+
+
+def memory_reachable(
+    *,
+    _probe: Callable[[], bool] = _probe_token_once,
+    _sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Whether memory is reachable: can the host mint a token via the CLI?
+
+    Asks the CLI for a short-lived access token (`kagura auth token`) and treats a
+    success (exit 0 + non-empty token) as reachable. The check is retried up to
+    ``_probe_attempts()`` times with ``_probe_backoff()`` seconds between attempts:
+    the access token is ~1h and the first run after expiry forces a refresh, so a
+    single transient failure at that boundary (slow cold start, a momentary network
+    blip, a transient 401 mid-refresh) must NOT hard-refuse the run. Once the
+    attempts are exhausted the gate stays **fail-closed** (returns False) — a real
+    outage or a logged-out host still refuses, with no silent degrade. The retry IS
+    the handling of the "expired-but-refreshable" case: a refresh that needs a
+    moment succeeds on a later attempt.
+
+    The minted token is intentionally **not** threaded back into the process: this
+    is a reachability gate only, and the live memory path (the kagura CLI / MCP
+    proxy) owns its own refresh-aware token cache, so there is no in-process
+    consumer to hand the token to — re-checking reachability per run is deliberate.
+
+    ``_probe`` / ``_sleep`` are injected so the bounded-retry logic is unit-testable
+    without shelling out (the real probe, ``_probe_token_once``, is the only part
+    that touches the CLI).
+    """
+    attempts = _probe_attempts()
+    backoff = _probe_backoff()
+    for attempt in range(attempts):
+        if _probe():
+            return True
+        if attempt + 1 < attempts:
+            _sleep(backoff)
+    return False

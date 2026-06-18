@@ -9,6 +9,8 @@ externally-ingested (untrusted) memories from steering behavior.
 import pytest
 
 from kagura_agent.mcp.memory_cloud import (
+    _PROBE_ATTEMPTS,
+    _PROBE_BACKOFF_SEC,
     _TOKEN_PROBE_TIMEOUT_SEC,
     ALWAYS_DELIVERY,
     FeedbackRecord,
@@ -16,8 +18,11 @@ from kagura_agent.mcp.memory_cloud import (
     Memory,
     MemoryClient,
     MemoryUnreachableError,
+    _probe_attempts,
+    _probe_backoff,
     _token_probe_timeout,
     ensure_memory_reachable,
+    memory_reachable,
 )
 
 
@@ -167,6 +172,78 @@ def test_token_probe_timeout_bad_or_nonpositive_falls_back(monkeypatch) -> None:
     for bad in ("", "   ", "abc", "0", "-5"):
         monkeypatch.setenv("KAGURA_MEMORY_PROBE_TIMEOUT", bad)
         assert _token_probe_timeout() == _TOKEN_PROBE_TIMEOUT_SEC
+
+
+# --- reachability probe: bounded retry absorbs a transient miss (#99) ---------
+# The access token is ~1h; the first run after expiry forces a refresh, so a
+# single transient `kagura auth token` failure must not hard-refuse the run. The
+# retry loop is injectable so it is covered without shelling out.
+
+
+def test_memory_reachable_first_attempt_success() -> None:
+    calls = {"probe": 0, "sleep": 0}
+
+    def probe() -> bool:
+        calls["probe"] += 1
+        return True
+
+    def sleep(_: float) -> None:
+        calls["sleep"] += 1
+
+    assert memory_reachable(_probe=probe, _sleep=sleep) is True
+    assert calls == {"probe": 1, "sleep": 0}  # no retry, no backoff on first hit
+
+
+def test_memory_reachable_transient_then_success(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Fail once (the hourly-refresh hiccup), then succeed — reachable, no refusal.
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_ATTEMPTS", "3")
+    results = iter([False, True])
+    slept: list[float] = []
+
+    assert (
+        memory_reachable(_probe=lambda: next(results), _sleep=slept.append) is True
+    )
+    assert slept == [_probe_backoff()]  # backed off exactly once between the two tries
+
+
+def test_memory_reachable_sustained_failure_is_fail_closed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A real outage: every attempt misses → still fail-closed (no silent degrade),
+    # and we do NOT sleep after the final attempt.
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_ATTEMPTS", "3")
+    probes = {"n": 0}
+    slept: list[float] = []
+
+    def probe() -> bool:
+        probes["n"] += 1
+        return False
+
+    assert memory_reachable(_probe=probe, _sleep=slept.append) is False
+    assert probes["n"] == 3  # all attempts used
+    assert len(slept) == 2  # backoff BETWEEN attempts only (3 attempts → 2 gaps)
+
+
+def test_probe_attempts_default_and_env_override(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("KAGURA_MEMORY_PROBE_ATTEMPTS", raising=False)
+    assert _probe_attempts() == _PROBE_ATTEMPTS
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_ATTEMPTS", "5")
+    assert _probe_attempts() == 5
+
+
+def test_probe_attempts_bad_or_below_one_falls_back(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    for bad in ("", "  ", "abc", "0", "-2"):
+        monkeypatch.setenv("KAGURA_MEMORY_PROBE_ATTEMPTS", bad)
+        assert _probe_attempts() == _PROBE_ATTEMPTS
+
+
+def test_probe_backoff_default_and_env_override(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("KAGURA_MEMORY_PROBE_BACKOFF", raising=False)
+    assert _probe_backoff() == _PROBE_BACKOFF_SEC
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_BACKOFF", "0")
+    assert _probe_backoff() == 0.0  # zero is allowed (no wait)
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_BACKOFF", "abc")
+    assert _probe_backoff() == _PROBE_BACKOFF_SEC  # bad → default
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_BACKOFF", "-1")
+    assert _probe_backoff() == _PROBE_BACKOFF_SEC  # negative → default
 
 
 def test_runtime_client_exposes_no_admin_methods() -> None:
