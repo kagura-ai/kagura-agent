@@ -24,8 +24,9 @@ from collections.abc import Callable, Iterable
 
 from kagura_agent.core.brain.base import BrainProvider, Task
 from kagura_agent.core.session import Session, SessionResult
-from kagura_agent.mcp.memory_cloud import QUARANTINE_TIER, TRUSTED_TIER, MemoryClient
+from kagura_agent.mcp.memory_cloud import QUARANTINE_TIER, TRUSTED_TIER, Memory, MemoryClient
 from kagura_agent.patterns.checkpoint import CheckpointStore
+from kagura_agent.patterns.erasure import ProvenanceLog
 
 log = logging.getLogger(__name__)
 
@@ -71,12 +72,27 @@ async def ground_prompt(memory: MemoryClient, prompt: str) -> str:
     provenance rule applied at the run path). With nothing relevant, the prompt is
     returned unchanged so a first-ever task is not padded with an empty block.
     """
+    grounded, _ = await _grounded_with_sources(memory, prompt)
+    return grounded
+
+
+async def _grounded_with_sources(
+    memory: MemoryClient, prompt: str
+) -> tuple[str, list[Memory]]:
+    """``ground_prompt`` + the memories it injected.
+
+    Returns ``(grounded_prompt, used_memories)`` so the caller (``ground_and_run``)
+    can record provenance — which source memories fed this session — without a
+    second recall. On a recall miss it returns ``(prompt, [])`` (prompt unchanged,
+    nothing to attribute). Same trusted-only provenance gate as ``ground_prompt``.
+    """
     memories = await memory.recall(prompt, trusted_only=True)
     if not memories:
-        return prompt
-    lines = [f"- {m.text}" for m in memories[:_MAX_GROUNDING]]
+        return prompt, []
+    used = memories[:_MAX_GROUNDING]
+    lines = [f"- {m.text}" for m in used]
     preamble = "Relevant context from prior work:\n" + "\n".join(lines)
-    return f"{preamble}\n\nTask:\n{prompt}"
+    return f"{preamble}\n\nTask:\n{prompt}", used
 
 
 async def load_guardrails(memory: MemoryClient) -> str:
@@ -135,6 +151,7 @@ async def ground_and_run(
     *,
     session_id: str,
     prompt: str,
+    provenance: ProvenanceLog | None = None,
 ) -> SessionResult:
     """``drive_task`` wrapped in B's memory grounding when a memory client is given.
 
@@ -144,6 +161,12 @@ async def ground_and_run(
     With ``memory=None`` it degrades to a plain ``drive_task`` (A only), so the CLI
     can run with or without the backbone wired.
 
+    When a ``provenance`` log is given, the source memories injected into this
+    session's prompt are recorded against ``session_id`` (#93) — the bridge a later
+    host-side ``forget_cascade`` needs to reach the checkpoint / outcome-summary
+    this run derives. The log is host-side and optional, so the run path works with
+    or without erasure-cascade tracking wired.
+
     Persisting the summary is **best-effort**: the task already succeeded and its
     checkpoint is durable by this point, so a memory-write failure is logged, not
     raised — otherwise a backbone hiccup would surface a *completed* run as failed
@@ -151,7 +174,11 @@ async def ground_and_run(
     """
     if memory is not None:
         guardrails = await load_guardrails(memory)
-        grounded = await ground_prompt(memory, prompt)
+        grounded, used = await _grounded_with_sources(memory, prompt)
+        if provenance is not None and used:
+            # Record which trusted source memories fed this session, so a later
+            # erasure of any of them cascades to this run's derived artifacts.
+            provenance.record(session_id, [m.id for m in used])
         if guardrails:
             # Fence the task so guardrail bullets never run straight into it.
             # ``ground_prompt`` returns the bare prompt on a recall miss (no

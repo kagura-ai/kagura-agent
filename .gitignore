@@ -39,6 +39,9 @@ buffer/
 *.sqlite-journal
 logs/
 
+# Agent runtime state (local checkpoints written by `kagura-agent run --session`)
+.kagura-agent/
+
 # kagura-engineer local dev config
 repo.yaml
 

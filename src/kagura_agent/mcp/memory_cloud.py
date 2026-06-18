@@ -193,6 +193,42 @@ class LocalMemoryClient:
         lookup, returns a copy (like ``edges_of``)."""
         return list(self._feedback.get(memory_id, []))
 
+    def has_memory(self, memory_id: str) -> bool:
+        """Host-side existence check (no admin leak — it reveals nothing the agent
+        couldn't already learn via ``recall``). Lets the erasure cascade fail-closed
+        on a bogus source id *before* it deletes any derived artifact (#93)."""
+        return memory_id in self._memories
+
+    def forget(self, memory_id: str) -> None:
+        """Host-side ONLY: erase a memory and its host-side derived records (#93).
+
+        Deliberately **NOT** on the ``MemoryClient`` protocol (the agent surface) —
+        like ``promote`` / ``record_feedback``. The narrow runtime client holds no
+        erasure verb on purpose (a prompt-injected agent must not amplify a hijack
+        into destructive deletes); erasure is a host-side act, typically the
+        agent-side half of a memory-cloud ``forget`` cascade. Removes the memory, its
+        outgoing edges, any edges pointing AT it (no dangling refs), and its feedback
+        lane. Unknown ``memory_id`` raises ``KeyError`` — fail-closed, no silent no-op
+        that could mask an incomplete erasure (mirrors ``promote``).
+        """
+        del self._memories[memory_id]  # KeyError if unknown — fail-closed
+        self._edges.pop(memory_id, None)
+        self._feedback.pop(memory_id, None)
+        # Drop dangling edges that pointed AT the erased memory, so a later
+        # edges_of()/traversal never resolves a tombstone.
+        for src, dsts in self._edges.items():
+            kept = [(dst, etype) for (dst, etype) in dsts if dst != memory_id]
+            if len(kept) != len(dsts):
+                self._edges[src] = kept
+
+    def ids_with_tag(self, tag: str) -> list[str]:
+        """Host-side: ids of memories carrying ``tag`` (insertion order).
+
+        Used by the erasure cascade to find a session's derived outcome-summaries
+        (tagged ``session:<id>``). Host-side — not on the agent protocol, like the
+        other admin-adjacent verbs."""
+        return [mid for mid, mem in self._memories.items() if tag in mem.tags]
+
 
 class QuarantinedMemoryClient:
     """The confined ``MemoryClient`` the membrane leases into the agent container.

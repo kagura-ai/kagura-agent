@@ -59,7 +59,15 @@ a rule that alerts on a non-allowlisted SNI is enough.
 3. **Investigate** — pull the run's event log + egress log + the exact `recall`
    set that fed the run, to locate the injection source.
 4. **Eradicate** — `forget` / quarantine the poisoned memory; add a `prevents`
-   edge so it won't resurface; tighten the egress allowlist.
+   edge so it won't resurface; tighten the egress allowlist. A `forget` must
+   **cascade**: memory-cloud's own `forget` erases the primary memory +
+   embeddings/edges server-side, but the agent also derives **checkpoints** and
+   **outcome-summaries** from recalled memories that a server-side forget never
+   reaches. Run the host-side `forget_cascade` (`patterns.erasure`) to erase those
+   derived artifacts too — it is host-side only (the agent surface has no erasure
+   verb) and driven off the provenance trail grounding records. This is also the
+   technical half of the GDPR erasure obligation (CSO finding C1 / `legal.md` §3):
+   erasure must reach derived artifacts, not just the primary memory.
 5. **Recover** — resume the category only after review; **demote graduation**
    if a graduated capability was abused.
 

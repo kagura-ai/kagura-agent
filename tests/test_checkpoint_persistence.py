@@ -16,6 +16,7 @@ from kagura_agent.core.brain.base import Checkpoint
 from kagura_agent.patterns.checkpoint import (
     CheckpointError,
     FileCheckpointStore,
+    InMemoryCheckpointStore,
     MemoryCloudCheckpointStore,
     _checkpoint_filename,
 )
@@ -167,7 +168,7 @@ async def test_load_unreadable_path_raises_checkpoint_error(tmp_path) -> None:  
 
 
 class _FakeStateBackend:
-    """In-memory stand-in for memory-cloud's get_state/set_state."""
+    """In-memory stand-in for memory-cloud's get_state/set_state/delete_state."""
 
     def __init__(self) -> None:
         self.kv: dict[str, str] = {}
@@ -177,6 +178,9 @@ class _FakeStateBackend:
 
     async def set_state(self, key: str, value: str) -> None:
         self.kv[key] = value
+
+    async def delete_state(self, key: str) -> None:
+        self.kv.pop(key, None)  # idempotent
 
 
 async def test_memorycloud_store_roundtrips() -> None:
@@ -218,3 +222,47 @@ async def test_memorycloud_store_wrong_typed_field_raises() -> None:
     backend.kv["checkpoint:s"] = json.dumps({"session_id": "s", "turn": "x", "state": {}})
     with pytest.raises(CheckpointError, match="corrupt"):
         await MemoryCloudCheckpointStore(backend).load("s")
+
+
+# --- delete(): the erasure-cascade hook on every store (#93) ------------------
+
+
+async def test_inmemory_store_delete_removes_and_is_idempotent() -> None:
+    store = InMemoryCheckpointStore()
+    await store.save(Checkpoint(session_id="s", turn=1, state={}))
+    await store.delete("s")
+    assert await store.load("s") is None
+    await store.delete("s")  # second delete is a no-op, not an error
+
+
+async def test_file_store_delete_removes_and_is_idempotent(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    store = FileCheckpointStore(tmp_path / "state")
+    await store.save(Checkpoint(session_id="s", turn=1, state={"v": 1}))
+    assert await store.load("s") is not None
+
+    await store.delete("s")
+    assert await store.load("s") is None  # file gone
+    await store.delete("s")  # absent file → idempotent no-op, no FileNotFoundError
+
+
+async def test_file_store_delete_unremovable_path_raises(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # A directory where the checkpoint file should be cannot be unlink()'d — that
+    # is NOT a silent success (an operator must not believe an erasure completed).
+    base = tmp_path / "state"
+    base.mkdir()
+    (base / _checkpoint_filename("s")).mkdir()  # a dir squatting the file path
+
+    with pytest.raises(CheckpointError, match="could not be deleted"):
+        await FileCheckpointStore(base).delete("s")
+
+
+async def test_memorycloud_store_delete_removes_key_and_is_idempotent() -> None:
+    backend = _FakeStateBackend()
+    store = MemoryCloudCheckpointStore(backend)
+    await store.save(Checkpoint(session_id="s", turn=1, state={}))
+    assert backend.kv  # key present
+
+    await store.delete("s")
+    assert await store.load("s") is None
+    assert not backend.kv  # namespaced key removed from the KV backend
+    await store.delete("s")  # idempotent

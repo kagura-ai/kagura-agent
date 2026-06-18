@@ -22,6 +22,7 @@ from kagura_agent.patterns.continuity import (
     remember_outcome,
     run_repl,
 )
+from kagura_agent.patterns.erasure import ProvenanceLog
 
 
 class FakeBrain:
@@ -256,6 +257,61 @@ async def test_ground_and_run_grounds_then_remembers() -> None:
     # ...and an outcome summary was written back to the backbone
     hits = await memory.recall("explain auth flow", tags=("session:s",))
     assert any("Outcome:" in m.text for m in hits)
+
+
+async def test_ground_and_run_records_provenance_of_injected_memories() -> None:
+    # The bridge for the erasure cascade (#93): the trusted source memories injected
+    # into a session's prompt are recorded against the session, so a later forget of
+    # any of them can reach this run's derived artifacts.
+    brain = FakeBrain()
+    store = InMemoryCheckpointStore()
+    memory = LocalMemoryClient()
+    mid = await memory.remember(
+        "the auth flow uses refresh tokens", trust_tier="trusted"
+    )
+    provenance = ProvenanceLog()
+
+    await ground_and_run(
+        brain,
+        store,
+        memory,
+        session_id="s",
+        prompt="explain the refresh tokens flow",
+        provenance=provenance,
+    )
+
+    assert provenance.sessions_for(mid) == {"s"}
+
+
+async def test_ground_and_run_provenance_unrecorded_on_recall_miss() -> None:
+    # No trusted recall hit → nothing injected → nothing to attribute (and no crash
+    # from recording an empty source set).
+    brain = FakeBrain()
+    store = InMemoryCheckpointStore()
+    memory = LocalMemoryClient()
+    await memory.remember("unrelated trusted note", trust_tier="trusted")
+    provenance = ProvenanceLog()
+
+    await ground_and_run(
+        brain, store, memory, session_id="s", prompt="totally novel task",
+        provenance=provenance,
+    )
+
+    assert provenance.sessions_for("m1") == set()  # nothing recorded
+
+
+async def test_ground_and_run_provenance_is_optional() -> None:
+    # Omitting the provenance log must not change behaviour (the run path works with
+    # or without erasure-cascade tracking wired).
+    brain = FakeBrain()
+    store = InMemoryCheckpointStore()
+    memory = LocalMemoryClient()
+    await memory.remember("refresh tokens note", trust_tier="trusted")
+
+    result = await ground_and_run(
+        brain, store, memory, session_id="s", prompt="explain refresh tokens"
+    )
+    assert result.text.startswith("done:")  # ran fine, no provenance needed
 
 
 async def test_ground_and_run_without_memory_degrades_to_drive_task() -> None:
