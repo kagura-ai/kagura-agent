@@ -243,3 +243,26 @@ no expiry or revocation. Always pair `static_env` with a tight egress allowlist 
 the token can only be used against the intended API (e.g. Resend → allow only
 `api.resend.com`). The egress proxy (default-deny + allowlist) is the chokepoint
 that makes a leaked standing token unexfiltratable.
+
+## Memory reachability gate (startup)
+
+Every `run` / `repl` is fail-closed on memory reachability: the host must be able
+to mint a token via `kagura auth token` or the agent refuses to start (no silent
+degrade). The access token is short-lived (~1h), so the first run after expiry
+forces a refresh; to keep a transient hiccup at that hourly boundary from
+hard-refusing the run, the gate **retries** the probe.
+
+| Env var | Default | Effect |
+|---|---|---|
+| `KAGURA_MEMORY_PROBE_TIMEOUT` | `60` (s) | Per-attempt subprocess timeout for `kagura auth token`. |
+| `KAGURA_MEMORY_PROBE_ATTEMPTS` | `3` | Probe attempts before refusing (clamped to ≥ 1). |
+| `KAGURA_MEMORY_PROBE_BACKOFF` | `1.5` (s) | Wait between attempts. |
+
+**Worst-case latency.** On a *hung* outage each attempt can cost the full timeout,
+so the run path can block up to roughly `attempts × timeout + (attempts−1) ×
+backoff` (~183 s with defaults) before refusing. To restore fast-fail on a known
+outage, set `KAGURA_MEMORY_PROBE_ATTEMPTS=1` (and/or a lower
+`KAGURA_MEMORY_PROBE_TIMEOUT`). `doctor` already probes **one-shot** so the command
+you run to diagnose a memory outage stays fast. Non-finite values (`inf`/`nan`) for
+the timeout/backoff are rejected and fall back to the default — they would
+otherwise hang the gate.

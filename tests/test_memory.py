@@ -9,6 +9,8 @@ externally-ingested (untrusted) memories from steering behavior.
 import pytest
 
 from kagura_agent.mcp.memory_cloud import (
+    _PROBE_ATTEMPTS,
+    _PROBE_BACKOFF_SEC,
     _TOKEN_PROBE_TIMEOUT_SEC,
     ALWAYS_DELIVERY,
     FeedbackRecord,
@@ -16,8 +18,11 @@ from kagura_agent.mcp.memory_cloud import (
     Memory,
     MemoryClient,
     MemoryUnreachableError,
+    _probe_attempts,
+    _probe_backoff,
     _token_probe_timeout,
     ensure_memory_reachable,
+    memory_reachable,
 )
 
 
@@ -165,6 +170,121 @@ def test_token_probe_timeout_env_override(monkeypatch) -> None:  # type: ignore[
 
 def test_token_probe_timeout_bad_or_nonpositive_falls_back(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     for bad in ("", "   ", "abc", "0", "-5"):
+        monkeypatch.setenv("KAGURA_MEMORY_PROBE_TIMEOUT", bad)
+        assert _token_probe_timeout() == _TOKEN_PROBE_TIMEOUT_SEC
+
+
+# --- reachability probe: bounded retry absorbs a transient miss (#99) ---------
+# The access token is ~1h; the first run after expiry forces a refresh, so a
+# single transient `kagura auth token` failure must not hard-refuse the run. The
+# retry loop is injectable so it is covered without shelling out.
+
+
+def test_memory_reachable_first_attempt_success(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Pin the env so the no-retry-on-first-hit contract is independent of ambient
+    # KAGURA_MEMORY_PROBE_ATTEMPTS (defensive, like the timeout-default test).
+    monkeypatch.delenv("KAGURA_MEMORY_PROBE_ATTEMPTS", raising=False)
+    calls = {"probe": 0, "sleep": 0}
+
+    def probe() -> bool:
+        calls["probe"] += 1
+        return True
+
+    def sleep(_: float) -> None:
+        calls["sleep"] += 1
+
+    assert memory_reachable(_probe=probe, _sleep=sleep) is True
+    assert calls == {"probe": 1, "sleep": 0}  # no retry, no backoff on first hit
+
+
+def test_memory_reachable_transient_then_success(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Fail once (the hourly-refresh hiccup), then succeed — reachable, no refusal.
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_ATTEMPTS", "3")
+    monkeypatch.delenv("KAGURA_MEMORY_PROBE_BACKOFF", raising=False)  # pin the default
+    results = iter([False, True])
+    slept: list[float] = []
+
+    assert (
+        memory_reachable(_probe=lambda: next(results), _sleep=slept.append) is True
+    )
+    # Asserted against the literal default (not _probe_backoff()) so the test pins
+    # the actual backoff value, not just the count.
+    assert slept == [_PROBE_BACKOFF_SEC]  # backed off exactly once between the two tries
+
+
+def test_memory_reachable_attempts_param_overrides_env_for_one_shot(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # The diagnostic path (doctor) passes attempts=1: a single probe, no backoff,
+    # even when the env would otherwise request more — and even on a miss.
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_ATTEMPTS", "9")
+    probes = {"n": 0}
+    slept: list[float] = []
+
+    def miss() -> bool:
+        probes["n"] += 1
+        return False
+
+    assert memory_reachable(attempts=1, _probe=miss, _sleep=slept.append) is False
+    assert probes["n"] == 1  # one-shot regardless of env=9
+    assert slept == []  # never sleeps on a single attempt
+
+
+def test_memory_reachable_attempts_clamped_to_at_least_one() -> None:
+    # A stray 0/negative must not turn the loop into an unconditional "unreachable":
+    # it is clamped to 1 attempt, so a healthy probe still reports reachable.
+    assert memory_reachable(attempts=0, _probe=lambda: True, _sleep=lambda _: None) is True
+    assert memory_reachable(attempts=-5, _probe=lambda: True, _sleep=lambda _: None) is True
+
+
+def test_memory_reachable_sustained_failure_is_fail_closed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A real outage: every attempt misses → still fail-closed (no silent degrade),
+    # and we do NOT sleep after the final attempt.
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_ATTEMPTS", "3")
+    probes = {"n": 0}
+    slept: list[float] = []
+
+    def probe() -> bool:
+        probes["n"] += 1
+        return False
+
+    assert memory_reachable(_probe=probe, _sleep=slept.append) is False
+    assert probes["n"] == 3  # all attempts used
+    assert len(slept) == 2  # backoff BETWEEN attempts only (3 attempts → 2 gaps)
+
+
+def test_probe_attempts_default_and_env_override(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("KAGURA_MEMORY_PROBE_ATTEMPTS", raising=False)
+    assert _probe_attempts() == _PROBE_ATTEMPTS
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_ATTEMPTS", "5")
+    assert _probe_attempts() == 5
+
+
+def test_probe_attempts_bad_or_below_one_falls_back(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    for bad in ("", "  ", "abc", "0", "-2"):
+        monkeypatch.setenv("KAGURA_MEMORY_PROBE_ATTEMPTS", bad)
+        assert _probe_attempts() == _PROBE_ATTEMPTS
+
+
+def test_probe_backoff_default_and_env_override(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("KAGURA_MEMORY_PROBE_BACKOFF", raising=False)
+    assert _probe_backoff() == _PROBE_BACKOFF_SEC
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_BACKOFF", "0")
+    assert _probe_backoff() == 0.0  # zero is allowed (no wait)
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_BACKOFF", "abc")
+    assert _probe_backoff() == _PROBE_BACKOFF_SEC  # bad → default
+    monkeypatch.setenv("KAGURA_MEMORY_PROBE_BACKOFF", "-1")
+    assert _probe_backoff() == _PROBE_BACKOFF_SEC  # negative → default
+    # Non-finite must NOT slip through: inf would make _sleep(inf) hang the gate
+    # forever between attempts (inf >= 0 is True). nan is incidentally caught by the
+    # comparison, but assert it explicitly so the guard is pinned.
+    for bad in ("inf", "Infinity", "1e400", "nan", "-inf"):
+        monkeypatch.setenv("KAGURA_MEMORY_PROBE_BACKOFF", bad)
+        assert _probe_backoff() == _PROBE_BACKOFF_SEC
+
+
+def test_token_probe_timeout_rejects_non_finite(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # inf timeout would make subprocess.run wait forever, defeating the fail-closed
+    # cap the value exists to enforce. Reject it (and nan) → default.
+    for bad in ("inf", "Infinity", "1e400", "nan", "-inf"):
         monkeypatch.setenv("KAGURA_MEMORY_PROBE_TIMEOUT", bad)
         assert _token_probe_timeout() == _TOKEN_PROBE_TIMEOUT_SEC
 
