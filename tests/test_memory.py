@@ -290,10 +290,19 @@ def test_token_probe_timeout_rejects_non_finite(monkeypatch) -> None:  # type: i
 
 
 def test_runtime_client_exposes_no_admin_methods() -> None:
-    # the Protocol surface is the contract; assert the impl has no admin verbs
-    forbidden = {"forget", "delete", "merge", "rollback", "set_schema", "update_search_config"}
+    # The Protocol surface is the contract. These bulk/destructive admin verbs must
+    # never exist on the runtime client at all — there is no host-side use for them
+    # here, so their mere presence would be a leak. (`forget` is deliberately NOT in
+    # this set: it is a host-side erasure verb, like `promote` / `record_feedback`,
+    # confined OFF the agent Protocol + QuarantinedMemoryClient — see
+    # test_erasure.py. The invariant is "off the agent surface", not "off the
+    # host-side impl".)
+    forbidden = {"delete", "merge", "rollback", "set_schema", "update_search_config"}
     present = {name for name in dir(LocalMemoryClient) if not name.startswith("_")}
     leaked = forbidden & present
     assert not leaked, f"admin verbs leaked into runtime client: {leaked}"
+    # The agent-facing erasure guard lives in test_erasure.py: `forget` must stay off
+    # the MemoryClient protocol (the agent surface), even though the host impl has it.
+    assert not hasattr(MemoryClient, "forget")
     # and it still satisfies the narrow protocol
     assert isinstance(LocalMemoryClient(), MemoryClient)

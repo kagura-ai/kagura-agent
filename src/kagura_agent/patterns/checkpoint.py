@@ -76,6 +76,13 @@ class CheckpointStore(Protocol):
 
     async def load(self, session_id: str) -> Checkpoint | None: ...
 
+    async def delete(self, session_id: str) -> None:
+        """Erase a session's checkpoint. Idempotent (a missing checkpoint is a
+        no-op), so the erasure cascade (#93) can re-run after a partial failure.
+        A checkpoint is a derived artifact of recalled memories, so a memory-cloud
+        ``forget`` must be able to reach it host-side."""
+        ...
+
 
 class InMemoryCheckpointStore:
     """Process-local checkpoint store (tests + the cockpit's hot path)."""
@@ -88,6 +95,9 @@ class InMemoryCheckpointStore:
 
     async def load(self, session_id: str) -> Checkpoint | None:
         return self._by_session.get(session_id)
+
+    async def delete(self, session_id: str) -> None:
+        self._by_session.pop(session_id, None)  # idempotent: absent → no-op
 
 
 def _checkpoint_filename(session_id: str) -> str:
@@ -161,6 +171,19 @@ class FileCheckpointStore:
             ) from exc
         return _decode_checkpoint(raw, where=f"for session {session_id!r} at {path}")
 
+    async def delete(self, session_id: str) -> None:
+        try:
+            self._path(session_id).unlink()
+        except FileNotFoundError:
+            return  # already gone — erasure is idempotent
+        except OSError as exc:
+            # Present but un-unlinkable (permission / lock / a dir at the path) is
+            # NOT a silent success — surface it so an operator does not believe an
+            # erasure completed when the file is still there.
+            raise CheckpointError(
+                f"checkpoint for session {session_id!r} could not be deleted: {exc}"
+            ) from exc
+
 
 class StateBackend(Protocol):
     """memory-cloud's key→value state API (the `get_state`/`set_state` tools).
@@ -174,6 +197,11 @@ class StateBackend(Protocol):
     async def get_state(self, key: str) -> str | None: ...
 
     async def set_state(self, key: str, value: str) -> None: ...
+
+    async def delete_state(self, key: str) -> None:
+        """Erase a key. Idempotent. The erasure cascade (#93) needs to remove a
+        memory-cloud-backed checkpoint, so the KV surface must expose a delete."""
+        ...
 
 
 class MemoryCloudCheckpointStore:
@@ -210,3 +238,6 @@ class MemoryCloudCheckpointStore:
         return _decode_checkpoint(
             raw, where=f"for session {session_id!r} in memory-cloud state"
         )
+
+    async def delete(self, session_id: str) -> None:
+        await self._backend.delete_state(self._PREFIX + session_id)

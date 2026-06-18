@@ -1,0 +1,118 @@
+"""Host-side erasure cascade (#93): a memory-cloud ``forget`` must reach the
+agent-side artifacts derived from a memory.
+
+memory-cloud owns the *primary* erasure — the memory plus its server-side
+embeddings/edges. But the agent derives its OWN artifacts from recalled
+memories: session **checkpoints** (``patterns.checkpoint``) and
+**outcome-summaries** (``continuity.remember_outcome``). A server-side ``forget``
+never reaches those, so for a GDPR erasure (CSO finding C1 / ``docs/legal.md``
+§3) to be complete the cascade has to delete them too.
+
+**Host-side only, by construction.** The narrow ``MemoryClient`` the agent runs
+against has no erasure verb (a hijack must not amplify into destructive deletes —
+confinement by omission, like ``promote`` / ``record_feedback``). The cascade is
+an operator/host action driven off a provenance trail the host records; it is
+intentionally absent from the agent surface and from ``QuarantinedMemoryClient``.
+
+Relationship to memory-cloud's own ``forget``: this does **not** reimplement it.
+The server-side ``forget`` (the SDK contract) erases the primary memory and its
+embeddings/edges in the backbone; ``forget_cascade`` is the agent-side companion
+that erases the *derived* artifacts this process created. Run both for a complete
+erasure; reference the SDK contract for the server-side scope rather than
+duplicating it here.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+
+from kagura_agent.mcp.memory_cloud import LocalMemoryClient
+from kagura_agent.patterns.checkpoint import CheckpointStore
+
+
+@dataclass
+class ProvenanceLog:
+    """Host-side record of which source memories fed which sessions.
+
+    Populated as grounding injects recalled memories into a session's prompt
+    (``continuity.ground_and_run``). It is the bridge a ``forget(memory_id)`` needs
+    to reach the *session-keyed* derived artifacts (checkpoints, outcome-summaries)
+    that may carry the memory's content. NOT exposed to the agent — a host-side
+    erasure-support structure, like ``LocalMemoryClient.promote``.
+    """
+
+    _by_memory: dict[str, set[str]] = field(default_factory=dict)
+
+    def record(self, session_id: str, memory_ids: Iterable[str]) -> None:
+        """Note that ``session_id`` consumed each of ``memory_ids`` (idempotent)."""
+        for mid in memory_ids:
+            self._by_memory.setdefault(mid, set()).add(session_id)
+
+    def sessions_for(self, memory_id: str) -> set[str]:
+        """The sessions that consumed ``memory_id`` (a copy, never the live set)."""
+        return set(self._by_memory.get(memory_id, set()))
+
+    def forget_memory(self, memory_id: str) -> None:
+        """Drop the source's provenance entry once it has been cascaded (idempotent)."""
+        self._by_memory.pop(memory_id, None)
+
+
+@dataclass(frozen=True)
+class CascadeResult:
+    """What an erasure cascade removed — returned for an audit trail (an erasure
+    you cannot evidence is an erasure you cannot prove under GDPR)."""
+
+    source_memory_id: str
+    sessions: tuple[str, ...]
+    forgotten_memory_ids: tuple[str, ...]
+    deleted_checkpoints: tuple[str, ...]
+
+
+async def forget_cascade(
+    memory_id: str,
+    *,
+    memory: LocalMemoryClient,
+    checkpoints: CheckpointStore,
+    provenance: ProvenanceLog,
+) -> CascadeResult:
+    """Erase ``memory_id`` AND the agent-side artifacts derived from it.
+
+    Steps (all host-side):
+
+    1. Resolve every session that consumed the memory (``provenance``).
+    2. For each session: delete its checkpoint, and forget its outcome-summary
+       memories (tagged ``session:<id>``).
+    3. Forget the source memory itself, and drop its provenance entry.
+
+    **Fail-closed:** an unknown source ``memory_id`` raises ``KeyError`` *before*
+    any deletion (mirrors ``promote`` / ``forget``) — a silent no-op could let an
+    operator believe an erasure happened when it did not, and partially erasing the
+    *derived* side for a bogus source id would be worse. The derived side is
+    **idempotent** (a missing checkpoint / already-forgotten summary is fine), so a
+    re-run after a partial failure completes the erasure.
+
+    Typed against the concrete ``LocalMemoryClient`` (not the narrow ``MemoryClient``
+    protocol) on purpose: the erasure verbs it uses (``forget`` / ``ids_with_tag`` /
+    ``has_memory``) are host-side only and deliberately off the agent surface.
+    """
+    if not memory.has_memory(memory_id):  # fail-closed before touching anything
+        raise KeyError(memory_id)
+    sessions = sorted(provenance.sessions_for(memory_id))
+    forgotten: list[str] = []
+    deleted_checkpoints: list[str] = []
+    for session_id in sessions:
+        await checkpoints.delete(session_id)
+        deleted_checkpoints.append(session_id)
+        for summary_id in memory.ids_with_tag(f"session:{session_id}"):
+            memory.forget(summary_id)
+            forgotten.append(summary_id)
+    memory.forget(memory_id)
+    forgotten.append(memory_id)
+    provenance.forget_memory(memory_id)
+    return CascadeResult(
+        source_memory_id=memory_id,
+        sessions=tuple(sessions),
+        forgotten_memory_ids=tuple(forgotten),
+        deleted_checkpoints=tuple(deleted_checkpoints),
+    )
