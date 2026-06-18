@@ -105,8 +105,16 @@ async def forget_cascade(
         await checkpoints.delete(session_id)
         deleted_checkpoints.append(session_id)
         for summary_id in memory.ids_with_tag(f"session:{session_id}"):
-            memory.forget(summary_id)
-            forgotten.append(summary_id)
+            # Skip the source here — it is forgotten once, explicitly, below. A
+            # *promoted* outcome-summary can be BOTH a session-tagged derived
+            # artifact AND the erasure source; forgetting it in the loop and again
+            # below would KeyError mid-cascade. The has_memory guard also makes a
+            # summary that somehow surfaces under two sessions idempotent.
+            if summary_id != memory_id and memory.has_memory(summary_id):
+                memory.forget(summary_id)
+                forgotten.append(summary_id)
+    # The source still exists: the top-level guard proved it and the loop skipped
+    # it, so this final forget is safe and unconditional.
     memory.forget(memory_id)
     forgotten.append(memory_id)
     provenance.forget_memory(memory_id)

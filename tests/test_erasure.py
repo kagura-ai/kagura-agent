@@ -106,6 +106,29 @@ async def test_cascade_is_idempotent_on_missing_derived_artifacts() -> None:
     assert result.deleted_checkpoints == ("s",)  # delete was a no-op, still reported
 
 
+async def test_cascade_source_is_also_a_session_tagged_summary_no_double_forget() -> None:
+    # Multi-hop edge case (code-review): an outcome-summary tagged session:S is
+    # host-promoted to trusted, later recalled+grounded into session S, then erased
+    # AS THE SOURCE. ids_with_tag("session:S") returns the source itself — the
+    # cascade must forget it exactly once (no KeyError mid-cascade) and complete.
+    memory = LocalMemoryClient()
+    store = InMemoryCheckpointStore()
+    provenance = ProvenanceLog()
+
+    source = await remember_outcome(memory, session_id="S", prompt="p", result="r")
+    memory.promote(source)  # graduated to trusted, retains its session:S tag
+    provenance.record("S", [source])  # it fed session S after being recalled
+    await store.save(Checkpoint(session_id="S", turn=1, state={}))
+
+    # Must not raise (was a KeyError before the dedup guard); fully completes.
+    result = await forget_cascade(source, memory=memory, checkpoints=store, provenance=provenance)
+
+    assert not memory.has_memory(source)
+    assert result.forgotten_memory_ids == (source,)  # forgotten once, not twice
+    assert result.deleted_checkpoints == ("S",)
+    assert provenance.sessions_for(source) == set()
+
+
 async def test_cascade_leaves_unrelated_sessions_untouched() -> None:
     memory = LocalMemoryClient()
     store = InMemoryCheckpointStore()
