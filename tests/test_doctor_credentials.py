@@ -75,6 +75,8 @@ def test_run_doctor_includes_secret_backends_check():
         docker_probe=lambda: True,
         egress_probe=lambda: True,
         egress_sealed_probe=lambda: True,
+        egress_proxy_present_probe=lambda: True,
+        egress_proxy_pinned_probe=lambda: True,
         env={"CLAUDE_CODE_SUBSCRIPTION": "1"},
     )
     assert any(r.name == "secret-backends" for r in results)
@@ -98,6 +100,8 @@ def test_run_doctor_keyring_registry_without_extra_is_warn_not_fail(monkeypatch)
         docker_probe=lambda: True,
         egress_probe=lambda: True,
         egress_sealed_probe=lambda: True,
+        egress_proxy_present_probe=lambda: True,
+        egress_proxy_pinned_probe=lambda: True,
         env={"CLAUDE_CODE_SUBSCRIPTION": "1"},
         registry=registry,
     )
@@ -216,9 +220,11 @@ def _probes(memory=True, sdk=True, docker=True, egress=True, egress_sealed=True)
         sdk_probe=lambda: sdk,
         docker_probe=lambda: docker,
         egress_probe=lambda: egress,
-        # Hermetic: never fall back to the live _egress_sealed (which read_text()s
-        # the real deploy/compose.yml relative to CWD).
+        # Hermetic: never fall back to the live probes (which read_text() the real
+        # deploy/compose.yml + egress-proxy Dockerfile relative to CWD).
         egress_sealed_probe=lambda: egress_sealed,
+        egress_proxy_present_probe=lambda: True,
+        egress_proxy_pinned_probe=lambda: True,
     )
 
 
