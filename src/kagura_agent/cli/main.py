@@ -27,7 +27,7 @@ from kagura_agent.cli.doctor import (
 )
 from kagura_agent.core.brain.base import BrainInvocationError, BrainUnavailable
 from kagura_agent.core.session import SessionError
-from kagura_agent.mcp.memory_cloud import MemoryUnreachableError
+from kagura_agent.mcp.memory_cloud import MemoryClient, MemoryUnreachableError
 from kagura_agent.membrane.registry import GrantSet, ProviderSpec, parse_grants
 from kagura_agent.patterns.checkpoint import (
     CheckpointError,
@@ -335,19 +335,30 @@ def load_mcp_config(value: str | None) -> dict[str, Any] | None:
     return dict(servers)
 
 
-def make_memory_client() -> Any | None:
+def make_memory_client() -> MemoryClient:
     """The grounding seam (B): the MemoryClient used to recall prior context and
     persist task summaries around a run.
 
-    Returns ``None`` for now → ``ground_and_run`` degrades to plain checkpoint
-    resume (A). A real client MUST honour ``recall(trusted_only=True)`` so an
-    externally-ingested / quarantined memory is never fed back as behaviour-
-    influencing context (membrane memory-provenance rule). The kagura CLI's
-    ``recall`` exposes neither a machine-readable output nor a trust-tier filter,
-    so a trust-aware MCP/SDK-backed adapter is the remaining deployment edge; this
-    factory is where it gets wired in.
+    **Always returns a client, never ``None`` (#104).** The old ``None`` made
+    ``ground_and_run`` silently degrade to a plain checkpoint resume — so a run paid
+    the reachability gate's friction (``ensure_memory_reachable``) yet got none of
+    the backbone's benefit. Memory is now *always present*; only the backend's
+    strength differs, the seam never disappears.
+
+    Backend selection: a trust-aware **MCP**-backed cloud client is the production
+    target — it MUST honour ``recall(trusted_only=True)`` so an externally-ingested
+    / quarantined memory is never fed back as behaviour-influencing context (the
+    membrane memory-provenance rule). The kagura *CLI* cannot back it: its
+    ``recall`` exposes neither machine-readable output nor a trust-tier filter, so a
+    CLI adapter could not enforce ``trusted_only`` — feeding the grounding path with
+    a client that ignores trust would be a provenance regression. So the cloud
+    adapter stays the deployment edge (tracked separately); until it is wired this
+    returns ``LocalMemoryClient`` — which *does* honour ``trusted_only`` — keeping
+    grounding safe and the test/local-dev path alive.
     """
-    return None
+    from kagura_agent.mcp.memory_cloud import LocalMemoryClient
+
+    return LocalMemoryClient()
 
 
 async def _run_task(  # pragma: no cover - needs SDK + subscription
