@@ -147,19 +147,24 @@ async def remember_outcome(
 async def ground_and_run(
     brain: BrainProvider,
     store: CheckpointStore,
-    memory: MemoryClient | None,
+    memory: MemoryClient,
     *,
     session_id: str,
     prompt: str,
     provenance: ProvenanceLog | None = None,
 ) -> SessionResult:
-    """``drive_task`` wrapped in B's memory grounding when a memory client is given.
+    """``drive_task`` wrapped in B's memory grounding.
 
     Guardrails (deterministic, pinned — #88) → recall (probabilistic) → run/resume →
     remember. The two read lanes are distinct: ``load_guardrails`` always loads the
     complete pinned set; ``ground_prompt`` recalls only *relevant* trusted context.
-    With ``memory=None`` it degrades to a plain ``drive_task`` (A only), so the CLI
-    can run with or without the backbone wired.
+
+    ``memory`` is **always present** (#104): ``make_memory_client`` never returns
+    ``None`` — the seam never disappears, only its backend strength differs
+    (``LocalMemoryClient`` for test/dev, a trust-aware cloud client in deployment).
+    This closed the worst-of-both gap where a run paid the reachability gate's
+    friction yet got none of the backbone's benefit (the old ``memory is None``
+    degrade branch is gone).
 
     When a ``provenance`` log is given, the source memories injected into this
     session's prompt are recorded against ``session_id`` (#93) — the bridge a later
@@ -172,34 +177,30 @@ async def ground_and_run(
     raised — otherwise a backbone hiccup would surface a *completed* run as failed
     and a retry would needlessly resume (re-execute) the finished turn.
     """
-    if memory is not None:
-        guardrails = await load_guardrails(memory)
-        grounded, used = await _grounded_with_sources(memory, prompt)
-        if provenance is not None and used:
-            # Record which trusted source memories fed this session, so a later
-            # erasure of any of them cascades to this run's derived artifacts.
-            provenance.record(session_id, [m.id for m in used])
-        if guardrails:
-            # Fence the task so guardrail bullets never run straight into it.
-            # ``ground_prompt`` returns the bare prompt on a recall miss (no
-            # "Task:" label); add the fence in that case so the host/task boundary
-            # is consistent whether or not recall hit.
-            body = grounded if grounded != prompt else f"Task:\n{prompt}"
-            effective = f"{guardrails}\n\n{body}"
-        else:
-            effective = grounded
+    guardrails = await load_guardrails(memory)
+    grounded, used = await _grounded_with_sources(memory, prompt)
+    if provenance is not None and used:
+        # Record which trusted source memories fed this session, so a later
+        # erasure of any of them cascades to this run's derived artifacts.
+        provenance.record(session_id, [m.id for m in used])
+    if guardrails:
+        # Fence the task so guardrail bullets never run straight into it.
+        # ``ground_prompt`` returns the bare prompt on a recall miss (no "Task:"
+        # label); add the fence in that case so the host/task boundary is consistent
+        # whether or not recall hit.
+        body = grounded if grounded != prompt else f"Task:\n{prompt}"
+        effective = f"{guardrails}\n\n{body}"
     else:
-        effective = prompt
+        effective = grounded
     result = await drive_task(brain, store, session_id=session_id, prompt=effective)
-    if memory is not None:
-        try:
-            await remember_outcome(
-                memory, session_id=session_id, prompt=prompt, result=result.text
-            )
-        except Exception:
-            log.exception(
-                "remember_outcome failed for session %s (summary not persisted)", session_id
-            )
+    try:
+        await remember_outcome(
+            memory, session_id=session_id, prompt=prompt, result=result.text
+        )
+    except Exception:
+        log.exception(
+            "remember_outcome failed for session %s (summary not persisted)", session_id
+        )
     return result
 
 
@@ -210,7 +211,7 @@ async def run_repl(
     emit: Callable[[str], None],
     *,
     session_id: str,
-    memory: MemoryClient | None = None,
+    memory: MemoryClient,
 ) -> None:
     """Drive a session over a stream of input ``lines`` until exhausted or quit.
 
