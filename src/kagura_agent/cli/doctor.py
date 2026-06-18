@@ -317,16 +317,26 @@ def _egress_sealed(*, path: Path = _COMPOSE_PATH) -> bool:  # pragma: no cover -
 
 
 def _dockerfile_is_pinned(text: str) -> bool:
-    """Whether a Dockerfile's FROM is pinned to a real digest (#94).
+    """Whether EVERY ``FROM`` in a Dockerfile is pinned to a real digest (#94).
 
-    Pinned = a ``@sha256:<64 hex>`` digest that is NOT the all-zero placeholder the
-    repo ships pre-deploy (same convention as Dockerfile.base/python). A floating
-    tag (no ``@sha256:``) or the placeholder both count as unpinned.
+    Pinned = each ``FROM`` carries a ``@sha256:<64 hex>`` digest that is NOT the
+    all-zero placeholder the repo ships pre-deploy (same convention as
+    Dockerfile.base/python). **Multi-stage safe**: a pinned builder stage does not
+    make an unpinned *runtime* stage "pinned" — the runtime stage is the image that
+    actually ships, so a single unpinned/placeholder FROM fails the whole check
+    (a supply-chain gate must not false-OK). No FROM at all → unpinned.
     """
     import re
 
-    digests = re.findall(r"@sha256:([0-9a-fA-F]{64})", text)
-    return any(d != "0" * 64 for d in digests)
+    placeholder = "0" * 64
+    from_lines = re.findall(r"^\s*FROM\s+.*$", text, re.MULTILINE | re.IGNORECASE)
+    if not from_lines:
+        return False
+    for line in from_lines:
+        m = re.search(r"@sha256:([0-9a-fA-F]{64})", line)
+        if m is None or m.group(1) == placeholder:
+            return False  # an unpinned or placeholder stage → whole file unpinned
+    return True
 
 
 def _egress_proxy_present(  # pragma: no cover - fs stat

@@ -32,11 +32,18 @@ The log is the cockpit's primary egress tripwire (see `docs/operations.md`).
 
 The launcher stamps each egress-granted container with a `kagura.egress-allow`
 label carrying that run's validated allowlist
-(`membrane.egress.EGRESS_ALLOW_LABEL`). The proxy looks the label up by source IP
-via the Docker API, so each run is scoped to its **own** allowlist (least
-privilege) rather than a single static list. If the per-source label cannot be
-resolved it falls back to the static `EGRESS_ALLOWLIST` env (the compose
-bootstrap); if that is empty too, it denies.
+(`membrane.egress.EGRESS_ALLOW_LABEL`). The **decision core**
+(`policy_from_label`) already consumes that label and is unit-tested — so per-run
+scoping is supported and audited.
+
+What this reference shell wires today: it resolves the allowlist from the static
+`EGRESS_ALLOWLIST` env (the compose bootstrap). Mapping a *source container* to
+its per-run label needs a Docker-API lookup by source IP, which requires the proxy
+to reach the Docker API — a deployment integration that is intentionally **not**
+enabled by default. `_allowlist_for_source` in `proxy.py` is that seam: implement
+the per-source lookup there and per-run least-privilege is live, with no change to
+the audited decision core. Until then the proxy enforces the static allowlist
+(empty → deny).
 
 ## Network placement
 

@@ -235,6 +235,22 @@ def test_dockerfile_pin_parser() -> None:
     real = "FROM python:3.11-slim@sha256:" + "a" * 64 + "\n"
     assert _dockerfile_is_pinned(real) is True
     assert _dockerfile_is_pinned("FROM python:3.11-slim\n") is False  # floating tag, no digest
+    assert _dockerfile_is_pinned("") is False  # no FROM at all
+
+
+def test_dockerfile_pin_parser_multistage_requires_all_stages_pinned() -> None:
+    # A pinned builder + an UNPINNED runtime stage must NOT read as pinned: the
+    # runtime stage is what ships (the false-OK a supply-chain gate must avoid).
+    builder_pinned_runtime_floating = (
+        "FROM golang@sha256:" + "a" * 64 + " AS build\n"
+        "FROM python:3.11-slim\n"  # floating tag — unpinned
+    )
+    assert _dockerfile_is_pinned(builder_pinned_runtime_floating) is False
+    both_pinned = (
+        "FROM golang@sha256:" + "a" * 64 + " AS build\n"
+        "FROM python:3.11-slim@sha256:" + "b" * 64 + "\n"
+    )
+    assert _dockerfile_is_pinned(both_pinned) is True
 
 
 def test_vendored_egress_proxy_dockerfile_exists_and_is_buildable_source() -> None:
