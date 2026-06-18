@@ -88,7 +88,9 @@ class LocalMemoryClient:
     def __init__(self) -> None:
         self._memories: dict[str, Memory] = {}
         self._edges: dict[str, list[tuple[str, str]]] = {}
-        self._feedback: list[FeedbackRecord] = []  # #90: retrieval-quality side lane
+        # #90: retrieval-quality side lane, keyed by memory_id like _edges — O(1)
+        # record + lookup, and the scan stays bounded to one memory's records.
+        self._feedback: dict[str, list[FeedbackRecord]] = {}
         self._ids = itertools.count(1)
 
     async def remember(
@@ -170,16 +172,23 @@ class LocalMemoryClient:
         Stored in a side lane separate from ``_memories``, so feedback never surfaces
         via ``recall``. Unknown ``memory_id`` raises ``KeyError`` — fail-closed, no
         silent record against a bad id (mirrors ``promote``).
+
+        The lane is an **append-only journal** (like the ``_edges`` journal): a
+        re-recorded ``(memory_id, query)`` is kept as a second record, not
+        deduplicated or overwritten. A consumer that needs a single verdict must
+        define its own reduction (e.g. weigh all records / last-wins) — this store
+        deliberately keeps every datapoint.
         """
         if memory_id not in self._memories:
             raise KeyError(memory_id)
-        self._feedback.append(
+        self._feedback.setdefault(memory_id, []).append(
             FeedbackRecord(memory_id=memory_id, query=query, helpful=helpful)
         )
 
     def feedback_for(self, memory_id: str) -> list[FeedbackRecord]:
-        """Host-side inspection of the feedback lane for one memory (like ``edges_of``)."""
-        return [f for f in self._feedback if f.memory_id == memory_id]
+        """Host-side inspection of the feedback lane for one memory — O(1) keyed
+        lookup, returns a copy (like ``edges_of``)."""
+        return list(self._feedback.get(memory_id, []))
 
 
 class QuarantinedMemoryClient:

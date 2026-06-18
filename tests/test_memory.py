@@ -115,6 +115,27 @@ async def test_feedback_for_filters_by_memory() -> None:
     assert [f.helpful for f in mc.feedback_for(b)] == [True]
 
 
+async def test_feedback_is_an_append_only_journal() -> None:
+    # Same (memory_id, query) twice with opposite verdicts: both are kept (no dedup /
+    # last-wins) — the documented journal contract. Consumers define their own reduce.
+    mc = LocalMemoryClient()
+    a = await mc.remember("alpha")
+    mc.record_feedback(a, query="q", helpful=True)
+    mc.record_feedback(a, query="q", helpful=False)
+
+    assert [f.helpful for f in mc.feedback_for(a)] == [True, False]
+
+
+async def test_feedback_for_returns_a_copy_not_a_live_alias() -> None:
+    mc = LocalMemoryClient()
+    a = await mc.remember("alpha")
+    mc.record_feedback(a, query="q", helpful=True)
+
+    got = mc.feedback_for(a)
+    got.clear()  # mutating the returned list must not affect the store
+    assert len(mc.feedback_for(a)) == 1
+
+
 # --- memory reachability gate (v0.2-A6) -----------------------------------
 # The startup gate is no longer "the brain requires MCP". It is "memory is
 # reachable + authenticated via the CLI" — brain-independent, fail-closed.
