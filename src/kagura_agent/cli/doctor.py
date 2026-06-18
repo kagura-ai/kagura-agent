@@ -24,13 +24,19 @@ from here*, matching kagura-engineer's doctor.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from kagura_agent.core.brain.kagura_brain_engine import (
+    kagura_brain_available,
+    resolve_kagura_brain_backend,
+)
 from kagura_agent.core.brain.sdk_engine import claude_sdk_available
+from kagura_agent.core.brain.select import resolve_brain_backend
 from kagura_agent.mcp.memory_cloud import memory_reachable
 from kagura_agent.membrane.lease import Budget
 from kagura_agent.membrane.registry import ProviderSpec, kind_schema, present_suffix_field
@@ -86,15 +92,56 @@ def check_memory(*, reachable: bool) -> CheckResult:
     )
 
 
-def check_brain(*, sdk_available: bool, env: Mapping[str, str]) -> CheckResult:
-    """SDK presence + which auth mode the env would resolve to.
+def check_brain(
+    *,
+    sdk_available: bool,
+    env: Mapping[str, str],
+    backend: str = "sdk",
+    kagura_brain_available: bool = False,
+    kagura_backend: str = "claude",
+    kagura_cli_present: bool = False,
+) -> CheckResult:
+    """The selected brain backend's dependency + (for the SDK) its auth mode.
 
-    The SDK being absent is a hard FAIL (the brain cannot run). Auth is softer:
-    ``ANTHROPIC_API_KEY`` *overrides* subscription auth (README L127), which is a
-    surprise worth a WARN; a bare ``CLAUDE_CODE_SUBSCRIPTION`` is the happy path;
-    and neither-signal is "can't verify" (a CLI subscription cache may still
-    exist) → WARN, not FAIL.
+    Backend-aware so doctor predicts the *actual* run: when ``KAGURA_AGENT_BRAIN``
+    selects the kagura-brain backend, the dependency that matters is the ``brain``
+    extra, not the claude SDK. ``backend`` defaults to ``sdk`` so the existing
+    SDK-path behaviour (and its callers/tests) are unchanged.
+
+    SDK path: the SDK being absent is a hard FAIL. Auth is softer:
+    ``ANTHROPIC_API_KEY`` *overrides* subscription auth (README L127), a surprise
+    worth a WARN; a bare ``CLAUDE_CODE_SUBSCRIPTION`` is the happy path; neither
+    signal is "can't verify" (a CLI subscription cache may still exist) → WARN.
     """
+    if backend == "kagura-brain":
+        if not kagura_brain_available:
+            return CheckResult(
+                "brain",
+                FAIL,
+                "kagura-brain backend selected (KAGURA_AGENT_BRAIN) but the 'brain' "
+                "extra is not installed",
+                hint="install it: `uv run --extra brain ...` or "
+                "`pip install 'kagura-agent[brain]'`",
+            )
+        if not kagura_cli_present:
+            # The backend shells out to the claude/codex CLI; a missing binary is a
+            # definitely-broken, run-blocking capability → FAIL, not WARN (doctor
+            # predicts the run, matching kagura-engineer's check_claude/check_codex).
+            return CheckResult(
+                "brain",
+                FAIL,
+                f"kagura-brain backend selected but the {kagura_backend!r} CLI it "
+                "shells out to is not on PATH",
+                hint=f"install + log in the `{kagura_backend}` CLI",
+            )
+        return CheckResult(
+            "brain",
+            WARN,
+            f"kagura-brain backend ({kagura_backend}) present; auth is via the "
+            "underlying CLI (subscription/BYOK) and is not verifiable here",
+            hint="confirm `claude` is logged in (claude backend) or KAGURA_BRAIN_API_KEY "
+            "+ endpoint are set (codex/BYOK)",
+        )
     if not sdk_available:
         return CheckResult(
             "brain",
@@ -169,10 +216,18 @@ def _egress_configured(*, path: Path = _COMPOSE_PATH) -> bool:  # pragma: no cov
     return path.is_file()
 
 
+def _cli_on_path(name: str) -> bool:  # pragma: no cover - PATH lookup
+    """Whether a CLI binary (`claude` / `codex`) the kagura-brain backend shells
+    out to is resolvable on PATH."""
+    return shutil.which(name) is not None
+
+
 def run_doctor(
     *,
     memory_probe: Callable[[], bool] = memory_reachable,
     sdk_probe: Callable[[], bool] = claude_sdk_available,
+    kagura_brain_probe: Callable[[], bool] = kagura_brain_available,
+    kagura_cli_probe: Callable[[str], bool] = _cli_on_path,
     docker_probe: Callable[[], bool] = _docker_available,
     egress_probe: Callable[[], bool] = _egress_configured,
     env: Mapping[str, str] | None = None,
@@ -197,9 +252,37 @@ def run_doctor(
     # check and the per-provider checks render the SAME severity for a *_keyring
     # reference on a host without the extra (both WARN, never one WARN + one FAIL).
     keyring_present = _keyring_available()
+    # Backend-aware brain check (doctor predicts the run). An invalid
+    # KAGURA_AGENT_BRAIN / KAGURA_AGENT_BRAIN_BACKEND is reported as a brain FAIL
+    # here, not a doctor crash. For the kagura-brain backend the underlying
+    # claude/codex CLI binary is probed too (it is the real run-blocking dep).
+    try:
+        backend = resolve_brain_backend(resolved_env)
+        if backend == "kagura-brain":
+            kbackend = resolve_kagura_brain_backend(resolved_env)
+            brain_result = check_brain(
+                sdk_available=sdk_probe(),
+                env=resolved_env,
+                backend=backend,
+                kagura_brain_available=kagura_brain_probe(),
+                kagura_backend=kbackend,
+                kagura_cli_present=kagura_cli_probe(kbackend),
+            )
+        else:
+            brain_result = check_brain(
+                sdk_available=sdk_probe(), env=resolved_env, backend=backend
+            )
+    except ValueError as exc:
+        brain_result = CheckResult(
+            "brain",
+            FAIL,
+            f"invalid brain backend config: {exc}",
+            hint="set KAGURA_AGENT_BRAIN to 'sdk'/'kagura-brain' and "
+            "KAGURA_AGENT_BRAIN_BACKEND to 'claude'/'codex' (or unset them)",
+        )
     results = [
         check_memory(reachable=memory_probe()),
-        check_brain(sdk_available=sdk_probe(), env=resolved_env),
+        brain_result,
         check_docker(available=docker_probe()),
         check_egress(configured=egress_probe()),
         check_secret_backends(registry, keyring_available=keyring_present),

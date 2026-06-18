@@ -156,6 +156,30 @@ def ensure_memory_reachable(*, reachable: bool) -> None:
         )
 
 
+#: Subprocess timeout for the `kagura auth token` probe. The real kagura CLI is
+#: heavy (kagura-ai + crypto + google-auth imports) and mints/refreshes the token
+#: over the network, so a cold call measures ~25-30s on Windows — a 15s cap timed
+#: out *every* time and falsely reported memory unreachable, making the agent
+#: unusable. Sized with generous headroom over the observed latency; override via
+#: KAGURA_MEMORY_PROBE_TIMEOUT for an unusually slow host. The gate stays
+#: fail-closed (a real timeout still returns False).
+_TOKEN_PROBE_TIMEOUT_SEC = 60
+
+
+def _token_probe_timeout() -> float:
+    """The probe timeout (seconds), env-overridable, fail-safe to the default."""
+    import os
+
+    raw = os.environ.get("KAGURA_MEMORY_PROBE_TIMEOUT", "").strip()
+    if not raw:
+        return _TOKEN_PROBE_TIMEOUT_SEC
+    try:
+        value = float(raw)
+    except ValueError:
+        return _TOKEN_PROBE_TIMEOUT_SEC
+    return value if value > 0 else _TOKEN_PROBE_TIMEOUT_SEC
+
+
 def memory_reachable() -> bool:  # pragma: no cover - shells out to the kagura CLI
     """Whether memory is reachable: can the host mint a token via the CLI?
 
@@ -171,7 +195,7 @@ def memory_reachable() -> bool:  # pragma: no cover - shells out to the kagura C
         proc = subprocess.run(
             ["kagura", "auth", "token"],
             capture_output=True,
-            timeout=15,
+            timeout=_token_probe_timeout(),
         )
     except (OSError, subprocess.SubprocessError):
         return False

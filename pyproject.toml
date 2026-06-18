@@ -12,6 +12,11 @@ dependencies = []
 # Real brain (subscription-wrapped Claude Code CLI). Optional so the core +
 # tests run without network or the SDK installed — the seam is a protocol.
 claude = ["claude-agent-sdk>=0.1.0"]
+# Alternate brain: kagura-brain (the sibling claude/codex one-shot wrapper, also
+# used by kagura-engineer). A SECOND ClaudeEngine behind the same protocol —
+# selected per deploy via KAGURA_AGENT_BRAIN=kagura-brain; SDK stays the default.
+# Optional, so a cross-repo dependency is opt-in and the core stays dep-free.
+brain = ["kagura-brain>=0.4.1,<0.5"]
 # Cockpit transports — pure additions on top of the Transport protocol.
 slack = ["slack-bolt>=1.18"]
 discord = ["discord.py>=2.3"]
@@ -61,7 +66,7 @@ packages = ["kagura_agent"]
 # (which strict's warn_unused_ignores flips to an error wherever a dep happens to
 # be present). The claude SDK stays on its own inline ignore by design.
 [[tool.mypy.overrides]]
-module = ["boto3", "google.*", "jwt", "httpx", "requests.*", "discord", "discord.*", "keyring"]
+module = ["boto3", "google.*", "jwt", "httpx", "requests.*", "discord", "discord.*", "keyring", "kagura_brain", "kagura_brain.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]
