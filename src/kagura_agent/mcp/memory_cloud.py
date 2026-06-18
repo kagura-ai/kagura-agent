@@ -26,6 +26,7 @@ TRUSTED_TIER = "trusted"
 #: probabilistic ``recall``. ``on_recall`` = the default; only via ``recall``.
 ALWAYS_DELIVERY = "always"
 ON_RECALL_DELIVERY = "on_recall"
+_VALID_DELIVERY = (ALWAYS_DELIVERY, ON_RECALL_DELIVERY)
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,14 @@ class LocalMemoryClient:
         trust_tier: str = "trusted",
         delivery_mode: str = ON_RECALL_DELIVERY,
     ) -> str:
+        # Validate the delivery mode at the write boundary — fail-CLOSED for the
+        # standing-guardrail lane (#88). Without this, a host typo ("Always") would
+        # be stored verbatim and silently never pin (load_pinned matches on exact
+        # equality), dropping a guardrail the operator believes is always-on.
+        if delivery_mode not in _VALID_DELIVERY:
+            raise ValueError(
+                f"unknown delivery_mode {delivery_mode!r} (expected one of {_VALID_DELIVERY})"
+            )
         mid = f"m{next(self._ids)}"
         self._memories[mid] = Memory(
             id=mid,

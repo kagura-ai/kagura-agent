@@ -68,6 +68,14 @@ async def test_load_pinned_is_query_independent_and_empty_when_none() -> None:
     assert len(await mc.load_pinned()) == 1
 
 
+async def test_remember_rejects_unknown_delivery_mode() -> None:
+    # Fail-CLOSED for the guardrail lane: a typo'd mode must raise, not be stored
+    # verbatim and then silently never pin.
+    mc = LocalMemoryClient()
+    with pytest.raises(ValueError, match="unknown delivery_mode"):
+        await mc.remember("escalate over $1000", delivery_mode="Always")  # casing typo
+
+
 # --- memory reachability gate (v0.2-A6) -----------------------------------
 # The startup gate is no longer "the brain requires MCP". It is "memory is
 # reachable + authenticated via the CLI" — brain-independent, fail-closed.
