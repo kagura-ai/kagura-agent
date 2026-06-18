@@ -79,6 +79,23 @@ async def ground_prompt(memory: MemoryClient, prompt: str) -> str:
     return f"{preamble}\n\nTask:\n{prompt}"
 
 
+async def load_guardrails(memory: MemoryClient) -> str:
+    """Render the deterministic pinned Goal/Guardrail set as a prompt preamble (#88).
+
+    Unlike ``ground_prompt`` (probabilistic recall of *relevant* context), this loads
+    the **complete pinned set every turn** via ``load_pinned`` — standing guardrails
+    must never be missed by a recall miss. Returns "" when nothing is pinned (no
+    empty block). The pinned set is host-curated; a confined agent cannot pin its own
+    writes (``QuarantinedMemoryClient`` forces ``on_recall``), so this lane can't be
+    self-poisoned into standing instructions.
+    """
+    pinned = await memory.load_pinned()
+    if not pinned:
+        return ""
+    lines = [f"- {m.text}" for m in pinned]
+    return "Standing guardrails (always apply):\n" + "\n".join(lines)
+
+
 async def remember_outcome(
     memory: MemoryClient,
     *,
@@ -113,15 +130,23 @@ async def ground_and_run(
 ) -> SessionResult:
     """``drive_task`` wrapped in B's memory grounding when a memory client is given.
 
-    Recall → run/resume → remember. With ``memory=None`` it degrades to a plain
-    ``drive_task`` (A only), so the CLI can run with or without the backbone wired.
+    Guardrails (deterministic, pinned — #88) → recall (probabilistic) → run/resume →
+    remember. The two read lanes are distinct: ``load_guardrails`` always loads the
+    complete pinned set; ``ground_prompt`` recalls only *relevant* trusted context.
+    With ``memory=None`` it degrades to a plain ``drive_task`` (A only), so the CLI
+    can run with or without the backbone wired.
 
     Persisting the summary is **best-effort**: the task already succeeded and its
     checkpoint is durable by this point, so a memory-write failure is logged, not
     raised — otherwise a backbone hiccup would surface a *completed* run as failed
     and a retry would needlessly resume (re-execute) the finished turn.
     """
-    effective = await ground_prompt(memory, prompt) if memory is not None else prompt
+    if memory is not None:
+        guardrails = await load_guardrails(memory)
+        grounded = await ground_prompt(memory, prompt)
+        effective = f"{guardrails}\n\n{grounded}" if guardrails else grounded
+    else:
+        effective = prompt
     result = await drive_task(brain, store, session_id=session_id, prompt=effective)
     if memory is not None:
         try:

@@ -21,6 +21,12 @@ from typing import Protocol, runtime_checkable
 QUARANTINE_TIER = "quarantine"
 TRUSTED_TIER = "trusted"
 
+#: Delivery mode (#88) — orthogonal to trust. ``always`` = pinned: deterministically
+#: surfaced every turn via ``load_pinned()`` (Goal/Guardrail), never left to
+#: probabilistic ``recall``. ``on_recall`` = the default; only via ``recall``.
+ALWAYS_DELIVERY = "always"
+ON_RECALL_DELIVERY = "on_recall"
+
 
 @dataclass(frozen=True)
 class Memory:
@@ -28,12 +34,18 @@ class Memory:
     text: str
     tags: tuple[str, ...] = ()
     trust_tier: str = TRUSTED_TIER
+    delivery_mode: str = ON_RECALL_DELIVERY
 
 
 @runtime_checkable
 class MemoryClient(Protocol):
     async def remember(
-        self, text: str, *, tags: tuple[str, ...] = (), trust_tier: str = "trusted"
+        self,
+        text: str,
+        *,
+        tags: tuple[str, ...] = (),
+        trust_tier: str = "trusted",
+        delivery_mode: str = ON_RECALL_DELIVERY,
     ) -> str: ...
 
     async def recall(
@@ -43,6 +55,14 @@ class MemoryClient(Protocol):
         trusted_only: bool = False,
         tags: tuple[str, ...] = (),
     ) -> list[Memory]: ...
+
+    async def load_pinned(self) -> list[Memory]:
+        """The deterministic, unranked counterpart to ``recall`` (#88): the COMPLETE
+        set of ``delivery_mode="always"`` (pinned) memories, every call. Goal /
+        Guardrail / critical-policy memories load this way so they are never missed
+        by probabilistic ``recall`` (the structural flaw deterministic delivery
+        closes). Mirrors the SDK's ``load_pinned`` (kagura-memory-python-sdk#172)."""
+        ...
 
     async def create_edge(self, src_id: str, dst_id: str, *, type: str) -> None: ...
 
@@ -56,10 +76,21 @@ class LocalMemoryClient:
         self._ids = itertools.count(1)
 
     async def remember(
-        self, text: str, *, tags: tuple[str, ...] = (), trust_tier: str = "trusted"
+        self,
+        text: str,
+        *,
+        tags: tuple[str, ...] = (),
+        trust_tier: str = "trusted",
+        delivery_mode: str = ON_RECALL_DELIVERY,
     ) -> str:
         mid = f"m{next(self._ids)}"
-        self._memories[mid] = Memory(id=mid, text=text, tags=tuple(tags), trust_tier=trust_tier)
+        self._memories[mid] = Memory(
+            id=mid,
+            text=text,
+            tags=tuple(tags),
+            trust_tier=trust_tier,
+            delivery_mode=delivery_mode,
+        )
         return mid
 
     async def recall(
@@ -80,6 +111,12 @@ class LocalMemoryClient:
             if any(term in haystack for term in terms):
                 results.append(mem)
         return results
+
+    async def load_pinned(self) -> list[Memory]:
+        # Deterministic + unranked: the COMPLETE pinned set, insertion order, every
+        # call. No query, no ranking, no trust filter — pinned guardrails are
+        # host-curated and load whole (#88).
+        return [m for m in self._memories.values() if m.delivery_mode == ALWAYS_DELIVERY]
 
     async def create_edge(self, src_id: str, dst_id: str, *, type: str) -> None:
         self._edges.setdefault(src_id, []).append((dst_id, type))
@@ -102,25 +139,35 @@ class LocalMemoryClient:
 class QuarantinedMemoryClient:
     """The confined ``MemoryClient`` the membrane leases into the agent container.
 
-    Every write is forced into the quarantine tier — the caller-supplied
-    ``trust_tier`` is intentionally ignored, so a hijacked agent cannot mint a
-    trusted memory by simply asking for one. There is no promote path here;
-    graduating a quarantined write into the trusted backbone is host-side only
-    (``LocalMemoryClient.promote``), gated by graduation HITL (#15). This mirrors
-    the ``write_approved`` / broker write-lock posture (#12/#20): the agent's
-    self-asserted trust tier is never trusted. ``recall``/``create_edge`` delegate
-    unchanged — confinement is on the write path only.
+    Every write is forced into the quarantine tier AND to ``on_recall`` delivery —
+    the caller-supplied ``trust_tier`` and ``delivery_mode`` are intentionally
+    ignored, so a hijacked agent can neither mint a trusted memory nor **pin its
+    own write** as an always-loaded standing instruction (#88). There is no promote
+    path here; graduating a quarantined write into the trusted backbone is host-side
+    only (``LocalMemoryClient.promote``), gated by graduation HITL (#15). This
+    mirrors the ``write_approved`` / broker write-lock posture (#12/#20): the
+    agent's self-asserted trust/delivery is never honoured. ``recall`` /
+    ``load_pinned`` / ``create_edge`` delegate unchanged — confinement is on the
+    write path only (reading the host-curated pinned set is safe).
     """
 
     def __init__(self, inner: MemoryClient) -> None:
         self._inner = inner
 
     async def remember(
-        self, text: str, *, tags: tuple[str, ...] = (), trust_tier: str = TRUSTED_TIER
+        self,
+        text: str,
+        *,
+        tags: tuple[str, ...] = (),
+        trust_tier: str = TRUSTED_TIER,
+        delivery_mode: str = ON_RECALL_DELIVERY,
     ) -> str:
-        # trust_tier is accepted (protocol parity) but IGNORED — fail-closed: the
-        # agent's writes always land quarantined, regardless of what it requests.
-        return await self._inner.remember(text, tags=tags, trust_tier=QUARANTINE_TIER)
+        # trust_tier AND delivery_mode are accepted (protocol parity) but IGNORED —
+        # fail-closed: the agent's writes always land quarantined and never pinned,
+        # regardless of what it requests. Pinning a guardrail is host-side only.
+        return await self._inner.remember(
+            text, tags=tags, trust_tier=QUARANTINE_TIER, delivery_mode=ON_RECALL_DELIVERY
+        )
 
     async def recall(
         self,
@@ -130,6 +177,11 @@ class QuarantinedMemoryClient:
         tags: tuple[str, ...] = (),
     ) -> list[Memory]:
         return await self._inner.recall(query, trusted_only=trusted_only, tags=tags)
+
+    async def load_pinned(self) -> list[Memory]:
+        # Read path: the pinned set is host-curated (the agent cannot pin), so
+        # exposing it to the confined agent is safe and is how guardrails reach it.
+        return await self._inner.load_pinned()
 
     async def create_edge(self, src_id: str, dst_id: str, *, type: str) -> None:
         await self._inner.create_edge(src_id, dst_id, type=type)

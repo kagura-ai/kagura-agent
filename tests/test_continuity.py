@@ -12,12 +12,13 @@ from kagura_agent.core.brain.base import (
     MessageEvent,
     Task,
 )
-from kagura_agent.mcp.memory_cloud import LocalMemoryClient
+from kagura_agent.mcp.memory_cloud import ALWAYS_DELIVERY, LocalMemoryClient
 from kagura_agent.patterns.checkpoint import InMemoryCheckpointStore
 from kagura_agent.patterns.continuity import (
     drive_task,
     ground_and_run,
     ground_prompt,
+    load_guardrails,
     remember_outcome,
     run_repl,
 )
@@ -130,6 +131,39 @@ async def test_ground_prompt_prepends_trusted_context() -> None:
     assert "Relevant context from prior work" in grounded
     assert "Caddyfile permission trap" in grounded
     assert grounded.endswith("Task:\ndeploy staging again")
+
+
+async def test_load_guardrails_formats_pinned_set() -> None:
+    memory = LocalMemoryClient()
+    await memory.remember("never promise refunds", delivery_mode=ALWAYS_DELIVERY)
+    await memory.remember("escalate over $1000 to a human", delivery_mode=ALWAYS_DELIVERY)
+
+    block = await load_guardrails(memory)
+
+    assert block.startswith("Standing guardrails (always apply):")
+    assert "- never promise refunds" in block
+    assert "- escalate over $1000 to a human" in block
+
+
+async def test_load_guardrails_empty_when_nothing_pinned() -> None:
+    memory = LocalMemoryClient()
+    await memory.remember("just a recall-only note")  # not pinned
+    assert await load_guardrails(memory) == ""
+
+
+async def test_ground_and_run_prepends_deterministic_guardrails() -> None:
+    brain = FakeBrain()
+    store = InMemoryCheckpointStore()
+    memory = LocalMemoryClient()
+    await memory.remember("never run rm -rf /", delivery_mode=ALWAYS_DELIVERY)  # pinned guardrail
+
+    await ground_and_run(brain, store, memory, session_id="s", prompt="clean up disk")
+
+    seen = brain.calls[0][0]
+    # guardrails lead the prompt (deterministic lane), ahead of the task
+    assert seen.startswith("Standing guardrails (always apply):")
+    assert "never run rm -rf /" in seen
+    assert "clean up disk" in seen
 
 
 async def test_ground_prompt_no_matches_returns_prompt_unchanged() -> None:
