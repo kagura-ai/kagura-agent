@@ -44,6 +44,7 @@ async def drive_task(
     *,
     session_id: str,
     prompt: str,
+    on_message: Callable[[str], None] | None = None,
 ) -> SessionResult:
     """Resume ``session_id`` if it has a saved checkpoint, else launch it fresh.
 
@@ -57,10 +58,14 @@ async def drive_task(
     That halves the store reads per resume turn AND closes the load-decide /
     re-load race (a checkpoint vanishing between the two reads no longer crashes
     the run with a spurious "no checkpoint to resume").
+
+    ``on_message`` streams each narration event live (the ``--verbose`` hook, #105).
     """
     prior = await store.load(session_id)
     session = Session(brain, store)
-    return await session.drive(Task(prompt=prompt, session_id=session_id), resume=prior)
+    return await session.drive(
+        Task(prompt=prompt, session_id=session_id), resume=prior, on_message=on_message
+    )
 
 
 async def ground_prompt(memory: MemoryClient, prompt: str) -> str:
@@ -152,6 +157,7 @@ async def ground_and_run(
     session_id: str,
     prompt: str,
     provenance: ProvenanceLog | None = None,
+    on_message: Callable[[str], None] | None = None,
 ) -> SessionResult:
     """``drive_task`` wrapped in B's memory grounding.
 
@@ -192,7 +198,9 @@ async def ground_and_run(
         effective = f"{guardrails}\n\n{body}"
     else:
         effective = grounded
-    result = await drive_task(brain, store, session_id=session_id, prompt=effective)
+    result = await drive_task(
+        brain, store, session_id=session_id, prompt=effective, on_message=on_message
+    )
     try:
         await remember_outcome(
             memory, session_id=session_id, prompt=prompt, result=result.text
@@ -212,6 +220,7 @@ async def run_repl(
     *,
     session_id: str,
     memory: MemoryClient,
+    on_message: Callable[[str], None] | None = None,
 ) -> None:
     """Drive a session over a stream of input ``lines`` until exhausted or quit.
 
@@ -235,7 +244,8 @@ async def run_repl(
             return
         try:
             result = await ground_and_run(
-                brain, store, memory, session_id=session_id, prompt=text
+                brain, store, memory, session_id=session_id, prompt=text,
+                on_message=on_message,
             )
         except Exception as exc:
             log.exception("repl turn failed for session %s", session_id)

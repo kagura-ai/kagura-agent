@@ -7,6 +7,7 @@ or drives individual tool calls — the brain owns its loop.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from kagura_agent.core.brain.base import (
@@ -39,13 +40,23 @@ class Session:
     async def run(self, task: Task) -> SessionResult:
         return await self._drive(task, resume=None)
 
-    async def drive(self, task: Task, *, resume: Checkpoint | None) -> SessionResult:
+    async def drive(
+        self,
+        task: Task,
+        *,
+        resume: Checkpoint | None,
+        on_message: Callable[[str], None] | None = None,
+    ) -> SessionResult:
         """Run ``task``, resuming from an already-loaded ``resume`` checkpoint when
         given (else a fresh launch). The public seam for callers that have already
         loaded the checkpoint (e.g. ``drive_task``) — it avoids the second store
         read ``resume(session_id, ...)`` would do, and the race that re-load opens.
+
+        ``on_message`` (if given) is called with each ``MessageEvent`` text **as it
+        streams** — the live-narration hook ``run --verbose`` wires (#105). The
+        messages are still collected into ``SessionResult.messages`` regardless.
         """
-        return await self._drive(task, resume=resume)
+        return await self._drive(task, resume=resume, on_message=on_message)
 
     async def resume(self, session_id: str, prompt: str) -> SessionResult:
         prior = await self._checkpoints.load(session_id)
@@ -53,7 +64,13 @@ class Session:
             raise SessionError(f"no checkpoint to resume for session {session_id!r}")
         return await self._drive(Task(prompt=prompt, session_id=session_id), resume=prior)
 
-    async def _drive(self, task: Task, *, resume: Checkpoint | None) -> SessionResult:
+    async def _drive(
+        self,
+        task: Task,
+        *,
+        resume: Checkpoint | None,
+        on_message: Callable[[str], None] | None = None,
+    ) -> SessionResult:
         messages: list[str] = []
         done: DoneEvent | None = None
         async for event in self._brain.run(task, resume=resume):
@@ -68,6 +85,8 @@ class Session:
                 continue
             if isinstance(event, MessageEvent):
                 messages.append(event.text)
+                if on_message is not None:
+                    on_message(event.text)  # live narration (#105)
             elif isinstance(event, DoneEvent):
                 done = event
         if done is None:
