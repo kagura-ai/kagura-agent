@@ -10,6 +10,7 @@ import pytest
 
 from kagura_agent.mcp.memory_cloud import (
     _TOKEN_PROBE_TIMEOUT_SEC,
+    ALWAYS_DELIVERY,
     LocalMemoryClient,
     MemoryClient,
     MemoryUnreachableError,
@@ -43,6 +44,36 @@ async def test_create_prevents_edge_links_memories() -> None:
     b = await mc.remember("apt install foo corrupted the container")
     await mc.create_edge(b, a, type="prevents")
     assert mc.edges_of(b) == [(a, "prevents")]
+
+
+# --- #88: deterministic delivery — load_pinned (the always-loaded counterpart) ---
+
+
+async def test_load_pinned_returns_only_always_delivery_memories() -> None:
+    mc = LocalMemoryClient()
+    await mc.remember("a normal recall-only note")  # default on_recall
+    g1 = await mc.remember("never promise refunds", delivery_mode=ALWAYS_DELIVERY)
+    g2 = await mc.remember("escalate to a human over $1000", delivery_mode=ALWAYS_DELIVERY)
+
+    pinned = await mc.load_pinned()
+    # Complete pinned set, deterministic — the on_recall note is excluded.
+    assert [m.id for m in pinned] == [g1, g2]
+
+
+async def test_load_pinned_is_query_independent_and_empty_when_none() -> None:
+    mc = LocalMemoryClient()
+    assert await mc.load_pinned() == []  # nothing pinned
+    await mc.remember("relevant to nothing typed", delivery_mode=ALWAYS_DELIVERY)
+    # No query at all — load_pinned returns it regardless of recall terms.
+    assert len(await mc.load_pinned()) == 1
+
+
+async def test_remember_rejects_unknown_delivery_mode() -> None:
+    # Fail-CLOSED for the guardrail lane: a typo'd mode must raise, not be stored
+    # verbatim and then silently never pin.
+    mc = LocalMemoryClient()
+    with pytest.raises(ValueError, match="unknown delivery_mode"):
+        await mc.remember("escalate over $1000", delivery_mode="Always")  # casing typo
 
 
 # --- memory reachability gate (v0.2-A6) -----------------------------------

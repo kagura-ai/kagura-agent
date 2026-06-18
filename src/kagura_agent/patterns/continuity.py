@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterable
 
 from kagura_agent.core.brain.base import BrainProvider, Task
 from kagura_agent.core.session import Session, SessionResult
-from kagura_agent.mcp.memory_cloud import QUARANTINE_TIER, MemoryClient
+from kagura_agent.mcp.memory_cloud import QUARANTINE_TIER, TRUSTED_TIER, MemoryClient
 from kagura_agent.patterns.checkpoint import CheckpointStore
 
 log = logging.getLogger(__name__)
@@ -79,6 +79,31 @@ async def ground_prompt(memory: MemoryClient, prompt: str) -> str:
     return f"{preamble}\n\nTask:\n{prompt}"
 
 
+async def load_guardrails(memory: MemoryClient) -> str:
+    """Render the deterministic pinned Goal/Guardrail set as a prompt preamble (#88).
+
+    Unlike ``ground_prompt`` (probabilistic recall of *relevant* context), this loads
+    the **complete pinned set every turn** via ``load_pinned`` — standing guardrails
+    must never be missed by a recall miss. Returns "" when nothing is pinned.
+
+    **Trust-gated, like every behaviour-influencing read:** only *trusted*-tier
+    pinned memories become a standing guardrail. ``load_pinned`` itself is the raw
+    primitive (the complete pinned set, SDK-faithful), but this lane is the most
+    authoritative slot in the prompt, so it applies the same provenance gate
+    ``ground_prompt`` uses (``trusted_only``) — defence in depth, so a host that
+    pins a non-trusted (e.g. externally-ingested) memory cannot turn it into an
+    always-apply instruction (OWASP LLM01/LLM03). The confinement that stops a
+    *confined agent* from pinning at all lives in ``QuarantinedMemoryClient`` (it
+    forces ``on_recall``); this gate is the read-side backstop, not a substitute
+    for wiring a confined client.
+    """
+    pinned = [m for m in (await memory.load_pinned()) if m.trust_tier == TRUSTED_TIER]
+    if not pinned:
+        return ""
+    lines = [f"- {m.text}" for m in pinned]
+    return "Standing guardrails (always apply):\n" + "\n".join(lines)
+
+
 async def remember_outcome(
     memory: MemoryClient,
     *,
@@ -113,15 +138,31 @@ async def ground_and_run(
 ) -> SessionResult:
     """``drive_task`` wrapped in B's memory grounding when a memory client is given.
 
-    Recall → run/resume → remember. With ``memory=None`` it degrades to a plain
-    ``drive_task`` (A only), so the CLI can run with or without the backbone wired.
+    Guardrails (deterministic, pinned — #88) → recall (probabilistic) → run/resume →
+    remember. The two read lanes are distinct: ``load_guardrails`` always loads the
+    complete pinned set; ``ground_prompt`` recalls only *relevant* trusted context.
+    With ``memory=None`` it degrades to a plain ``drive_task`` (A only), so the CLI
+    can run with or without the backbone wired.
 
     Persisting the summary is **best-effort**: the task already succeeded and its
     checkpoint is durable by this point, so a memory-write failure is logged, not
     raised — otherwise a backbone hiccup would surface a *completed* run as failed
     and a retry would needlessly resume (re-execute) the finished turn.
     """
-    effective = await ground_prompt(memory, prompt) if memory is not None else prompt
+    if memory is not None:
+        guardrails = await load_guardrails(memory)
+        grounded = await ground_prompt(memory, prompt)
+        if guardrails:
+            # Fence the task so guardrail bullets never run straight into it.
+            # ``ground_prompt`` returns the bare prompt on a recall miss (no
+            # "Task:" label); add the fence in that case so the host/task boundary
+            # is consistent whether or not recall hit.
+            body = grounded if grounded != prompt else f"Task:\n{prompt}"
+            effective = f"{guardrails}\n\n{body}"
+        else:
+            effective = grounded
+    else:
+        effective = prompt
     result = await drive_task(brain, store, session_id=session_id, prompt=effective)
     if memory is not None:
         try:
