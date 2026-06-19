@@ -14,9 +14,12 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kagura_agent.membrane.brain_container import DockerBrainBackend
 
 from kagura_agent.cli.doctor import (
     DOCTOR_FAIL_EXIT,
@@ -332,6 +335,41 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         choices=["memory", "transport"],
         help="show CLI-first guidance for memory or transport auth (default: both)",
     )
+    serve = sub.add_parser("serve", help="run the cockpit serve loop on a chat transport")
+    serve.add_argument(
+        "--transport", choices=["slack", "discord"], required=True,
+        help="chat transport to serve (the bot token is read from the host environment)",
+    )
+    serve.add_argument(
+        "--container", action="store_true",
+        help="run the brain INSIDE a hardened, egress-sealed container (#102); requires a "
+        "BYOK ANTHROPIC_API_KEY (subscription auth does not run in-container)",
+    )
+    serve.add_argument(
+        "--image", default="kagura-agent:agent",
+        help="agent brain image for --container (default: kagura-agent:agent)",
+    )
+    serve.add_argument(
+        "--project-root", default=".",
+        help="project root mounted READ-ONLY into the container (default: cwd)",
+    )
+    serve.add_argument(
+        "--egress", action="append", default=[], metavar="HOST",
+        help="additional egress-allowed host for --container (repeatable; api.anthropic.com "
+        "is always allowed)",
+    )
+    serve.add_argument(
+        "--operator-id", default=None,
+        help="restrict /kill and /approve to this sender id (single-user CLI: omit)",
+    )
+    serve.add_argument(
+        "--mcp-config", dest="mcp_config", default=None,
+        help="path to a JSON file of MCP server configs (non-memory MCP servers)",
+    )
+    serve.add_argument(
+        "--strict-mcp-config", dest="strict_mcp_config", action="store_true",
+        help="reject MCP servers not present in --mcp-config (no silent passthrough)",
+    )
     return parser.parse_args(list(argv))
 
 
@@ -431,6 +469,43 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
                 "in-memory storage"
             ) from exc
     return LocalMemoryClient()
+
+
+def build_container_backend(
+    env: Mapping[str, str],
+    *,
+    enabled: bool,
+    image: str,
+    project_root: str,
+    egress_allow: tuple[str, ...] = (),
+) -> DockerBrainBackend | None:
+    """Build the brain-in-container backend for ``serve`` (#102/#116), or None.
+
+    With ``enabled`` false the cockpit runs the brain in-process (today's default).
+    When enabled it returns a :class:`DockerBrainBackend` whose ``resolve_byok``
+    reads ``ANTHROPIC_API_KEY`` from ``env`` host-side.
+
+    **Fail-closed (#113):** container execution authenticates BYOK — subscription
+    auth cannot run inside the container — so ``--container`` without an
+    ``ANTHROPIC_API_KEY`` refuses to start rather than silently falling back to
+    in-process and dropping the isolation the operator asked for.
+    """
+    if not enabled:
+        return None
+    if not env.get("ANTHROPIC_API_KEY", "").strip():
+        raise ValueError(
+            "--container requires a BYOK ANTHROPIC_API_KEY: the in-container brain cannot "
+            "use subscription auth (set ANTHROPIC_API_KEY, or drop --container to run "
+            "the brain in-process)"
+        )
+    from kagura_agent.membrane.brain_container import DockerBrainBackend
+
+    return DockerBrainBackend(
+        image=image,
+        project_root=project_root,
+        resolve_byok=lambda: env.get("ANTHROPIC_API_KEY", ""),
+        egress_allow=egress_allow,
+    )
 
 
 def _narrate(text: str) -> None:  # pragma: no cover - I/O
@@ -735,7 +810,135 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             print(f"repl failed: {exc}", file=sys.stderr)
             return 2
         return 0
+    if ns.command == "serve":
+        return _serve(ns)
     return 1
+
+
+def _serve(ns: argparse.Namespace) -> int:  # pragma: no cover - glue (real transport SDKs + loop)
+    """Assemble the cockpit and run its serve loop on the chosen chat transport.
+
+    Deployment edge: builds the brain (``make_brain``), a persistent checkpoint
+    store, the session registry, a ``Launcher`` (for ``/kill``), memory, and —
+    when ``--container`` — the :class:`DockerBrainBackend` (#102/#116), then runs
+    ``cockpit.serve()`` concurrently with the transport's own connection loop. The
+    BYOK fail-closed gate (``build_container_backend``) is the one tested seam; the
+    transport SDK construction needs the real slack-bolt / discord.py + tokens.
+    """
+    import asyncio
+    import contextlib
+
+    from kagura_agent.cockpit.core import Cockpit
+    from kagura_agent.cockpit.registry import SessionRegistry
+    from kagura_agent.core.brain.kagura_brain_engine import resolve_kagura_brain_backend
+    from kagura_agent.core.brain.select import make_brain, resolve_brain_backend
+    from kagura_agent.mcp.memory_cloud import ensure_memory_reachable, memory_reachable
+    from kagura_agent.membrane.runtime import DockerRuntime, Launcher
+    from kagura_agent.patterns.checkpoint import FileCheckpointStore
+
+    logging.basicConfig(level=resolve_log_level(getattr(ns, "log_level", None), os.environ))
+    project_root = os.path.abspath(ns.project_root)
+    # The SAME run/repl startup preamble (so the three entry points share one
+    # fail-closed contract): validate the brain backend, the redefined memory gate
+    # (no silent memory-less degrade), and load MCP config — all up front, before
+    # the long-lived loop accepts any traffic.
+    try:
+        if resolve_brain_backend(os.environ) == "kagura-brain":
+            resolve_kagura_brain_backend(os.environ)
+        mcp_servers = load_mcp_config(ns.mcp_config)
+        container = build_container_backend(
+            os.environ,
+            enabled=ns.container,
+            image=ns.image,
+            project_root=project_root,
+            egress_allow=tuple(ns.egress),
+        )
+        transport, transport_run = _build_transport(
+            ns.transport, os.environ, operator_id=ns.operator_id
+        )
+        ensure_memory_reachable(reachable=memory_reachable())
+        brain = make_brain(
+            os.environ, mcp_servers=mcp_servers, strict_mcp_config=ns.strict_mcp_config
+        )
+        memory = make_memory_client()
+        checkpoints = FileCheckpointStore(resolve_state_dir(os.environ))
+    except (BrainUnavailable, MemoryUnreachableError) as exc:
+        # A missing runtime dependency / unreachable memory: exit 3 (matches run/repl).
+        print(str(exc), file=sys.stderr)
+        return 3
+    except (ValueError, KeyError, OSError) as exc:
+        # A config error (bad BYOK key / brain backend / mcp-config / transport
+        # token): exit 2 with a clean message, never a raw traceback.
+        print(f"serve: {exc}", file=sys.stderr)
+        return 2
+
+    # Cockpit / registry / launcher construction is pure wiring (no config errors),
+    # so it lives outside the gate — keeping the try narrow to the config sources
+    # rather than masking a programming bug there as a config error.
+    cockpit = Cockpit(
+        transport,
+        brain,
+        checkpoints,
+        registry=SessionRegistry(),
+        launcher=Launcher(DockerRuntime(), project_root=project_root),
+        memory=memory,
+        operator_id=ns.operator_id,
+        container=container,
+    )
+
+    async def _run() -> None:
+        # The transport's connection loop and the cockpit consumer run together;
+        # when EITHER finishes (returns or raises) cancel the other — gather() would
+        # instead hang on a still-running sibling after the first one ends.
+        tasks = [asyncio.ensure_future(transport_run()), asyncio.ensure_future(cockpit.serve())]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+            # Await the cancellation so the transport's connection (e.g. the discord
+            # websocket / aiohttp session) tears down cleanly instead of leaking with
+            # a "Task was destroyed but it is pending" warning.
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        for task in done:
+            task.result()  # surface an exception from whichever finished first
+
+    asyncio.run(_run())
+    return 0
+
+
+def _build_transport(  # pragma: no cover - needs slack-bolt / discord.py + a live workspace
+    name: str, env: Mapping[str, str], *, operator_id: str | None
+) -> tuple[Any, Callable[[], Awaitable[Any]]]:
+    """Construct the chat transport + a coroutine that runs its connection loop.
+
+    Tokens and the bot user id are read from the host environment (never baked):
+    Slack needs ``SLACK_BOT_TOKEN`` / ``SLACK_APP_TOKEN`` / ``SLACK_BOT_USER_ID``;
+    Discord needs ``DISCORD_BOT_TOKEN`` / ``DISCORD_BOT_USER_ID``. Reading the bot
+    id from config sidesteps the connect-then-discover ordering the SDKs impose.
+    """
+    if name == "slack":
+        from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+        from slack_bolt.async_app import AsyncApp
+
+        from kagura_agent.cockpit.transports.slack import SlackTransport
+
+        app = AsyncApp(token=env["SLACK_BOT_TOKEN"])
+        slack = SlackTransport(app, env["SLACK_BOT_USER_ID"], operator_id=operator_id)
+        handler = AsyncSocketModeHandler(app, env["SLACK_APP_TOKEN"])
+        return slack, handler.start_async
+
+    import discord
+
+    from kagura_agent.cockpit.transports.discord import DiscordTransport
+
+    # Read the token EAGERLY (like slack) so a missing one is a build-time KeyError
+    # the serve gate catches — not a raw traceback once the loop has started.
+    token = env["DISCORD_BOT_TOKEN"]
+    intents = discord.Intents.default()
+    intents.message_content = True
+    client = discord.Client(intents=intents)
+    discord_tp = DiscordTransport(client, int(env["DISCORD_BOT_USER_ID"]), operator_id=operator_id)
+    return discord_tp, lambda: client.start(token)
 
 
 def _stdin_lines(prompt: str) -> Iterable[str]:  # pragma: no cover - interactive stdin
