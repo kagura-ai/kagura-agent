@@ -40,6 +40,26 @@ class SessionRegistry:
             granted_caps=granted_caps,
         )
 
+    def set_container(self, thread_id: str, *, container_id: str, image: str | None = None) -> None:
+        """Record the live container for a thread **in place** (#102).
+
+        Used when a run starts its container: it updates ``container_id`` / ``image``
+        and re-arms ``status`` to ``running`` WITHOUT replacing the whole record, so
+        a re-launch (a CONTINUE that spins a fresh container over an existing
+        session) preserves ``granted_caps`` and any other accrued state — unlike
+        :meth:`add`, which is a full replace. Creates the record if absent (a fresh
+        LAUNCH whose session was not registered yet)."""
+        rec = self._records.get(thread_id)
+        if rec is None:
+            self._records[thread_id] = SessionRecord(
+                thread_id=thread_id, container_id=container_id, image=image
+            )
+            return
+        rec.container_id = container_id
+        if image is not None:
+            rec.image = image
+        rec.status = "running"
+
     def has(self, thread_id: str) -> bool:
         return thread_id in self._records
 

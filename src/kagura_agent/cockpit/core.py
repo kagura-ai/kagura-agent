@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Set
 from typing import Protocol
 
 from kagura_agent.cockpit.approval import PendingApprovalRegistry
@@ -19,8 +20,10 @@ from kagura_agent.cockpit.intent import Intent, classify
 from kagura_agent.cockpit.registry import SessionRegistry
 from kagura_agent.cockpit.transports.base import Event, Transport, click_authorized
 from kagura_agent.core.brain.base import BrainProvider, Task
+from kagura_agent.core.brain.container import BrainContainerSession, ContainerBrainProvider
 from kagura_agent.core.session import Session
 from kagura_agent.mcp.memory_cloud import MemoryClient
+from kagura_agent.membrane.launcher import LaunchSpec, validate_spec
 from kagura_agent.patterns.checkpoint import CheckpointStore
 
 log = logging.getLogger(__name__)
@@ -28,6 +31,28 @@ log = logging.getLogger(__name__)
 
 class _Killer(Protocol):
     async def kill(self, container_id: str) -> None: ...
+
+
+class _ContainerBackend(Protocol):
+    """Launches the brain in a hardened container and streams it back (#102 PR2).
+
+    Deliberately separate from ``_launcher`` (which only *kills*): a deployment
+    that runs the brain in-container wires BOTH — this backend to launch + stream
+    + enumerate, and the launcher to kill — so the kill-only launchers that
+    existing callers pass keep working unchanged. ``spec_for`` builds the per-run
+    :class:`LaunchSpec` (image, project-root RO mount, leased creds env, per-run
+    egress); ``start`` validates-then-runs the container ATTACHED and streams its
+    stdout event lines; ``live_container_ids`` feeds restart reconciliation. The
+    real implementation (the streaming ``docker run``) is the PR3 deployment edge.
+    """
+
+    project_root: str
+
+    def spec_for(self, session_id: str) -> LaunchSpec: ...
+
+    async def start(self, spec: LaunchSpec, stdin: bytes) -> BrainContainerSession: ...
+
+    async def live_container_ids(self) -> Set[str]: ...
 
 
 class Cockpit:
@@ -41,6 +66,7 @@ class Cockpit:
         approvals: PendingApprovalRegistry | None = None,
         memory: MemoryClient | None = None,
         operator_id: str | None = None,
+        container: _ContainerBackend | None = None,
     ) -> None:
         self._transport = transport
         self._brain = brain
@@ -49,6 +75,10 @@ class Cockpit:
         self._launcher = launcher
         self._approvals = approvals or PendingApprovalRegistry()
         self._memory = memory
+        # When set, a LAUNCH/CONTINUE runs the brain INSIDE a hardened container
+        # (the membrane gate validates the spec first) instead of in-process. None
+        # = the in-process default (every existing caller), unchanged.
+        self._container = container
         # When set, only an event whose `sender` matches may resolve a pending
         # HITL approval (#14: prevents a hijacked agent self-approving). None =
         # single-user CLI default: no operator gate (#32-compatible).
@@ -91,6 +121,11 @@ class Cockpit:
             await record_decision(self._memory, request, approved=False)
 
     async def serve(self) -> None:
+        # Reconcile the session table against the live containers BEFORE the loop:
+        # a session whose container vanished while the cockpit was down is marked
+        # dead so a follow-up isn't routed to a stale CONTINUE (replaying a
+        # checkpoint whose container is gone).
+        await self._reconcile_on_start()
         # Per-event isolation: the cockpit is the sole message consumer and the
         # sole HITL surface, so one bad event must never silently kill the loop
         # (which would strand every pending approval and drop all later messages).
@@ -116,13 +151,59 @@ class Cockpit:
         else:  # LAUNCH or CONTINUE — drive the brain
             await self._handle_task(event, intent)
 
+    async def _reconcile_on_start(self) -> None:
+        """Mark sessions whose container is no longer live as dead. Best-effort:
+        a failed enumeration (``DockerRuntime.list`` fails closed on a docker
+        error) leaves records running rather than risk marking a live container
+        dead — the conservative direction."""
+        if self._container is None:
+            return
+        try:
+            live = await self._container.live_container_ids()
+        except Exception:
+            log.exception("session reconcile skipped: could not enumerate live containers")
+            return
+        self._registry.reconcile(live)
+
+    def _container_brain(self, thread_id: str) -> ContainerBrainProvider:
+        """Build the container-backed brain for one thread, validating the spec at
+        the membrane gate FIRST so a ``MembraneViolation`` refuses the run before
+        any container is created (the #102 acceptance). ``on_start`` records the
+        container id (in place, preserving ``granted_caps``) the instant the
+        container starts, so ``/kill`` can tear down the real container even mid-run.
+
+        Failure-path lifecycle: if the in-container run then fails (a hijacked or
+        crashed container that ends without a terminal DoneEvent), ``Session``
+        raises and the record is left ``running`` pointing at a now-gone container —
+        recoverable by the operator's ``/kill`` (which fail-closes on a vanished
+        cid and closes the session) or by restart reconciliation. Mid-serve health
+        reconciliation is a deliberate PR3 improvement, not handled here."""
+        assert self._container is not None  # guarded by the caller
+        spec = validate_spec(
+            self._container.spec_for(thread_id), project_root=self._container.project_root
+        )
+        backend = self._container
+        return ContainerBrainProvider(
+            lambda stdin: backend.start(spec, stdin),
+            caps=self._brain.caps,
+            on_start=lambda cid: self._registry.set_container(
+                thread_id, container_id=cid, image=spec.image
+            ),
+        )
+
     async def _handle_task(self, event: Event, intent: Intent) -> None:
-        session = Session(self._brain, self._checkpoints)
+        # In-container when a backend is wired (membrane-validated), else the
+        # in-process brain. The container path registers the session via on_start
+        # the moment the container starts (so /kill works mid-run); the in-process
+        # LAUNCH registers after the run (no container id) — today's behaviour.
+        brain = self._brain if self._container is None else self._container_brain(event.thread_id)
+        session = Session(brain, self._checkpoints)
         if intent is Intent.CONTINUE:
             result = await session.resume(event.thread_id, prompt=event.text)
         else:  # LAUNCH
             result = await session.run(Task(prompt=event.text, session_id=event.thread_id))
-            self._registry.add(event.thread_id)
+            if self._container is None:
+                self._registry.add(event.thread_id)
         await self._transport.send(event.thread_id, result.text)
 
     async def _handle_status(self, event: Event) -> None:
