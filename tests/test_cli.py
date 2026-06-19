@@ -360,6 +360,55 @@ def test_make_memory_client_blank_db_env_is_in_memory() -> None:
     assert isinstance(make_memory_client(env={"KAGURA_AGENT_MEMORY_DB": "   "}), LocalMemoryClient)
 
 
+_MEMORY_CTX_UUID = "550e8400-e29b-41d4-a716-446655440000"
+_MCP_ENV = {
+    "KAGURA_AGENT_MEMORY_MCP_CONTEXT": _MEMORY_CTX_UUID,
+    "KAGURA_AGENT_MEMORY_MCP_SERVER": "kagura-memory-mcp",
+}
+
+
+def test_make_memory_client_uses_mcp_cloud_when_context_configured() -> None:
+    # #111: KAGURA_AGENT_MEMORY_MCP_CONTEXT (a valid UUID) + server → the trust-aware
+    # MCP cloud backbone, the strongest tier. Construction is lazy (no mcp SDK / no
+    # connection here), so this just asserts the selection.
+    from kagura_agent.mcp.mcp_memory import McpMemoryClient
+
+    assert isinstance(make_memory_client(env=dict(_MCP_ENV)), McpMemoryClient)
+
+
+def test_make_memory_client_mcp_cloud_outranks_sqlite(tmp_path) -> None:
+    # Strongest configured wins: with BOTH the cloud context and a DB path set, the
+    # MCP cloud tier is chosen.
+    from kagura_agent.mcp.mcp_memory import McpMemoryClient
+
+    client = make_memory_client(env={**_MCP_ENV, "KAGURA_AGENT_MEMORY_DB": str(tmp_path / "m.db")})
+    assert isinstance(client, McpMemoryClient)
+
+
+def test_make_memory_client_fails_closed_on_malformed_mcp_context() -> None:
+    # A misconfigured cloud context (not a UUID) must refuse, not silently fall
+    # back to a weaker tier and drop the trust-aware backbone the operator asked for.
+    with pytest.raises(RuntimeError, match="not a valid context UUID"):
+        make_memory_client(env={"KAGURA_AGENT_MEMORY_MCP_CONTEXT": "not-a-uuid"})
+
+
+def test_make_memory_client_blank_mcp_context_is_not_configured() -> None:
+    # A set-but-blank cloud context must NOT enter the MCP branch (which would then
+    # demand a server) — it falls through to the in-memory default, like the DB env.
+    from kagura_agent.mcp.memory_cloud import LocalMemoryClient
+
+    assert isinstance(
+        make_memory_client(env={"KAGURA_AGENT_MEMORY_MCP_CONTEXT": "   "}), LocalMemoryClient
+    )
+
+
+def test_make_memory_client_fails_closed_when_mcp_server_missing() -> None:
+    # A valid cloud context but no server command → fail closed with a clear message
+    # at construction, not an opaque stdio spawn error deep in the run loop.
+    with pytest.raises(RuntimeError, match="MCP server command"):
+        make_memory_client(env={"KAGURA_AGENT_MEMORY_MCP_CONTEXT": _MEMORY_CTX_UUID})
+
+
 def test_make_memory_client_fails_closed_on_unusable_db(tmp_path) -> None:
     # #107 gated fail-closed: the operator opted into durable memory but the path is
     # unusable (a directory, not a file) — refuse loudly rather than silently
