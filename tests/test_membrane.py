@@ -313,6 +313,37 @@ def test_validate_spec_fails_closed_on_unexpected_resolve_error(monkeypatch) -> 
         validate_spec(spec, project_root="/work/project")
 
 
+def test_validate_spec_rejects_mount_target_with_colon() -> None:
+    # #120: mount.target is concatenated raw into `-v {source}:{target}{ro}`. A
+    # colon in the target opens a volume-options section docker parses (e.g.
+    # "/workspace:rw" → `-v src:/workspace:rw:ro`, sneaking `rw` past the trusted
+    # `:ro`). Reject any target carrying a colon, fail-closed.
+    spec = LaunchSpec(
+        image="x",
+        mounts=(Mount(source="/work/project/src", target="/workspace:rw"),),
+    )
+    with pytest.raises(MembraneViolation, match="target"):
+        validate_spec(spec, project_root="/work/project")
+
+
+def test_validate_spec_rejects_non_absolute_mount_target() -> None:
+    # #120: a container mount target must be an absolute path; a relative target is
+    # malformed and refused rather than handed to docker.
+    spec = LaunchSpec(
+        image="x",
+        mounts=(Mount(source="/work/project/src", target="workspace"),),
+    )
+    with pytest.raises(MembraneViolation, match="target"):
+        validate_spec(spec, project_root="/work/project")
+
+
+def test_docker_run_args_terminates_image_with_double_dash() -> None:
+    # #120: the image is the trailing positional. Insert a `--` terminator before
+    # it so an image value beginning with `-` cannot be parsed as a docker flag.
+    args = docker_run_args(LaunchSpec(image="alpine@sha256:abc"))
+    assert args[-2:] == ["--", "alpine@sha256:abc"]
+
+
 def test_docker_run_args_injects_leased_creds_as_env() -> None:
     # Leased, time-boxed creds (e.g. the short-lived memory-cloud access token)
     # reach the container only via -e env injection — never baked into the image.

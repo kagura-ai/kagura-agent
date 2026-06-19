@@ -185,6 +185,17 @@ def validate_spec(spec: LaunchSpec, *, project_root: str) -> LaunchSpec:
     """
     resolved_mounts: list[Mount] = []
     for mount in spec.mounts:
+        # Validate the target too (not only the source): it is concatenated raw
+        # into `-v {source}:{target}{ro}`, so a colon opens a volume-options
+        # section docker parses (e.g. "/workspace:rw" sneaks `rw` past the trusted
+        # `:ro`), and a non-absolute target is malformed. Fail-closed before any
+        # OS call, since this is a pure string check.
+        if ":" in mount.target or not mount.target.startswith("/"):
+            raise MembraneViolation(
+                f"refusing mount target {mount.target!r}: must be a plain absolute "
+                "container path (no ':' — it would inject volume options — and must "
+                "start with '/')"
+            )
         try:
             source = os.path.realpath(mount.source)
             root = os.path.realpath(project_root)
@@ -345,5 +356,8 @@ def docker_run_args(spec: LaunchSpec) -> list[str]:
     # (docker keeps the last -e): a caller-supplied proxy var in spec.env must never
     # be able to override and defeat the injected routing.
     args += _egress_enforcement_args(spec)
-    args.append(spec.image)
+    # `--` terminates option parsing so the image (the trailing positional) is
+    # always treated as the image, never as a docker flag — even if the value
+    # begins with `-`. Defense-in-depth alongside the spec's no-escape-flags shape.
+    args += ["--", spec.image]
     return args
