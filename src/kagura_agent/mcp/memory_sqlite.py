@@ -84,13 +84,22 @@ class SqliteMemoryClient:
 
         Ids are ``f"m{seq}"`` (a pure function of the autoincrement PK, never a
         stored column), so a lookup is an O(1) keyed query on ``seq`` and a bogus
-        id resolves to None → fail-closed (KeyError / False) without a scan."""
-        if memory_id.startswith("m"):
-            try:
-                return int(memory_id[1:])
-            except ValueError:
-                return None
-        return None
+        id resolves to None → fail-closed (KeyError / False) without a scan.
+
+        Strictly canonical: ``int()`` would tolerate signs, surrounding whitespace
+        and underscores (``"m+1"``/``"m 1"``/``"m1_000"``), and leading zeros
+        (``"m007"``) would alias a real row — any of which would let a non-canonical
+        id resolve to a seq AND desync ``forget``'s seq-keyed ``memories`` delete
+        from its string-keyed ``edges``/``feedback`` delete (partial erasure). So we
+        accept ASCII digits only and require the id to round-trip to ``f"m{seq}"``.
+        """
+        if not memory_id.startswith("m"):
+            return None
+        tail = memory_id[1:]
+        if not (tail.isascii() and tail.isdigit()):
+            return None
+        seq = int(tail)
+        return seq if f"m{seq}" == memory_id else None
 
     # -- agent protocol -----------------------------------------------------
 
