@@ -72,11 +72,14 @@ def _to_memory(record: Mapping[str, Any]) -> Memory:
     unprovable tier must never present as trusted to a downstream consumer (e.g.
     continuity's ``load_pinned`` trust gate), so the only path that asserts trust
     is :func:`_is_trusted`."""
-    tags = record.get("tags") or ()
+    # Only a list/tuple is a tag list. A bare string would otherwise iterate into
+    # per-character tags ("goal" → 'g','o','a','l'); anything non-list is dropped.
+    raw_tags = record.get("tags")
+    tags = tuple(str(t) for t in raw_tags) if isinstance(raw_tags, (list, tuple)) else ()
     return Memory(
         id=str(record.get("memory_id") or record.get("id") or ""),
         text=str(record.get("summary") or record.get("text") or record.get("content") or ""),
-        tags=tuple(str(t) for t in tags),
+        tags=tags,
         trust_tier=str(record.get("trust_tier") or QUARANTINE_TIER),
         delivery_mode=str(record.get("delivery_mode") or ON_RECALL_DELIVERY),
     )
@@ -207,7 +210,13 @@ def build_mcp_call_tool(  # pragma: no cover - deployment edge (needs the mcp SD
     run fails rather than silently degrading to memory-less. The server command /
     URL + auth are read from the host environment, never baked.
     """
-    server = env.get("KAGURA_AGENT_MEMORY_MCP_SERVER", "")
+    import shlex
+
+    # Split into program + args so a server command WITH arguments (the natural
+    # "kagura-memory-mcp serve --stdio") execs correctly, not as one literal name.
+    # NOTE: re-establishes the session per call (a fresh server process each memory
+    # op) — correct but spawn-heavy; reusing one lazy session is a follow-up.
+    argv = shlex.split(env.get("KAGURA_AGENT_MEMORY_MCP_SERVER", ""))
 
     async def call_tool(name: str, args: dict[str, Any]) -> Any:
         try:
@@ -218,7 +227,7 @@ def build_mcp_call_tool(  # pragma: no cover - deployment edge (needs the mcp SD
                 "the MCP cloud memory backend needs the 'mcp' SDK "
                 "(install: pip install mcp) — or unset KAGURA_AGENT_MEMORY_MCP_CONTEXT"
             ) from exc
-        params = StdioServerParameters(command=server)
+        params = StdioServerParameters(command=argv[0], args=argv[1:])
         async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(name, args)

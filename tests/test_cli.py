@@ -392,6 +392,16 @@ def test_make_memory_client_fails_closed_on_malformed_mcp_context() -> None:
         make_memory_client(env={"KAGURA_AGENT_MEMORY_MCP_CONTEXT": "not-a-uuid"})
 
 
+def test_make_memory_client_blank_mcp_context_is_not_configured() -> None:
+    # A set-but-blank cloud context must NOT enter the MCP branch (which would then
+    # demand a server) — it falls through to the in-memory default, like the DB env.
+    from kagura_agent.mcp.memory_cloud import LocalMemoryClient
+
+    assert isinstance(
+        make_memory_client(env={"KAGURA_AGENT_MEMORY_MCP_CONTEXT": "   "}), LocalMemoryClient
+    )
+
+
 def test_make_memory_client_fails_closed_when_mcp_server_missing() -> None:
     # A valid cloud context but no server command → fail closed with a clear message
     # at construction, not an opaque stdio spawn error deep in the run loop.
