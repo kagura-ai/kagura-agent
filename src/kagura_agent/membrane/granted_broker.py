@@ -21,10 +21,13 @@ The two mint entries are both gated:
   triggers a fresh mint, so without the re-check a compromised caller could
   fabricate a lease for an ungranted scope and widen its reach. This re-check is
   load-bearing, not merely defense-in-depth.
+- :meth:`container_env` **re-checks** for the same reason — it materialises a
+  caller-supplied lease's cred into the container env, so default-deny must gate
+  cred *materialisation*, not only minting.
 
-:meth:`release`, :meth:`container_env`, :meth:`open_leases`, and :meth:`sweep`
-do not mint (release is de-escalation; the others read or format an
-already-minted cred), so they delegate straight through.
+:meth:`release`, :meth:`open_leases`, and :meth:`sweep` do not mint or materialise
+a cred (release is de-escalation; the others read/revoke), so they delegate straight
+through.
 
 The :class:`GrantSet` is supplied at construction and never re-bound — there is
 no setter — so a compromised agent that somehow obtained a reference still could
@@ -83,6 +86,14 @@ class GrantedBroker:
         await self._inner.release(lease)
 
     def container_env(self, leases: Iterable[Lease]) -> dict[str, str]:
+        # Re-check, like renew: container_env MATERIALIZES a lease's cred into the
+        # container env, so a fabricated or de-scoped lease for an ungranted scope
+        # must be denied here too. Default-deny must cover cred materialization, not
+        # only minting — otherwise the one method that turns a lease into a live
+        # credential would be the one gap in the invariant.
+        leases = list(leases)
+        for lease in leases:
+            self._require_grant(lease.provider, lease.scope)
         return self._inner.container_env(leases)
 
     def open_leases(self) -> list[Lease]:
