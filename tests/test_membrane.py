@@ -313,6 +313,37 @@ def test_validate_spec_fails_closed_on_unexpected_resolve_error(monkeypatch) -> 
         validate_spec(spec, project_root="/work/project")
 
 
+def test_validate_spec_rejects_mount_target_with_colon() -> None:
+    # #120: mount.target is concatenated raw into `-v {source}:{target}{ro}`. A
+    # colon in the target opens a volume-options section docker parses (e.g.
+    # "/workspace:rw" → `-v src:/workspace:rw:ro`, sneaking `rw` past the trusted
+    # `:ro`). Reject any target carrying a colon, fail-closed.
+    spec = LaunchSpec(
+        image="x",
+        mounts=(Mount(source="/work/project/src", target="/workspace:rw"),),
+    )
+    with pytest.raises(MembraneViolation, match="target"):
+        validate_spec(spec, project_root="/work/project")
+
+
+def test_validate_spec_rejects_non_absolute_mount_target() -> None:
+    # #120: a container mount target must be an absolute path; a relative target is
+    # malformed and refused rather than handed to docker.
+    spec = LaunchSpec(
+        image="x",
+        mounts=(Mount(source="/work/project/src", target="workspace"),),
+    )
+    with pytest.raises(MembraneViolation, match="target"):
+        validate_spec(spec, project_root="/work/project")
+
+
+def test_docker_run_args_terminates_image_with_double_dash() -> None:
+    # #120: the image is the trailing positional. Insert a `--` terminator before
+    # it so an image value beginning with `-` cannot be parsed as a docker flag.
+    args = docker_run_args(LaunchSpec(image="alpine@sha256:abc"))
+    assert args[-2:] == ["--", "alpine@sha256:abc"]
+
+
 def test_docker_run_args_injects_leased_creds_as_env() -> None:
     # Leased, time-boxed creds (e.g. the short-lived memory-cloud access token)
     # reach the container only via -e env injection — never baked into the image.
@@ -649,6 +680,73 @@ def test_egress_rejects_malformed_unclosed_bracket_entry() -> None:
     # store a bracket-bearing literal that can never match a real host.
     with pytest.raises(ValueError):
         EgressPolicy(allow=("[::1",))
+
+
+def test_egress_rejects_comma_bearing_host_fail_closed() -> None:
+    # #119: a comma is the label delimiter (as_label joins on ",", the proxy's
+    # policy_from_label splits on ","). A host containing a comma must be rejected
+    # at construction — otherwise it is stored as ONE junk entry the gate denies,
+    # yet the label round-trip splits it into multiple ALLOWED hosts (fail-open).
+    with pytest.raises(ValueError, match="not a plain exact"):
+        EgressPolicy(allow=("api.anthropic.com,attacker.example.com",))
+
+
+def test_egress_rejects_whitespace_in_host() -> None:
+    # #119: whitespace (incl. newline) never appears in a real hostname and would
+    # pollute the --label value (label injection). Reject at construction.
+    for bad in ("a.com evil.com", "api.anthropic.com\nattacker.com", "a\tb.com"):
+        with pytest.raises(ValueError, match="not a plain exact"):
+            EgressPolicy(allow=(bad,))
+
+
+def test_egress_rejects_non_idempotent_bracketed_single_colon_host() -> None:
+    # #119: the construction guard normalizes ONCE and stores the result, but
+    # decide() and the proxy's policy_from_label re-normalize it. A bracketed
+    # single-colon literal "[a:b]" normalizes to "a:b" at construction but to "a"
+    # on the second pass — so the launcher gate would store {"a:b"} while the proxy
+    # stores {"a"}, and the proxy would ALLOW bare host "a" the gate never approved
+    # (the same fail-open disagreement class as the comma bypass). Reject any entry
+    # that does not normalize to a stable fixpoint, fail-closed.
+    with pytest.raises(ValueError, match="not a plain exact"):
+        EgressPolicy(allow=("[a:b]",))
+
+
+def test_egress_legitimate_ipv6_brackets_still_accepted() -> None:
+    # The idempotency guard must NOT reject a real bracketed IPv6 literal (≥2
+    # interior colons normalize to a stable fixpoint).
+    for ok in ("[::1]", "[2001:db8::1]"):
+        EgressPolicy(allow=(ok,))  # must not raise
+
+
+def test_constructible_policy_round_trips_through_label_without_drift() -> None:
+    # #119 the core invariant the idempotency guard restores: ANY policy that can
+    # be constructed serializes (as_label) and deserializes (policy_from_label) to a
+    # policy that decides IDENTICALLY — so the launcher gate and the proxy can never
+    # disagree about what a run may reach.
+    from kagura_agent.membrane.egress_proxy import policy_from_label
+
+    policy = EgressPolicy(allow=("api.anthropic.com", "[2001:db8::1]", "github.com"))
+    rebuilt = policy_from_label(policy.as_label())
+    for host in ("api.anthropic.com", "[2001:db8::1]", "github.com", "evil.com", "a"):
+        assert policy.decide(host) is rebuilt.decide(host)
+
+
+def test_comma_host_cannot_smuggle_an_allowed_host_through_the_label() -> None:
+    # #119 regression: the launcher gate and the proxy must agree. A comma-bearing
+    # entry is rejected, so it can never be smuggled into the label and re-expanded
+    # into an extra allowed host by the proxy's policy_from_label.
+    from kagura_agent.membrane.egress_proxy import policy_from_label
+
+    # A legitimate multi-host policy round-trips losslessly...
+    legit = EgressPolicy(allow=("api.anthropic.com", "api.github.com"))
+    rebuilt = policy_from_label(legit.as_label())
+    assert rebuilt.decide("api.anthropic.com") is EgressDecision.ALLOW
+    assert rebuilt.decide("api.github.com") is EgressDecision.ALLOW
+    assert rebuilt.decide("attacker.example.com") is EgressDecision.DENY
+    # ...but a comma-smuggled entry never even constructs, so the gate's DENY for
+    # the smuggled host can no longer disagree with the proxy.
+    with pytest.raises(ValueError):
+        EgressPolicy(allow=("api.anthropic.com,attacker.example.com",))
 
 
 # Security-critical direction: normalization must NOT widen the allow set.
