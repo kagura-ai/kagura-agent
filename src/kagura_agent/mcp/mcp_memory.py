@@ -76,11 +76,19 @@ def _to_memory(record: Mapping[str, Any]) -> Memory:
     # per-character tags ("goal" → 'g','o','a','l'); anything non-list is dropped.
     raw_tags = record.get("tags")
     tags = tuple(str(t) for t in raw_tags) if isinstance(raw_tags, (list, tuple)) else ()
+    # Canonicalize the tier (strip + lower) so the SURFACED label matches what every
+    # downstream gate checks by exact equality — notably continuity.load_guardrails,
+    # which keeps only `m.trust_tier == TRUSTED_TIER`. Without this, a server-returned
+    # trusted pinned guardrail labelled "Trusted" / " trusted " is silently dropped
+    # from the prompt every turn (the pinned lane has no _is_trusted pre-filter, only
+    # recall does). A missing/blank tier defaults to QUARANTINE (fail-closed): an
+    # unprovable tier must never present as trusted.
+    trust_tier = str(record.get("trust_tier") or "").strip().lower() or QUARANTINE_TIER
     return Memory(
         id=str(record.get("memory_id") or record.get("id") or ""),
         text=str(record.get("summary") or record.get("text") or record.get("content") or ""),
         tags=tags,
-        trust_tier=str(record.get("trust_tier") or QUARANTINE_TIER),
+        trust_tier=trust_tier,
         delivery_mode=str(record.get("delivery_mode") or ON_RECALL_DELIVERY),
     )
 
