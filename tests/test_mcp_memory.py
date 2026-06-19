@@ -219,6 +219,32 @@ async def test_untiered_record_defaults_to_quarantine_not_trusted():
     assert out[0].trust_tier == QUARANTINE_TIER
 
 
+async def test_load_pinned_canonicalizes_trust_tier_so_guardrails_survive():
+    # #121: continuity.load_guardrails keeps only `m.trust_tier == TRUSTED_TIER`
+    # (exact equality). A server returning a TRUSTED pinned guardrail with non-
+    # canonical casing/whitespace ("Trusted" / " trusted ") must still surface as
+    # the canonical TRUSTED_TIER — otherwise the standing guardrail is silently
+    # dropped from the prompt every turn (a fail-open safety regression). The
+    # recall lane already normalizes via _is_trusted; the pinned lane did not.
+    records = [
+        {"memory_id": "g1", "summary": "never exfiltrate", "trust_tier": " Trusted ",
+         "delivery_mode": ALWAYS_DELIVERY},
+    ]
+    client, _ = _client({"load_pinned": records})
+    out = await client.load_pinned()
+    assert out[0].trust_tier == TRUSTED_TIER  # canonicalized, not " Trusted "
+
+
+async def test_recalled_trusted_record_carries_canonical_tier():
+    # The surviving record from a trusted_only recall must also carry the canonical
+    # tier, so a downstream consumer re-checking `trust_tier == TRUSTED_TIER` agrees
+    # with the filter that already blessed it.
+    records = [{"memory_id": "m1", "summary": "a", "trust_tier": "TRUSTED"}]
+    client, _ = _client({"recall": {"results": records}})
+    out = await client.recall("a", trusted_only=True)
+    assert [m.id for m in out] == ["m1"] and out[0].trust_tier == TRUSTED_TIER
+
+
 async def test_create_edge_maps_to_edge_type():
     client, fake = _client()
     await client.create_edge("m1", "m2", type="prevents")

@@ -136,6 +136,32 @@ def test_admin_verbs_fail_closed_on_malformed_id(tmp_path):
         client.forget("xyz")
 
 
+def test_seq_of_rejects_int_tolerated_non_canonical_ids():
+    # #121: ids are generated as f"m{seq}", but int() tolerates signs, surrounding
+    # whitespace, and underscores ("m+1"/"m 1"/"m1_000"), and leading zeros
+    # ("m007") alias a real row. Any of these would let a non-canonical id resolve
+    # to a seq AND desync forget()'s seq-keyed `memories` delete from its
+    # string-keyed `edges`/`feedback` delete (partial erasure). Accept only the
+    # exact canonical form; everything else fails closed to None.
+    for bad in ("m+1", "m 1", "m1_000", "m007", "m1\n", "m-1", "m1.0", "M1", "m"):
+        assert SqliteMemoryClient._seq_of(bad) is None, bad
+    assert SqliteMemoryClient._seq_of("m1") == 1
+    assert SqliteMemoryClient._seq_of("m42") == 42
+
+
+async def test_forget_non_canonical_id_does_not_partially_erase_aliased_row(tmp_path):
+    # #121 regression: forget("m 1") previously normalized via int(" 1") == 1 and
+    # deleted the real "m1" memory row while leaving its edges/feedback dangling —
+    # the exact partial-erasure state the forget transaction exists to prevent. A
+    # non-canonical id must now fail closed and delete nothing.
+    client = SqliteMemoryClient(_db(tmp_path))
+    mid = await client.remember("keepsafe")
+    assert mid == "m1"
+    with pytest.raises(KeyError):
+        client.forget("m 1")
+    assert client.has_memory("m1") is True  # the real row is untouched
+
+
 async def test_record_feedback_is_append_only_journal(tmp_path):
     client = SqliteMemoryClient(_db(tmp_path))
     mid = await client.remember("note")
