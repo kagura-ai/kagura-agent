@@ -155,6 +155,36 @@ def test_build_container_backend_enabled_without_byok_fails_closed() -> None:
         build_container_backend({}, enabled=True, image="img", project_root="/p")
 
 
+def test_build_container_backend_whitespace_key_fails_closed() -> None:
+    # A whitespace-only key is as good as absent — the .strip() guard must reject it.
+    from kagura_agent.cli.main import build_container_backend
+
+    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+        build_container_backend(
+            {"ANTHROPIC_API_KEY": "   "}, enabled=True, image="i", project_root="/p"
+        )
+
+
+def test_build_container_backend_resolve_byok_reads_env_live() -> None:
+    # resolve_byok reads the env at spec-build time (the key is never held longer
+    # than a run needs it), so a rotated key is picked up — not captured eagerly.
+    from kagura_agent.cli.main import build_container_backend
+
+    env = {"ANTHROPIC_API_KEY": "first"}
+    backend = build_container_backend(env, enabled=True, image="i", project_root="/p")
+    assert backend is not None
+    env["ANTHROPIC_API_KEY"] = "rotated"
+    assert backend.spec_for("s").env["ANTHROPIC_API_KEY"] == "rotated"
+
+
+def test_parse_serve_mcp_config() -> None:
+    assert parse_args(["serve", "--transport", "slack"]).mcp_config is None
+    ns = parse_args(
+        ["serve", "--transport", "slack", "--mcp-config", "/m.json", "--strict-mcp-config"]
+    )
+    assert ns.mcp_config == "/m.json" and ns.strict_mcp_config is True
+
+
 def test_parse_run_with_task() -> None:
     ns = parse_args(["run", "build me a thing"])
     assert ns.command == "run"

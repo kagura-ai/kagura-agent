@@ -14,9 +14,12 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kagura_agent.membrane.brain_container import DockerBrainBackend
 
 from kagura_agent.cli.doctor import (
     DOCTOR_FAIL_EXIT,
@@ -359,6 +362,14 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--operator-id", default=None,
         help="restrict /kill and /approve to this sender id (single-user CLI: omit)",
     )
+    serve.add_argument(
+        "--mcp-config", dest="mcp_config", default=None,
+        help="path to a JSON file of MCP server configs (non-memory MCP servers)",
+    )
+    serve.add_argument(
+        "--strict-mcp-config", dest="strict_mcp_config", action="store_true",
+        help="reject MCP servers not present in --mcp-config (no silent passthrough)",
+    )
     return parser.parse_args(list(argv))
 
 
@@ -467,7 +478,7 @@ def build_container_backend(
     image: str,
     project_root: str,
     egress_allow: tuple[str, ...] = (),
-) -> Any:
+) -> DockerBrainBackend | None:
     """Build the brain-in-container backend for ``serve`` (#102/#116), or None.
 
     With ``enabled`` false the cockpit runs the brain in-process (today's default).
@@ -815,20 +826,26 @@ def _serve(ns: argparse.Namespace) -> int:  # pragma: no cover - glue (real tran
     transport SDK construction needs the real slack-bolt / discord.py + tokens.
     """
     import asyncio
+    import contextlib
 
     from kagura_agent.cockpit.core import Cockpit
     from kagura_agent.cockpit.registry import SessionRegistry
-    from kagura_agent.core.brain.select import make_brain
+    from kagura_agent.core.brain.kagura_brain_engine import resolve_kagura_brain_backend
+    from kagura_agent.core.brain.select import make_brain, resolve_brain_backend
+    from kagura_agent.mcp.memory_cloud import ensure_memory_reachable, memory_reachable
     from kagura_agent.membrane.runtime import DockerRuntime, Launcher
     from kagura_agent.patterns.checkpoint import FileCheckpointStore
 
     logging.basicConfig(level=resolve_log_level(getattr(ns, "log_level", None), os.environ))
     project_root = os.path.abspath(ns.project_root)
+    # The SAME run/repl startup preamble (so the three entry points share one
+    # fail-closed contract): validate the brain backend, the redefined memory gate
+    # (no silent memory-less degrade), and load MCP config — all up front, before
+    # the long-lived loop accepts any traffic.
     try:
-        # Assemble everything that can fail on misconfig INSIDE the gate, so a bad
-        # BYOK key, an unknown KAGURA_AGENT_BRAIN, an unopenable KAGURA_AGENT_MEMORY_DB,
-        # or a missing transport token/id all surface as `serve: ...` + exit 2 (the
-        # fail-closed contract run/repl follow) rather than a raw traceback.
+        if resolve_brain_backend(os.environ) == "kagura-brain":
+            resolve_kagura_brain_backend(os.environ)
+        mcp_servers = load_mcp_config(ns.mcp_config)
         container = build_container_backend(
             os.environ,
             enabled=ns.container,
@@ -839,19 +856,35 @@ def _serve(ns: argparse.Namespace) -> int:  # pragma: no cover - glue (real tran
         transport, transport_run = _build_transport(
             ns.transport, os.environ, operator_id=ns.operator_id
         )
-        cockpit = Cockpit(
-            transport,
-            make_brain(os.environ),
-            FileCheckpointStore(resolve_state_dir(os.environ)),
-            registry=SessionRegistry(),
-            launcher=Launcher(DockerRuntime(), project_root=project_root),
-            memory=make_memory_client(),
-            operator_id=ns.operator_id,
-            container=container,
+        ensure_memory_reachable(reachable=memory_reachable())
+        brain = make_brain(
+            os.environ, mcp_servers=mcp_servers, strict_mcp_config=ns.strict_mcp_config
         )
-    except (ValueError, KeyError, RuntimeError, OSError) as exc:
+        memory = make_memory_client()
+        checkpoints = FileCheckpointStore(resolve_state_dir(os.environ))
+    except (BrainUnavailable, MemoryUnreachableError) as exc:
+        # A missing runtime dependency / unreachable memory: exit 3 (matches run/repl).
+        print(str(exc), file=sys.stderr)
+        return 3
+    except (ValueError, KeyError, OSError) as exc:
+        # A config error (bad BYOK key / brain backend / mcp-config / transport
+        # token): exit 2 with a clean message, never a raw traceback.
         print(f"serve: {exc}", file=sys.stderr)
         return 2
+
+    # Cockpit / registry / launcher construction is pure wiring (no config errors),
+    # so it lives outside the gate — keeping the try narrow to the config sources
+    # rather than masking a programming bug there as a config error.
+    cockpit = Cockpit(
+        transport,
+        brain,
+        checkpoints,
+        registry=SessionRegistry(),
+        launcher=Launcher(DockerRuntime(), project_root=project_root),
+        memory=memory,
+        operator_id=ns.operator_id,
+        container=container,
+    )
 
     async def _run() -> None:
         # The transport's connection loop and the cockpit consumer run together;
@@ -861,6 +894,11 @@ def _serve(ns: argparse.Namespace) -> int:  # pragma: no cover - glue (real tran
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
+            # Await the cancellation so the transport's connection (e.g. the discord
+            # websocket / aiohttp session) tears down cleanly instead of leaking with
+            # a "Task was destroyed but it is pending" warning.
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         for task in done:
             task.result()  # surface an exception from whichever finished first
 
@@ -870,7 +908,7 @@ def _serve(ns: argparse.Namespace) -> int:  # pragma: no cover - glue (real tran
 
 def _build_transport(  # pragma: no cover - needs slack-bolt / discord.py + a live workspace
     name: str, env: Mapping[str, str], *, operator_id: str | None
-) -> tuple[Any, Callable[[], Any]]:
+) -> tuple[Any, Callable[[], Awaitable[Any]]]:
     """Construct the chat transport + a coroutine that runs its connection loop.
 
     Tokens and the bot user id are read from the host environment (never baked):
