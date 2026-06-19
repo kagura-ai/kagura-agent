@@ -88,6 +88,73 @@ def test_resolve_grants_malformed_is_fail_closed() -> None:
         resolve_grants(["no-colon-here"])
 
 
+# --- #116: `serve` — run the cockpit serve loop, optionally brain-in-container ---
+
+
+def test_parse_serve_minimal_defaults() -> None:
+    ns = parse_args(["serve", "--transport", "slack"])
+    assert ns.command == "serve" and ns.transport == "slack"
+    assert ns.container is False  # in-process by default
+    assert ns.image == "kagura-agent:agent" and ns.project_root == "."
+    assert ns.egress == [] and ns.operator_id is None
+
+
+def test_parse_serve_container_options() -> None:
+    ns = parse_args(
+        [
+            "serve", "--transport", "discord", "--container",
+            "--image", "img", "--project-root", "/p",
+            "--egress", "github.com", "--egress", "pypi.org", "--operator-id", "U1",
+        ]
+    )
+    assert ns.transport == "discord" and ns.container is True
+    assert ns.image == "img" and ns.project_root == "/p"
+    assert ns.egress == ["github.com", "pypi.org"] and ns.operator_id == "U1"
+
+
+def test_parse_serve_requires_transport() -> None:
+    with pytest.raises(SystemExit):
+        parse_args(["serve"])
+
+
+def test_parse_serve_rejects_unknown_transport() -> None:
+    with pytest.raises(SystemExit):
+        parse_args(["serve", "--transport", "irc"])
+
+
+def test_build_container_backend_disabled_is_none() -> None:
+    from kagura_agent.cli.main import build_container_backend
+
+    assert build_container_backend({}, enabled=False, image="i", project_root="/p") is None
+
+
+def test_build_container_backend_enabled_builds_backend_wired_to_byok() -> None:
+    from kagura_agent.cli.main import build_container_backend
+    from kagura_agent.membrane.brain_container import DockerBrainBackend
+
+    backend = build_container_backend(
+        {"ANTHROPIC_API_KEY": "sk-key"},
+        enabled=True,
+        image="kagura-agent:agent",
+        project_root="/p",
+        egress_allow=("github.com",),
+    )
+    assert isinstance(backend, DockerBrainBackend)
+    spec = backend.spec_for("s1")  # resolve_byok is wired to the env we passed
+    assert spec.env["ANTHROPIC_API_KEY"] == "sk-key"
+    assert "github.com" in spec.egress_allow and "api.anthropic.com" in spec.egress_allow
+
+
+def test_build_container_backend_enabled_without_byok_fails_closed() -> None:
+    # #113: container execution is BYOK-only (subscription can't run in-container),
+    # so --container without ANTHROPIC_API_KEY must refuse to start, not silently
+    # fall back to in-process and drop the isolation the operator asked for.
+    from kagura_agent.cli.main import build_container_backend
+
+    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+        build_container_backend({}, enabled=True, image="img", project_root="/p")
+
+
 def test_parse_run_with_task() -> None:
     ns = parse_args(["run", "build me a thing"])
     assert ns.command == "run"
