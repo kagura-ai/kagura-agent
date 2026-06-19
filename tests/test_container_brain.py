@@ -71,6 +71,34 @@ def test_decode_run_input_malformed_is_fail_closed():
         decode_run_input(b"not json")
 
 
+def test_decode_run_input_missing_field_raises_valueerror():
+    # #123: fail-closed UNIFORMLY (a single ValueError), like decode_event — never a
+    # raw KeyError that a caller catching ValueError (the documented contract) misses.
+    import json
+
+    with pytest.raises(ValueError):
+        decode_run_input(json.dumps({"task": {"prompt": "x"}}).encode())  # no session_id
+    with pytest.raises(ValueError):
+        decode_run_input(json.dumps({"not_task": 1}).encode())  # no task
+
+
+def test_decode_run_input_wrong_typed_resume_raises_valueerror():
+    # #123: a non-int turn / non-dict state must not build a malformed Checkpoint
+    # that breaks the brain mid-run (e.g. resume.state.get(...) on a list). Symmetric
+    # with decode_event's hardening, which the input side previously lacked.
+    import json
+
+    base = {"task": {"prompt": "x", "session_id": "s"}}
+    with pytest.raises(ValueError):
+        decode_run_input(
+            json.dumps({**base, "resume": {"session_id": "s", "turn": "three", "state": {}}}).encode()
+        )
+    with pytest.raises(ValueError):
+        decode_run_input(
+            json.dumps({**base, "resume": {"session_id": "s", "turn": 1, "state": [1, 2]}}).encode()
+        )
+
+
 # --------------------------------------------------------------------------
 # wire protocol — container -> host events (JSON lines)
 # --------------------------------------------------------------------------

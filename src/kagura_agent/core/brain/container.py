@@ -72,16 +72,38 @@ def encode_run_input(task: Task, resume: Checkpoint | None) -> bytes:
 def decode_run_input(data: bytes) -> tuple[Task, Checkpoint | None]:
     """Decode the container's run input back into ``(Task, resume)``.
 
-    Fail-closed: malformed JSON or a missing required field raises rather than
-    fabricating a default task — the entrypoint must not run on a garbled input."""
-    obj = json.loads(data)
-    t = obj["task"]
-    task = Task(prompt=t["prompt"], session_id=t["session_id"])
+    Fail-closed and UNIFORMLY, like :func:`decode_event`: malformed JSON, a non-object
+    payload, a missing required field, or a field of the wrong type all raise a single
+    ``ValueError`` rather than a raw ``KeyError``/``TypeError`` — the entrypoint must
+    not run on a garbled input, and a wrong-typed ``turn``/``state`` must not build a
+    malformed ``Checkpoint`` that breaks the brain mid-run (e.g. ``state.get(...)`` on
+    a list)."""
+    try:
+        obj = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"malformed run input (not JSON): {exc}") from exc
+    if not isinstance(obj, dict):
+        raise ValueError(f"run input must be a JSON object, got {type(obj).__name__}")
+    t = obj.get("task")
+    if not isinstance(t, dict):
+        raise ValueError("run input 'task' must be an object")
+    task = Task(
+        prompt=_require_str(t, "prompt", ctx="run input task"),
+        session_id=_require_str(t, "session_id", ctx="run input task"),
+    )
     r = obj.get("resume")
-    resume = (
-        None
-        if r is None
-        else Checkpoint(session_id=r["session_id"], turn=r["turn"], state=r["state"])
+    if r is None:
+        return task, None
+    if not isinstance(r, dict):
+        raise ValueError("run input 'resume' must be an object or null")
+    turn = r.get("turn")
+    if not isinstance(turn, int) or isinstance(turn, bool):
+        raise ValueError(f"run input resume 'turn' must be an int, got {type(turn).__name__}")
+    state = r.get("state")
+    if not isinstance(state, dict):
+        raise ValueError(f"run input resume 'state' must be an object, got {type(state).__name__}")
+    resume = Checkpoint(
+        session_id=_require_str(r, "session_id", ctx="run input resume"), turn=turn, state=state
     )
     return task, resume
 
@@ -95,11 +117,11 @@ def encode_event(event: BrainEvent) -> str:
     raise TypeError(f"unencodable brain event: {type(event).__name__}")
 
 
-def _require_str(obj: dict[str, Any], field: str) -> str:
+def _require_str(obj: dict[str, Any], field: str, *, ctx: str = "brain event") -> str:
     value = obj.get(field)
     if not isinstance(value, str):
         raise ValueError(
-            f"brain event field {field!r} must be a string, got {type(value).__name__}"
+            f"{ctx} field {field!r} must be a string, got {type(value).__name__}"
         )
     return value
 
