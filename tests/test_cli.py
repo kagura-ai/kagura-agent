@@ -222,6 +222,55 @@ async def test_make_memory_client_fallback_honours_trusted_only() -> None:
     assert all(m.trust_tier == "trusted" for m in trusted)
 
 
+def test_make_memory_client_defaults_to_in_memory() -> None:
+    # #107: with no KAGURA_AGENT_MEMORY_DB configured, the seam stays the in-process
+    # LocalMemoryClient (today's default) — durability is strictly opt-in.
+    from kagura_agent.mcp.memory_cloud import LocalMemoryClient
+
+    assert isinstance(make_memory_client(env={}), LocalMemoryClient)
+
+
+async def test_make_memory_client_uses_sqlite_when_db_configured(tmp_path) -> None:
+    # #107: KAGURA_AGENT_MEMORY_DB set → the durable SQLite tier, and it actually
+    # persists across separate client constructions (the headline acceptance).
+    from kagura_agent.mcp.memory_sqlite import SqliteMemoryClient
+
+    db = str(tmp_path / "mem.db")
+    client = make_memory_client(env={"KAGURA_AGENT_MEMORY_DB": db})
+    assert isinstance(client, SqliteMemoryClient)
+    await client.remember("persisted across runs")
+    client.close()
+
+    again = make_memory_client(env={"KAGURA_AGENT_MEMORY_DB": db})
+    assert [m.text for m in await again.recall("persisted")] == ["persisted across runs"]
+
+
+async def test_make_memory_client_reads_os_environ_when_env_none(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # The shipped call site is make_memory_client() with NO arg → it must read
+    # os.environ. This is the actually-deployed path; the env= dict is a test seam.
+    from kagura_agent.mcp.memory_sqlite import SqliteMemoryClient
+
+    monkeypatch.setenv("KAGURA_AGENT_MEMORY_DB", str(tmp_path / "env.db"))
+    client = make_memory_client()  # no env arg → reads os.environ
+    assert isinstance(client, SqliteMemoryClient)
+    client.close()
+
+
+def test_make_memory_client_blank_db_env_is_in_memory() -> None:
+    # A set-but-blank override must not be treated as a configured path.
+    from kagura_agent.mcp.memory_cloud import LocalMemoryClient
+
+    assert isinstance(make_memory_client(env={"KAGURA_AGENT_MEMORY_DB": "   "}), LocalMemoryClient)
+
+
+def test_make_memory_client_fails_closed_on_unusable_db(tmp_path) -> None:
+    # #107 gated fail-closed: the operator opted into durable memory but the path is
+    # unusable (a directory, not a file) — refuse loudly rather than silently
+    # degrade to ephemeral in-memory storage and drop the durability they asked for.
+    with pytest.raises(RuntimeError, match="could not be opened"):
+        make_memory_client(env={"KAGURA_AGENT_MEMORY_DB": str(tmp_path)})  # a dir, not a file
+
+
 def test_main_run_rejects_invalid_brain_backend(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
     # An unknown KAGURA_AGENT_BRAIN must fail closed up front (exit 2), never run
     # the default backend silently and never reach brain construction.

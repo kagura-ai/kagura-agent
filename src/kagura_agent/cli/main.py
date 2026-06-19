@@ -378,7 +378,13 @@ def resolve_log_level(arg: str | None, env: Mapping[str, str]) -> int:
     return _LOG_LEVELS.get(raw, logging.WARNING)
 
 
-def make_memory_client() -> MemoryClient:
+#: Env var naming the durable memory DB file. When set (non-blank), the grounding
+#: seam uses the SQLite middle tier so memory persists across separate `run`
+#: invocations; unset → the in-process LocalMemoryClient (today's default).
+_MEMORY_DB_ENV = "KAGURA_AGENT_MEMORY_DB"
+
+
+def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
     """The grounding seam (B): the MemoryClient used to recall prior context and
     persist task summaries around a run.
 
@@ -388,19 +394,42 @@ def make_memory_client() -> MemoryClient:
     the backbone's benefit. Memory is now *always present*; only the backend's
     strength differs, the seam never disappears.
 
-    Backend selection: a trust-aware **MCP**-backed cloud client is the production
-    target — it MUST honour ``recall(trusted_only=True)`` so an externally-ingested
-    / quarantined memory is never fed back as behaviour-influencing context (the
-    membrane memory-provenance rule). The kagura *CLI* cannot back it: its
-    ``recall`` exposes neither machine-readable output nor a trust-tier filter, so a
-    CLI adapter could not enforce ``trusted_only`` — feeding the grounding path with
-    a client that ignores trust would be a provenance regression. So the cloud
-    adapter stays the deployment edge (tracked separately); until it is wired this
-    returns ``LocalMemoryClient`` — which *does* honour ``trusted_only`` — keeping
-    grounding safe and the test/local-dev path alive.
+    Backend selection (strongest configured wins; all honour ``trusted_only`` so
+    grounding stays provenance-safe):
+
+    - ``KAGURA_AGENT_MEMORY_DB`` set → :class:`SqliteMemoryClient`, the **durable**
+      middle tier (#107): memory persists across separate process invocations with
+      no network/extra dependency. **Fail-closed**: if the operator configured a DB
+      path but it cannot be opened, raise rather than silently degrade to in-memory
+      (which would drop the durability they asked for).
+    - otherwise → :class:`LocalMemoryClient` (in-process; today's default).
+
+    A trust-aware **MCP**-backed cloud client remains the production target — it
+    MUST honour ``recall(trusted_only=True)`` so an externally-ingested / quarantined
+    memory is never fed back as behaviour-influencing context (the membrane
+    memory-provenance rule). The kagura *CLI* cannot back it (its ``recall`` exposes
+    neither machine-readable output nor a trust filter), so the MCP cloud adapter
+    stays a deployment edge tracked separately.
     """
     from kagura_agent.mcp.memory_cloud import LocalMemoryClient
 
+    environ = os.environ if env is None else env
+    db_path = environ.get(_MEMORY_DB_ENV, "").strip()
+    if db_path:
+        import sqlite3
+
+        from kagura_agent.mcp.memory_sqlite import SqliteMemoryClient
+
+        try:
+            return SqliteMemoryClient(db_path)
+        except (sqlite3.Error, OSError) as exc:
+            # Gated fail-closed: the operator opted into durable memory but the DB
+            # is unusable — refuse rather than silently fall back to ephemeral memory.
+            raise RuntimeError(
+                f"{_MEMORY_DB_ENV}={db_path!r} could not be opened as a memory database: "
+                f"{exc} — fix the path/permissions or unset {_MEMORY_DB_ENV} to use "
+                "in-memory storage"
+            ) from exc
     return LocalMemoryClient()
 
 
