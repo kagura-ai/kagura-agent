@@ -421,6 +421,14 @@ def resolve_log_level(arg: str | None, env: Mapping[str, str]) -> int:
 #: invocations; unset → the in-process LocalMemoryClient (today's default).
 _MEMORY_DB_ENV = "KAGURA_AGENT_MEMORY_DB"
 
+#: Env var naming the kagura-memory MCP context UUID. When set (non-blank), the
+#: grounding seam uses the trust-aware MCP cloud backbone (#111) — the strongest
+#: tier. The server command is in _MEMORY_MCP_SERVER_ENV.
+_MEMORY_MCP_CONTEXT_ENV = "KAGURA_AGENT_MEMORY_MCP_CONTEXT"
+#: Env var naming the kagura-memory MCP server command (stdio). Required when the
+#: cloud context is set — read by build_mcp_call_tool.
+_MEMORY_MCP_SERVER_ENV = "KAGURA_AGENT_MEMORY_MCP_SERVER"
+
 
 def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
     """The grounding seam (B): the MemoryClient used to recall prior context and
@@ -435,23 +443,43 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
     Backend selection (strongest configured wins; all honour ``trusted_only`` so
     grounding stays provenance-safe):
 
-    - ``KAGURA_AGENT_MEMORY_DB`` set → :class:`SqliteMemoryClient`, the **durable**
-      middle tier (#107): memory persists across separate process invocations with
-      no network/extra dependency. **Fail-closed**: if the operator configured a DB
-      path but it cannot be opened, raise rather than silently degrade to in-memory
-      (which would drop the durability they asked for).
+    - ``KAGURA_AGENT_MEMORY_MCP_CONTEXT`` set → :class:`McpMemoryClient`, the
+      **trust-aware MCP cloud** backbone (#111): cross-host persistence + the real
+      ``recall(trusted_only=True)`` so an externally-ingested / quarantined memory
+      is never fed back as behaviour-influencing context (the membrane provenance
+      rule). **Fail-closed**: a malformed context (not a UUID) raises rather than
+      silently degrading. The connection itself is lazy — a missing ``mcp`` SDK /
+      unreachable server fails closed on first use, not a silent memory-less run.
+    - else ``KAGURA_AGENT_MEMORY_DB`` set → :class:`SqliteMemoryClient`, the
+      **durable** middle tier (#107): persists across separate process invocations
+      with no network/extra dependency. **Fail-closed** on an unopenable DB path.
     - otherwise → :class:`LocalMemoryClient` (in-process; today's default).
-
-    A trust-aware **MCP**-backed cloud client remains the production target — it
-    MUST honour ``recall(trusted_only=True)`` so an externally-ingested / quarantined
-    memory is never fed back as behaviour-influencing context (the membrane
-    memory-provenance rule). The kagura *CLI* cannot back it (its ``recall`` exposes
-    neither machine-readable output nor a trust filter), so the MCP cloud adapter
-    stays a deployment edge tracked separately.
     """
     from kagura_agent.mcp.memory_cloud import LocalMemoryClient
 
     environ = os.environ if env is None else env
+    mcp_context = environ.get(_MEMORY_MCP_CONTEXT_ENV, "").strip()
+    if mcp_context:
+        import uuid
+
+        from kagura_agent.mcp.mcp_memory import McpMemoryClient, build_mcp_call_tool
+
+        try:
+            uuid.UUID(mcp_context)
+        except ValueError as exc:
+            # Fail-closed: a misconfigured cloud context must refuse, not fall back.
+            raise RuntimeError(
+                f"{_MEMORY_MCP_CONTEXT_ENV}={mcp_context!r} is not a valid context UUID "
+                f"— fix it or unset {_MEMORY_MCP_CONTEXT_ENV}"
+            ) from exc
+        if not environ.get(_MEMORY_MCP_SERVER_ENV, "").strip():
+            # Fail-closed with a clear message at construction, not an opaque stdio
+            # spawn error on the first recall/remember deep in the run loop.
+            raise RuntimeError(
+                f"{_MEMORY_MCP_CONTEXT_ENV} is set but {_MEMORY_MCP_SERVER_ENV} (the "
+                "kagura-memory MCP server command) is not — set it or unset the context"
+            )
+        return McpMemoryClient(build_mcp_call_tool(environ), context_id=mcp_context)
     db_path = environ.get(_MEMORY_DB_ENV, "").strip()
     if db_path:
         import sqlite3
