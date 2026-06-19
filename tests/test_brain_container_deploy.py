@@ -12,6 +12,7 @@ stays the in-process default and never enters the container.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Mapping
 
 import pytest
@@ -26,7 +27,11 @@ from kagura_agent.core.brain.base import (
 )
 from kagura_agent.core.brain.container import decode_event, encode_run_input
 from kagura_agent.core.brain.container_main import run_brain_entrypoint
-from kagura_agent.membrane.brain_container import DockerBrainBackend, build_brain_launch_spec
+from kagura_agent.membrane.brain_container import (
+    DockerBrainBackend,
+    _DockerBrainSession,
+    build_brain_launch_spec,
+)
 from kagura_agent.membrane.launcher import Mount, validate_spec
 
 # --------------------------------------------------------------------------
@@ -220,3 +225,106 @@ async def test_entrypoint_builds_brain_from_env_and_emits_the_protocol():
         MessageEvent(text="prompt=hello"),
         DoneEvent(result="ok", state={"turn": 1}),
     ]
+
+
+# --------------------------------------------------------------------------
+# _DockerBrainSession — the BOUNDED stdout stream (#123): idle/wall-clock
+# timeout, oversized-line guard, and guaranteed teardown. proc + feeder are
+# injected, so the bounding/teardown logic is unit-tested with fakes (only the
+# real `docker run` in DockerBrainBackend.start is the deployment edge).
+# --------------------------------------------------------------------------
+
+
+class _FakeStdout:
+    def __init__(self, lines, *, stall=False, raise_value_error=False):
+        self._lines = list(lines)
+        self._stall = stall
+        self._raise = raise_value_error
+
+    async def readline(self) -> bytes:
+        if self._stall:
+            await asyncio.Event().wait()  # never resolves → exercises the idle timeout
+        if self._raise:
+            raise ValueError("Separator is not found, and chunk exceed the limit")
+        return self._lines.pop(0) if self._lines else b""  # b"" == EOF
+
+
+class _FakeProc:
+    def __init__(self, stdout, *, returncode=None):
+        self.stdout = stdout
+        self.returncode = returncode
+        self.terminated = False
+        self.waited = False
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+
+    async def wait(self) -> int:
+        self.waited = True
+        return self.returncode if self.returncode is not None else 0
+
+
+def _session(lines=(), *, returncode=None, stall=False, raise_value_error=False, **kw):
+    proc = _FakeProc(_FakeStdout(lines, stall=stall, raise_value_error=raise_value_error),
+                     returncode=returncode)
+    feeder = asyncio.create_task(asyncio.sleep(3600))  # a real cancellable stdin-feeder
+    return _DockerBrainSession("cid-1", proc, feeder=feeder, **kw), proc, feeder
+
+
+async def test_session_streams_lines_then_eof_and_tears_down():
+    sess, proc, feeder = _session([b"line1\n", b"line2\n"])
+    out = [line async for line in sess.events()]
+    assert out == ["line1", "line2"]
+    assert proc.terminated and proc.waited  # reaped on normal completion
+    assert feeder.cancelled() or feeder.done()  # feeder reaped (no leaked task)
+
+
+async def test_session_idle_timeout_fails_closed_and_kills_the_container():
+    sess, proc, feeder = _session(stall=True, idle_timeout_s=0.02)
+    with pytest.raises(TimeoutError, match="no output"):
+        async for _ in sess.events():
+            pass
+    assert proc.terminated  # a hung container is killed instead of hanging the cockpit
+    assert feeder.cancelled() or feeder.done()
+
+
+async def test_session_wall_clock_deadline_fails_closed():
+    calls = {"n": 0}
+
+    def clock() -> float:
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 100.0  # first sets deadline; next is past it
+
+    sess, proc, feeder = _session([b"x\n"], wall_clock_s=10.0, clock=clock)
+    with pytest.raises(TimeoutError, match="wall-clock"):
+        async for _ in sess.events():
+            pass
+    assert proc.terminated
+
+
+async def test_session_oversized_line_fails_closed_with_clear_error():
+    sess, proc, feeder = _session(raise_value_error=True)
+    with pytest.raises(ValueError, match="oversized"):
+        async for _ in sess.events():
+            pass
+    assert proc.terminated
+
+
+async def test_teardown_skips_terminate_when_proc_already_exited():
+    sess, proc, feeder = _session([], returncode=0)  # immediate EOF, already exited
+    out = [line async for line in sess.events()]
+    assert out == []
+    assert proc.terminated is False  # returncode already set → no terminate/wait
+    assert feeder.cancelled() or feeder.done()
+
+
+async def test_aclose_tears_down_an_abandoned_run():
+    # The cockpit/Session abandoning the stream mid-run (aclose) must still reap the
+    # container + feeder — the leak the seam contract calls out.
+    sess, proc, feeder = _session([b"a\n", b"b\n"])
+    gen = sess.events()
+    assert await gen.__anext__() == "a"
+    await gen.aclose()
+    assert proc.terminated
+    assert feeder.cancelled() or feeder.done()
