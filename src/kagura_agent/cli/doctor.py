@@ -304,7 +304,11 @@ def _compose_declares_sealed_egress(text: str) -> bool:
         return False
     child_indent = min(indent for indent, _ in block)  # agent-egress's own fields
     return any(
-        indent == child_indent and re.fullmatch(r"internal:\s*true(\s+#.*)?", stripped)
+        # Require whitespace after the colon: YAML only treats `internal: true` as a
+        # mapping key when a space follows the colon. `internal:true` (no space) parses
+        # as the scalar string "internal:true", which Docker ignores → the network is
+        # NOT sealed. `\s*` would falsely report it sealed (fail-open in a security gate).
+        indent == child_indent and re.fullmatch(r"internal:\s+true(\s+#.*)?", stripped)
         for indent, stripped in block
     )
 
