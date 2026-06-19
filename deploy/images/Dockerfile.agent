@@ -1,0 +1,22 @@
+# The agent BRAIN image (#102): runs the brain's agentic loop — and its tool
+# execution — INSIDE the hardened, egress-sealed container, instead of as a host
+# subprocess. FROM the python variant; adds kagura-agent + the Claude SDK and the
+# brain entrypoint.
+#
+# Protocol: the membrane (cockpit) feeds the encoded run input (a Task, + optional
+# resume) on stdin and streams BrainEvents back on stdout as JSON lines; container
+# logs go to stderr (the entrypoint keeps stdout the pure event channel).
+#
+# Auth: BYOK (#113). The membrane injects ANTHROPIC_API_KEY into the container's
+# env (the egress allowlist always includes api.anthropic.com so the call
+# succeeds); NO key is baked into the image. Subscription auth stays host-side /
+# in-process and never enters the container.
+FROM kagura-agent:python
+
+USER root
+# kagura-agent + the `claude` extra (the SDK brain backend). No credentials baked.
+RUN uv tool install 'kagura-agent[claude]'
+USER agent
+
+# stdin (encoded Task) -> brain.run() -> stdout (JSON-line BrainEvents).
+ENTRYPOINT ["python", "-m", "kagura_agent.core.brain.container_main"]
