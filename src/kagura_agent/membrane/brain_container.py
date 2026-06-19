@@ -15,13 +15,34 @@ Subscription auth stays the in-process default and never enters the container.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
-from collections.abc import Callable, Mapping, Set
+import time
+from collections.abc import AsyncIterator, Callable, Mapping, Set
+from typing import Any
 
 from kagura_agent.core.brain.container import BrainContainerSession
 from kagura_agent.membrane.launcher import LaunchSpec, Mount
 
 log = logging.getLogger(__name__)
+
+#: Bound a single stdout read so a dead/hung container ends the run instead of
+#: hanging ``Session._drive`` — and, because the cockpit is a SINGLE consumer, the
+#: whole cockpit — forever. Generous: a slow brain (a long tool call) is normal;
+#: only a container that emits NOTHING for this long is treated as hung.
+_IDLE_TIMEOUT_S = 600.0
+#: Absolute wall-clock backstop for one run, so a container that streams forever
+#: (an endless keepalive loop that never yields a terminal DoneEvent) still ends.
+_WALL_CLOCK_S = 6 * 60 * 60.0
+#: StreamReader byte limit for the container's stdout. The asyncio default (64 KiB)
+#: would truncate a legitimate large event (e.g. a long DoneEvent.result) with an
+#: opaque error BEFORE decode_event's char cap applies; size it above that cap so the
+#: decoder's clean, uniform ValueError is the binding constraint.
+_STDOUT_LIMIT_BYTES = 32 * 1024 * 1024
+#: Grace period for a graceful SIGTERM at teardown before escalating to SIGKILL, so
+#: teardown — the very thing that bounds a hung container — can never itself hang.
+_TEARDOWN_WAIT_S = 10.0
 
 #: The container path the project root is mounted at (read-only).
 _WORKSPACE = "/workspace"
@@ -124,7 +145,6 @@ class DockerBrainBackend:
         """Run the brain container ATTACHED, feeding the run input on stdin and
         streaming its stdout event lines. The container is named up front so its id
         is known before the stream starts (the cockpit registers it for /kill)."""
-        import asyncio
         import uuid
 
         from kagura_agent.membrane.launcher import docker_run_args, validate_spec
@@ -141,6 +161,10 @@ class DockerBrainBackend:
             *args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
+            # Raise the stdout line limit above decode_event's char cap so a large but
+            # legitimate event isn't truncated by the 64 KiB default before the decoder
+            # (the intended bound) sees it.
+            limit=_STDOUT_LIMIT_BYTES,
             # stderr INHERITS the cockpit's stderr (not a pipe): container logs stay
             # visible AND an undrained stderr buffer can never deadlock the run.
         )
@@ -171,15 +195,92 @@ class DockerBrainBackend:
         return frozenset(await DockerRuntime().list())
 
 
-class _DockerBrainSession:  # pragma: no cover - wraps a live docker subprocess
-    """A live brain container: its id (the --name) + its stdout event-line stream."""
+class _DockerBrainSession:
+    """A live brain container: its id (the --name) + its BOUNDED stdout event stream.
 
-    def __init__(self, container_id: str, proc: object, *, feeder: object) -> None:
+    Honours the :class:`BrainContainerSession` transport contract the pure protocol
+    cannot enforce: each read is bounded by an idle timeout, the run is bounded by a
+    wall-clock deadline, and ``events()`` ALWAYS tears down — cancelling the stdin
+    feeder and terminating + reaping the docker subprocess — so a finished, failed,
+    timed-out, or abandoned run never leaks a live (egress-capable) container or an
+    unretrieved task. ``proc`` (the docker subprocess) and ``feeder`` (the stdin task)
+    are injected, so this bounding/teardown logic is unit-tested with fakes; only the
+    real ``docker run`` in :meth:`DockerBrainBackend.start` is the deployment edge.
+    """
+
+    def __init__(
+        self,
+        container_id: str,
+        proc: Any,
+        *,
+        feeder: asyncio.Task[None],
+        idle_timeout_s: float = _IDLE_TIMEOUT_S,
+        wall_clock_s: float = _WALL_CLOCK_S,
+        teardown_wait_s: float = _TEARDOWN_WAIT_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.container_id = container_id
         self._proc = proc
         self._feeder = feeder  # keep the stdin-feeder task referenced (no GC mid-run)
+        self._idle_timeout_s = idle_timeout_s
+        self._wall_clock_s = wall_clock_s
+        self._teardown_wait_s = teardown_wait_s
+        self._clock = clock
+        self._closed = False
 
-    async def events(self):  # type: ignore[no-untyped-def]
-        stdout = self._proc.stdout  # type: ignore[attr-defined]
-        async for raw in stdout:
+    async def events(self) -> AsyncIterator[str]:
+        deadline = self._clock() + self._wall_clock_s
+        while True:
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"brain container {self.container_id} exceeded the "
+                    f"{self._wall_clock_s:.0f}s wall-clock limit"
+                )
+            try:
+                raw = await asyncio.wait_for(
+                    self._proc.stdout.readline(),
+                    timeout=min(self._idle_timeout_s, remaining),
+                )
+            except TimeoutError:
+                raise TimeoutError(
+                    f"brain container {self.container_id} produced no output for "
+                    f"{self._idle_timeout_s:.0f}s — treating it as hung"
+                ) from None
+            except (ValueError, asyncio.LimitOverrunError) as exc:
+                # readline raises when a single line exceeds the StreamReader limit.
+                # Fail closed with a clear message (decode_event's char cap is the
+                # intended bound; this byte limit is only the backstop).
+                raise ValueError(
+                    f"brain container {self.container_id} emitted an oversized "
+                    f"stdout line: {exc}"
+                ) from exc
+            if not raw:  # EOF — the container closed stdout / exited
+                return
             yield raw.decode().rstrip("\n")
+
+    async def aclose(self) -> None:
+        """Reap the run: cancel the stdin feeder, then terminate + reap the docker
+        subprocess. Idempotent (the provider calls it in a finally on every path).
+        Cannot itself hang: SIGTERM is escalated to SIGKILL if the container ignores
+        it, and every step is suppressed so teardown never masks the run's real error."""
+        if self._closed:
+            return
+        self._closed = True
+        self._feeder.cancel()
+        await asyncio.gather(self._feeder, return_exceptions=True)
+        if self._proc.returncode is not None:
+            return  # already exited — nothing to reap
+        with contextlib.suppress(Exception):
+            self._proc.terminate()
+        try:
+            await asyncio.wait_for(self._proc.wait(), timeout=self._teardown_wait_s)
+        except Exception:
+            # SIGTERM ignored (or wait failed) — escalate to SIGKILL so teardown,
+            # the very thing that bounds a hung container, can never itself hang. The
+            # final reap is also time-bounded so even a pathological child can't wedge
+            # teardown (SIGKILL is uncatchable, so this normally returns immediately).
+            with contextlib.suppress(Exception):
+                self._proc.kill()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self._proc.wait(), timeout=self._teardown_wait_s)
