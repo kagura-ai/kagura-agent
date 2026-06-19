@@ -1,0 +1,26 @@
+# The agent BRAIN image (#102): runs the brain's agentic loop — and its tool
+# execution — INSIDE the hardened, egress-sealed container, instead of as a host
+# subprocess. FROM the python variant; adds kagura-agent + the Claude SDK and the
+# brain entrypoint.
+#
+# Protocol: the membrane (cockpit) feeds the encoded run input (a Task, + optional
+# resume) on stdin and streams BrainEvents back on stdout as JSON lines; container
+# logs go to stderr (the entrypoint keeps stdout the pure event channel).
+#
+# Auth: BYOK (#113). The membrane injects ANTHROPIC_API_KEY into the container's
+# env (the egress allowlist always includes api.anthropic.com so the call
+# succeeds); NO key is baked into the image. Subscription auth stays host-side /
+# in-process and never enters the container.
+FROM kagura-agent:python
+
+USER root
+# kagura-agent + the `claude` SDK, installed IMPORTABLY into the system env so the
+# entrypoint can `python3 -m` it (uv tool install would isolate it as a CLI shim,
+# not importable). No credentials baked. --break-system-packages: debian bookworm
+# marks the system interpreter externally-managed (PEP 668).
+RUN python3 -m pip install --no-cache-dir --break-system-packages 'kagura-agent[claude]'
+USER agent
+
+# stdin (encoded Task) -> brain.run() -> stdout (JSON-line BrainEvents). `python3`
+# (not `python`) — the debian base ships python3 with no `python` symlink.
+ENTRYPOINT ["python3", "-m", "kagura_agent.core.brain.container_main"]
