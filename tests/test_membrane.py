@@ -651,6 +651,41 @@ def test_egress_rejects_malformed_unclosed_bracket_entry() -> None:
         EgressPolicy(allow=("[::1",))
 
 
+def test_egress_rejects_comma_bearing_host_fail_closed() -> None:
+    # #119: a comma is the label delimiter (as_label joins on ",", the proxy's
+    # policy_from_label splits on ","). A host containing a comma must be rejected
+    # at construction — otherwise it is stored as ONE junk entry the gate denies,
+    # yet the label round-trip splits it into multiple ALLOWED hosts (fail-open).
+    with pytest.raises(ValueError, match="not a plain exact"):
+        EgressPolicy(allow=("api.anthropic.com,attacker.example.com",))
+
+
+def test_egress_rejects_whitespace_in_host() -> None:
+    # #119: whitespace (incl. newline) never appears in a real hostname and would
+    # pollute the --label value (label injection). Reject at construction.
+    for bad in ("a.com evil.com", "api.anthropic.com\nattacker.com", "a\tb.com"):
+        with pytest.raises(ValueError, match="not a plain exact"):
+            EgressPolicy(allow=(bad,))
+
+
+def test_comma_host_cannot_smuggle_an_allowed_host_through_the_label() -> None:
+    # #119 regression: the launcher gate and the proxy must agree. A comma-bearing
+    # entry is rejected, so it can never be smuggled into the label and re-expanded
+    # into an extra allowed host by the proxy's policy_from_label.
+    from kagura_agent.membrane.egress_proxy import policy_from_label
+
+    # A legitimate multi-host policy round-trips losslessly...
+    legit = EgressPolicy(allow=("api.anthropic.com", "api.github.com"))
+    rebuilt = policy_from_label(legit.as_label())
+    assert rebuilt.decide("api.anthropic.com") is EgressDecision.ALLOW
+    assert rebuilt.decide("api.github.com") is EgressDecision.ALLOW
+    assert rebuilt.decide("attacker.example.com") is EgressDecision.DENY
+    # ...but a comma-smuggled entry never even constructs, so the gate's DENY for
+    # the smuggled host can no longer disagree with the proxy.
+    with pytest.raises(ValueError):
+        EgressPolicy(allow=("api.anthropic.com,attacker.example.com",))
+
+
 # Security-critical direction: normalization must NOT widen the allow set.
 # These DENY assertions pin a near-miss against each normalization step so a
 # future "make it a suffix match" regression is caught.
