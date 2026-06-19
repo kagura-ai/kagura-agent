@@ -87,6 +87,24 @@ class EgressPolicy:
                 or host.startswith(".")
                 or "[" in host
                 or "]" in host
+                # A comma is the label delimiter: `as_label` joins entries with
+                # "," and the proxy's `policy_from_label` splits on "," (#119). A
+                # comma in a host would be stored as ONE junk entry the gate denies,
+                # yet the label round-trip would re-expand it into multiple ALLOWED
+                # hosts — a fail-open allowlist bypass. Whitespace (incl. newlines)
+                # never appears in a real host and would pollute the --label value.
+                # Reject both at the same fail-closed gate so the launcher and the
+                # proxy can never disagree about what this run may reach.
+                or "," in host
+                or any(c.isspace() for c in host)
+                # Idempotency guard (#119): this loop normalizes ONCE and stores the
+                # result, but `decide()` and the proxy's `policy_from_label` normalize
+                # it AGAIN. If a second pass would change the value, the launcher gate
+                # and the proxy hold different allowlists — e.g. a bracketed single-
+                # colon literal "[a:b]" → "a:b" (stored) → "a" (re-normalized), so the
+                # proxy would ALLOW bare host "a" the gate never approved. Require a
+                # stable fixpoint so the two enforcement points can never disagree.
+                or _normalize_host(host) != host
             ):
                 raise ValueError(
                     f"egress allowlist entry {entry!r} is not a plain exact "
