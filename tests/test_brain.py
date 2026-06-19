@@ -39,6 +39,15 @@ def test_byok_auth_carries_the_key() -> None:
     assert res.secret == "sk-xyz"
 
 
+def test_byok_mode_is_preserved_not_collapsed_to_key() -> None:
+    # #123: when the satisfied mode is byok, the resolution must report mode="byok",
+    # not "key". A caller branching on the future SaaS BYOK path must be able to tell
+    # BYOK from key auth — the distinction this module exists to preserve.
+    res = resolve_auth(("byok",), env={"ANTHROPIC_API_KEY": "sk-xyz"})
+    assert res.mode == "byok"
+    assert res.secret == "sk-xyz"
+
+
 def test_subscription_preferred_over_key_when_both_present() -> None:
     res = resolve_auth(
         ("subscription", "key"),

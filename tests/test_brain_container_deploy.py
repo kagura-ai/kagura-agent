@@ -12,6 +12,7 @@ stays the in-process default and never enters the container.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Mapping
 
 import pytest
@@ -26,7 +27,11 @@ from kagura_agent.core.brain.base import (
 )
 from kagura_agent.core.brain.container import decode_event, encode_run_input
 from kagura_agent.core.brain.container_main import run_brain_entrypoint
-from kagura_agent.membrane.brain_container import DockerBrainBackend, build_brain_launch_spec
+from kagura_agent.membrane.brain_container import (
+    DockerBrainBackend,
+    _DockerBrainSession,
+    build_brain_launch_spec,
+)
 from kagura_agent.membrane.launcher import Mount, validate_spec
 
 # --------------------------------------------------------------------------
@@ -220,3 +225,134 @@ async def test_entrypoint_builds_brain_from_env_and_emits_the_protocol():
         MessageEvent(text="prompt=hello"),
         DoneEvent(result="ok", state={"turn": 1}),
     ]
+
+
+# --------------------------------------------------------------------------
+# _DockerBrainSession — the BOUNDED stdout stream (#123): idle/wall-clock
+# timeout, oversized-line guard, and guaranteed teardown. proc + feeder are
+# injected, so the bounding/teardown logic is unit-tested with fakes (only the
+# real `docker run` in DockerBrainBackend.start is the deployment edge).
+# --------------------------------------------------------------------------
+
+
+class _FakeStdout:
+    def __init__(self, lines, *, stall=False, raise_value_error=False):
+        self._lines = list(lines)
+        self._stall = stall
+        self._raise = raise_value_error
+
+    async def readline(self) -> bytes:
+        if self._stall:
+            await asyncio.Event().wait()  # never resolves → exercises the idle timeout
+        if self._raise:
+            raise ValueError("Separator is not found, and chunk exceed the limit")
+        return self._lines.pop(0) if self._lines else b""  # b"" == EOF
+
+
+class _FakeProc:
+    def __init__(self, stdout, *, returncode=None, wait_stalls=False):
+        self.stdout = stdout
+        self.returncode = returncode
+        self.terminated = 0
+        self.killed = False
+        self.waited = 0
+        self._wait_stalls = wait_stalls
+
+    def terminate(self) -> None:
+        self.terminated += 1  # does NOT set returncode (a container may ignore SIGTERM)
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self) -> int:
+        self.waited += 1
+        if self._wait_stalls and not self.killed:
+            await asyncio.Event().wait()  # SIGTERM ignored — only kill() ends the wait
+        if self.returncode is None:
+            self.returncode = -15
+        return self.returncode
+
+
+def _session(lines=(), *, returncode=None, stall=False, raise_value_error=False,
+             wait_stalls=False, **kw):
+    proc = _FakeProc(
+        _FakeStdout(lines, stall=stall, raise_value_error=raise_value_error),
+        returncode=returncode, wait_stalls=wait_stalls,
+    )
+    feeder = asyncio.create_task(asyncio.sleep(3600))  # a real cancellable stdin-feeder
+    return _DockerBrainSession("cid-1", proc, feeder=feeder, **kw), proc, feeder
+
+
+# events() — bounded streaming (teardown is the separate aclose())
+
+
+async def test_session_streams_lines_then_eof():
+    sess, proc, feeder = _session([b"line1\n", b"line2\n"])
+    out = [line async for line in sess.events()]
+    assert out == ["line1", "line2"]
+    await sess.aclose()  # the provider always does this; here we drive it explicitly
+    assert feeder.cancelled() or feeder.done()
+
+
+async def test_session_idle_timeout_fails_closed():
+    sess, proc, feeder = _session(stall=True, idle_timeout_s=0.02)
+    with pytest.raises(TimeoutError, match="no output"):
+        async for _ in sess.events():
+            pass
+    await sess.aclose()
+
+
+async def test_session_wall_clock_deadline_fails_closed():
+    calls = {"n": 0}
+
+    def clock() -> float:
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 100.0  # first sets deadline; next is past it
+
+    sess, proc, feeder = _session([b"x\n"], wall_clock_s=10.0, clock=clock)
+    with pytest.raises(TimeoutError, match="wall-clock"):
+        async for _ in sess.events():
+            pass
+    await sess.aclose()
+
+
+async def test_session_oversized_line_fails_closed_with_clear_error():
+    sess, proc, feeder = _session(raise_value_error=True)
+    with pytest.raises(ValueError, match="oversized"):
+        async for _ in sess.events():
+            pass
+    await sess.aclose()
+
+
+# aclose() — guaranteed, idempotent, non-hanging teardown
+
+
+async def test_aclose_cancels_feeder_and_terminates_proc():
+    sess, proc, feeder = _session([])
+    await sess.aclose()
+    assert proc.terminated == 1 and proc.waited >= 1  # reaped
+    assert feeder.cancelled() or feeder.done()
+    assert proc.killed is False  # graceful SIGTERM sufficed
+
+
+async def test_aclose_skips_terminate_when_proc_already_exited():
+    sess, proc, feeder = _session([], returncode=0)  # already exited
+    await sess.aclose()
+    assert proc.terminated == 0  # returncode already set → no terminate/wait
+    assert feeder.cancelled() or feeder.done()
+
+
+async def test_aclose_escalates_to_sigkill_when_terminate_ignored():
+    # A container that ignores SIGTERM must not let teardown hang forever — escalate
+    # to SIGKILL after the grace period.
+    sess, proc, feeder = _session([], wait_stalls=True, teardown_wait_s=0.02)
+    await sess.aclose()
+    assert proc.terminated == 1 and proc.killed is True
+
+
+async def test_aclose_is_idempotent():
+    sess, proc, feeder = _session([])
+    await sess.aclose()
+    await sess.aclose()  # second call is a no-op
+    assert proc.terminated == 1  # not terminated twice

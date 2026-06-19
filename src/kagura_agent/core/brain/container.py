@@ -72,16 +72,38 @@ def encode_run_input(task: Task, resume: Checkpoint | None) -> bytes:
 def decode_run_input(data: bytes) -> tuple[Task, Checkpoint | None]:
     """Decode the container's run input back into ``(Task, resume)``.
 
-    Fail-closed: malformed JSON or a missing required field raises rather than
-    fabricating a default task — the entrypoint must not run on a garbled input."""
-    obj = json.loads(data)
-    t = obj["task"]
-    task = Task(prompt=t["prompt"], session_id=t["session_id"])
+    Fail-closed and UNIFORMLY, like :func:`decode_event`: malformed JSON, a non-object
+    payload, a missing required field, or a field of the wrong type all raise a single
+    ``ValueError`` rather than a raw ``KeyError``/``TypeError`` — the entrypoint must
+    not run on a garbled input, and a wrong-typed ``turn``/``state`` must not build a
+    malformed ``Checkpoint`` that breaks the brain mid-run (e.g. ``state.get(...)`` on
+    a list)."""
+    try:
+        obj = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"malformed run input (not JSON): {exc}") from exc
+    if not isinstance(obj, dict):
+        raise ValueError(f"run input must be a JSON object, got {type(obj).__name__}")
+    t = obj.get("task")
+    if not isinstance(t, dict):
+        raise ValueError("run input 'task' must be an object")
+    task = Task(
+        prompt=_require_str(t, "prompt", ctx="run input task"),
+        session_id=_require_str(t, "session_id", ctx="run input task"),
+    )
     r = obj.get("resume")
-    resume = (
-        None
-        if r is None
-        else Checkpoint(session_id=r["session_id"], turn=r["turn"], state=r["state"])
+    if r is None:
+        return task, None
+    if not isinstance(r, dict):
+        raise ValueError("run input 'resume' must be an object or null")
+    turn = r.get("turn")
+    if not isinstance(turn, int) or isinstance(turn, bool):
+        raise ValueError(f"run input resume 'turn' must be an int, got {type(turn).__name__}")
+    state = r.get("state")
+    if not isinstance(state, dict):
+        raise ValueError(f"run input resume 'state' must be an object, got {type(state).__name__}")
+    resume = Checkpoint(
+        session_id=_require_str(r, "session_id", ctx="run input resume"), turn=turn, state=state
     )
     return task, resume
 
@@ -95,11 +117,11 @@ def encode_event(event: BrainEvent) -> str:
     raise TypeError(f"unencodable brain event: {type(event).__name__}")
 
 
-def _require_str(obj: dict[str, Any], field: str) -> str:
+def _require_str(obj: dict[str, Any], field: str, *, ctx: str = "brain event") -> str:
     value = obj.get(field)
     if not isinstance(value, str):
         raise ValueError(
-            f"brain event field {field!r} must be a string, got {type(value).__name__}"
+            f"{ctx} field {field!r} must be a string, got {type(value).__name__}"
         )
     return value
 
@@ -167,13 +189,18 @@ class BrainContainerSession(Protocol):
 
     **Teardown.** ``container_id`` surfaces via the provider's ``on_start`` the
     instant the container starts, so the cockpit (PR2) registers it *before* the
-    run completes — that registration is the single seam through which ``/kill``
-    and restart reconciliation reap a container left running after a mid-stream
-    failure (this generator deliberately holds no teardown of its own)."""
+    run completes — that registration lets ``/kill`` and restart reconciliation reap
+    a container as a backstop. The *primary* teardown is :meth:`aclose`, which the
+    provider calls in a ``finally`` on EVERY exit (normal, error, timeout, or the
+    consumer abandoning the run) so a failed/timed-out run reaps its container and
+    feeder *synchronously* rather than leaking until GC. ``aclose`` MUST be
+    idempotent and MUST NOT hang (terminate, then SIGKILL-escalate)."""
 
     container_id: str
 
     def events(self) -> AsyncIterator[str]: ...
+
+    async def aclose(self) -> None: ...
 
 
 #: Start a brain container with the given encoded run input (stdin payload) and
@@ -207,12 +234,20 @@ class ContainerBrainProvider:
         self, task: Task, *, resume: Checkpoint | None = None
     ) -> AsyncIterator[BrainEvent]:
         session = await self._start(encode_run_input(task, resume))
-        if self._on_start is not None:
-            self._on_start(session.container_id)
-        async for line in session.events():
-            event = decode_event(line)
-            if event is not None:
-                yield event
+        # Reap the container + feeder on EVERY exit, synchronously. `async for` does
+        # NOT close its iterator when the consumer unwinds, so a decode_event ValueError
+        # (or a timeout from events(), or on_start raising, or the consumer abandoning
+        # the run) would otherwise leave the container live until GC. The session owns
+        # teardown via aclose(); we guarantee it runs here.
+        try:
+            if self._on_start is not None:
+                self._on_start(session.container_id)
+            async for line in session.events():
+                event = decode_event(line)
+                if event is not None:
+                    yield event
+        finally:
+            await session.aclose()
 
 
 # --------------------------------------------------------------------------
