@@ -15,10 +15,13 @@ Subscription auth stays the in-process default and never enters the container.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Set
 
 from kagura_agent.core.brain.container import BrainContainerSession
 from kagura_agent.membrane.launcher import LaunchSpec, Mount
+
+log = logging.getLogger(__name__)
 
 #: The container path the project root is mounted at (read-only).
 _WORKSPACE = "/workspace"
@@ -49,7 +52,10 @@ def build_brain_launch_spec(
       reaches Anthropic), merged with any caller-supplied hosts the tools need;
     - ``tool_creds_env`` (leased tool credentials) is merged into the env.
     """
-    if not byok_key.strip():
+    # Store the STRIPPED key: a key read from a file/env often has a trailing
+    # newline, which would otherwise be injected verbatim and 401 at Anthropic.
+    key = byok_key.strip()
+    if not key:
         raise ValueError(
             "in-container brain requires a BYOK ANTHROPIC_API_KEY — subscription auth "
             "does not run inside the container (set ANTHROPIC_API_KEY or run in-process)"
@@ -66,9 +72,11 @@ def build_brain_launch_spec(
         )
     # BYOK key set LAST so it is authoritative even if the reserved check ever missed
     # a variant; tool creds fill the rest of the env.
-    env: dict[str, str] = {**creds, "ANTHROPIC_API_KEY": byok_key}
-    # dict.fromkeys dedups while preserving order, with Anthropic first.
-    egress = tuple(dict.fromkeys((_ANTHROPIC_HOST, *egress_allow)))
+    env: dict[str, str] = {**creds, "ANTHROPIC_API_KEY": key}
+    # Always allow the brain's LLM endpoint; drop any case-variant duplicate of it
+    # from the caller's list (EgressPolicy lowercases hosts at enforcement).
+    extra = tuple(h for h in egress_allow if h.lower() != _ANTHROPIC_HOST)
+    egress = (_ANTHROPIC_HOST, *extra)
     return LaunchSpec(
         image=image,
         mounts=(Mount(source=project_root, target=_WORKSPACE, read_only=True),),
@@ -141,28 +149,26 @@ class DockerBrainBackend:
         # stdout reader in events() runs concurrently with this feeder).
         async def _feed() -> None:
             assert proc.stdin is not None
-            proc.stdin.write(stdin)
-            await proc.stdin.drain()
-            proc.stdin.write_eof()
+            try:
+                proc.stdin.write(stdin)
+                await proc.stdin.drain()
+                proc.stdin.write_eof()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                # The container closed stdin early (read its input then exited, or
+                # crashed). Not fatal — the stdout stream + Session's no-DoneEvent
+                # fail-closed decide the outcome; log so the feed failure isn't a
+                # silent unretrieved-task exception.
+                log.warning("brain container %s: feeding run input failed", name)
 
         return _DockerBrainSession(name, proc, feeder=asyncio.create_task(_feed()))
 
     async def live_container_ids(self) -> Set[str]:  # pragma: no cover - real `docker ps`
-        import asyncio
+        # Reuse the single docker-enumeration seam (DockerRuntime.list, fail-closed
+        # on a docker error) rather than a second `docker ps` copy that could drift
+        # from the launcher's reconcile on a label/filter change.
+        from kagura_agent.membrane.runtime import DockerRuntime
 
-        from kagura_agent.membrane.launcher import AGENT_LABEL
-
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "ps", "--filter", f"label={AGENT_LABEL}", "-q",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await proc.communicate()
-        # Fail closed: a failed enumeration must not look like "nothing alive"
-        # (that would let reconcile mark live sessions dead).
-        if proc.returncode != 0:
-            raise RuntimeError(f"docker ps failed: {err.decode().strip()}")
-        return frozenset(line for line in out.decode().splitlines() if line)
+        return frozenset(await DockerRuntime().list())
 
 
 class _DockerBrainSession:  # pragma: no cover - wraps a live docker subprocess

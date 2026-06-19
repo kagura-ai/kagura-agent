@@ -101,6 +101,33 @@ def test_spec_passes_the_membrane_validate_gate(tmp_path):
     assert "api.anthropic.com" in validated.egress_allow
 
 
+def test_spec_carries_byok_and_ro_mount_into_real_docker_args(tmp_path):
+    # End-to-end at the argv level: the BYOK key must actually reach docker as an
+    # `-e ANTHROPIC_API_KEY=...` env flag, and the project mount as a read-only
+    # `-v ...:/workspace:ro` — the security-critical payload of #113, all pure.
+    from kagura_agent.membrane.launcher import docker_run_args
+
+    spec = build_brain_launch_spec(image="img", project_root=str(tmp_path), byok_key="sk-key")
+    args = docker_run_args(validate_spec(spec, project_root=str(tmp_path)))
+    assert "ANTHROPIC_API_KEY=sk-key" in args  # the BYOK key reaches the container env
+    assert any(a.endswith(":/workspace:ro") for a in args)  # project root mounted read-only
+
+
+def test_byok_key_is_stripped_before_injection():
+    # A key read from a file/env often has a trailing newline; storing it verbatim
+    # would 401 at Anthropic. The stored key must be stripped.
+    spec = build_brain_launch_spec(image="img", project_root="/p", byok_key="  sk-key\n")
+    assert spec.env["ANTHROPIC_API_KEY"] == "sk-key"
+
+
+def test_spec_dedups_anthropic_case_insensitively():
+    # A case-variant of the always-allowed host must not produce a redundant entry.
+    spec = build_brain_launch_spec(
+        image="img", project_root="/p", byok_key="k", egress_allow=("API.ANTHROPIC.COM",)
+    )
+    assert sum(1 for h in spec.egress_allow if h.lower() == "api.anthropic.com") == 1
+
+
 # --------------------------------------------------------------------------
 # DockerBrainBackend — spec_for resolves the BYOK key host-side
 # --------------------------------------------------------------------------
@@ -135,6 +162,42 @@ class _FakeBrain:
     ) -> AsyncIterator[BrainEvent]:
         yield MessageEvent(text=f"prompt={task.prompt}")
         yield DoneEvent(result="ok", state={"turn": 1})
+
+
+async def test_entrypoint_propagates_make_brain_failure_without_emitting():
+    # A brain that can't be built (e.g. BrainUnavailable / AuthError on a bad BYOK
+    # key) must fail the run, never emit a spurious DoneEvent that would look like a
+    # clean result — the container exits non-zero, the host Session fails closed.
+    def make_brain(env: Mapping[str, str]) -> _FakeBrain:
+        raise RuntimeError("brain construction failed")
+
+    emitted: list[str] = []
+    payload = encode_run_input(Task(prompt="p", session_id="s"), None)
+    with pytest.raises(RuntimeError, match="brain construction failed"):
+        await run_brain_entrypoint(payload, make_brain=make_brain, env={}, emit=emitted.append)
+    assert emitted == []  # nothing emitted on a build failure
+
+
+async def test_entrypoint_threads_resume_into_the_brain():
+    # A dropped resume would silently restart a resumed session from scratch — the
+    # entrypoint must thread the resume Checkpoint into brain.run(resume=...).
+    seen: dict[str, Checkpoint | None] = {}
+
+    class _ResumeBrain:
+        caps = BrainCaps(name="claude")
+
+        async def run(
+            self, task: Task, *, resume: Checkpoint | None = None
+        ) -> AsyncIterator[BrainEvent]:
+            seen["resume"] = resume
+            yield DoneEvent(result="ok")
+
+    resume = Checkpoint(session_id="s", turn=2, state={"turn": 2})
+    payload = encode_run_input(Task(prompt="p", session_id="s"), resume)
+    await run_brain_entrypoint(
+        payload, make_brain=lambda env: _ResumeBrain(), env={}, emit=lambda _line: None
+    )
+    assert seen["resume"] == resume
 
 
 async def test_entrypoint_builds_brain_from_env_and_emits_the_protocol():
