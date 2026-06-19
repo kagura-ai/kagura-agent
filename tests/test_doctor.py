@@ -212,6 +212,19 @@ def test_compose_seal_parser_rejects_internal_true_nested_deeper() -> None:
     assert _compose_declares_sealed_egress(nested) is False
 
 
+def test_compose_seal_parser_rejects_internal_true_without_a_space() -> None:
+    # #122 fail-open: `internal:true` (no space after the colon) is NOT a YAML
+    # mapping — YAML parses it as the scalar string "internal:true", so Docker leaves
+    # the network UNsealed. doctor must not report it sealed (false confidence in a
+    # security gate); a mapping requires whitespace after the colon.
+    text = (
+        "networks:\n"
+        "  agent-egress:\n"
+        "    internal:true\n"  # no space → YAML scalar, not the internal flag
+    )
+    assert _compose_declares_sealed_egress(text) is False
+
+
 def test_compose_seal_parser_matches_real_deploy_compose() -> None:
     # The shipped compose must parse as sealed (guards against a future edit that
     # silently unseals it or breaks the heuristic).
