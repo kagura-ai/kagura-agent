@@ -38,10 +38,14 @@ class _FakeContainerSession:
     def __init__(self, container_id: str, lines: list[str]) -> None:
         self.container_id = container_id
         self._lines = lines
+        self.closed = False
 
     async def events(self) -> AsyncIterator[str]:
         for line in self._lines:
             yield line
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class _FakeBackend:

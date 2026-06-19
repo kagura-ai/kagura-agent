@@ -16,6 +16,7 @@ Subscription auth stays the in-process default and never enters the container.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, Mapping, Set
@@ -39,6 +40,9 @@ _WALL_CLOCK_S = 6 * 60 * 60.0
 #: opaque error BEFORE decode_event's char cap applies; size it above that cap so the
 #: decoder's clean, uniform ValueError is the binding constraint.
 _STDOUT_LIMIT_BYTES = 32 * 1024 * 1024
+#: Grace period for a graceful SIGTERM at teardown before escalating to SIGKILL, so
+#: teardown — the very thing that bounds a hung container — can never itself hang.
+_TEARDOWN_WAIT_S = 10.0
 
 #: The container path the project root is mounted at (read-only).
 _WORKSPACE = "/workspace"
@@ -212,6 +216,7 @@ class _DockerBrainSession:
         feeder: asyncio.Task[None],
         idle_timeout_s: float = _IDLE_TIMEOUT_S,
         wall_clock_s: float = _WALL_CLOCK_S,
+        teardown_wait_s: float = _TEARDOWN_WAIT_S,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.container_id = container_id
@@ -219,51 +224,61 @@ class _DockerBrainSession:
         self._feeder = feeder  # keep the stdin-feeder task referenced (no GC mid-run)
         self._idle_timeout_s = idle_timeout_s
         self._wall_clock_s = wall_clock_s
+        self._teardown_wait_s = teardown_wait_s
         self._clock = clock
+        self._closed = False
 
     async def events(self) -> AsyncIterator[str]:
         deadline = self._clock() + self._wall_clock_s
-        try:
-            while True:
-                remaining = deadline - self._clock()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        f"brain container {self.container_id} exceeded the "
-                        f"{self._wall_clock_s:.0f}s wall-clock limit"
-                    )
-                try:
-                    raw = await asyncio.wait_for(
-                        self._proc.stdout.readline(),
-                        timeout=min(self._idle_timeout_s, remaining),
-                    )
-                except TimeoutError:
-                    raise TimeoutError(
-                        f"brain container {self.container_id} produced no output for "
-                        f"{self._idle_timeout_s:.0f}s — treating it as hung"
-                    ) from None
-                except (ValueError, asyncio.LimitOverrunError) as exc:
-                    # readline raises when a single line exceeds the StreamReader limit.
-                    # Fail closed with a clear message (decode_event's char cap is the
-                    # intended bound; this byte limit is only the backstop).
-                    raise ValueError(
-                        f"brain container {self.container_id} emitted an oversized "
-                        f"stdout line: {exc}"
-                    ) from exc
-                if not raw:  # EOF — the container closed stdout / exited
-                    return
-                yield raw.decode().rstrip("\n")
-        finally:
-            await self._teardown()
+        while True:
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"brain container {self.container_id} exceeded the "
+                    f"{self._wall_clock_s:.0f}s wall-clock limit"
+                )
+            try:
+                raw = await asyncio.wait_for(
+                    self._proc.stdout.readline(),
+                    timeout=min(self._idle_timeout_s, remaining),
+                )
+            except TimeoutError:
+                raise TimeoutError(
+                    f"brain container {self.container_id} produced no output for "
+                    f"{self._idle_timeout_s:.0f}s — treating it as hung"
+                ) from None
+            except (ValueError, asyncio.LimitOverrunError) as exc:
+                # readline raises when a single line exceeds the StreamReader limit.
+                # Fail closed with a clear message (decode_event's char cap is the
+                # intended bound; this byte limit is only the backstop).
+                raise ValueError(
+                    f"brain container {self.container_id} emitted an oversized "
+                    f"stdout line: {exc}"
+                ) from exc
+            if not raw:  # EOF — the container closed stdout / exited
+                return
+            yield raw.decode().rstrip("\n")
 
-    async def _teardown(self) -> None:
-        # Cancel + reap the stdin feeder (so a failed feed isn't an unretrieved-task
-        # exception), then terminate + wait the docker subprocess so a finished or
-        # abandoned run never leaves a live container.
+    async def aclose(self) -> None:
+        """Reap the run: cancel the stdin feeder, then terminate + reap the docker
+        subprocess. Idempotent (the provider calls it in a finally on every path).
+        Cannot itself hang: SIGTERM is escalated to SIGKILL if the container ignores
+        it, and every step is suppressed so teardown never masks the run's real error."""
+        if self._closed:
+            return
+        self._closed = True
         self._feeder.cancel()
         await asyncio.gather(self._feeder, return_exceptions=True)
-        if self._proc.returncode is None:
-            try:
-                self._proc.terminate()
-            except ProcessLookupError:  # pragma: no cover - benign race: already exited
-                pass
-            await self._proc.wait()
+        if self._proc.returncode is not None:
+            return  # already exited — nothing to reap
+        with contextlib.suppress(Exception):
+            self._proc.terminate()
+        try:
+            await asyncio.wait_for(self._proc.wait(), timeout=self._teardown_wait_s)
+        except Exception:
+            # SIGTERM ignored (or wait failed) — escalate to SIGKILL so teardown,
+            # the very thing that bounds a hung container, can never itself hang.
+            with contextlib.suppress(Exception):
+                self._proc.kill()
+            with contextlib.suppress(Exception):
+                await self._proc.wait()

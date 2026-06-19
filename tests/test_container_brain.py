@@ -80,6 +80,8 @@ def test_decode_run_input_missing_field_raises_valueerror():
         decode_run_input(json.dumps({"task": {"prompt": "x"}}).encode())  # no session_id
     with pytest.raises(ValueError):
         decode_run_input(json.dumps({"not_task": 1}).encode())  # no task
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        decode_run_input(json.dumps([1, 2]).encode())  # not an object envelope
 
 
 def test_decode_run_input_wrong_typed_resume_raises_valueerror():
@@ -88,15 +90,15 @@ def test_decode_run_input_wrong_typed_resume_raises_valueerror():
     # with decode_event's hardening, which the input side previously lacked.
     import json
 
-    base = {"task": {"prompt": "x", "session_id": "s"}}
+    task = {"prompt": "x", "session_id": "s"}
+    bad_turn = {"task": task, "resume": {"session_id": "s", "turn": "three", "state": {}}}
+    bad_state = {"task": task, "resume": {"session_id": "s", "turn": 1, "state": [1, 2]}}
     with pytest.raises(ValueError):
-        decode_run_input(
-            json.dumps({**base, "resume": {"session_id": "s", "turn": "three", "state": {}}}).encode()
-        )
+        decode_run_input(json.dumps(bad_turn).encode())
     with pytest.raises(ValueError):
-        decode_run_input(
-            json.dumps({**base, "resume": {"session_id": "s", "turn": 1, "state": [1, 2]}}).encode()
-        )
+        decode_run_input(json.dumps(bad_state).encode())
+    with pytest.raises(ValueError, match="'resume' must be an object"):
+        decode_run_input(json.dumps({"task": task, "resume": 5}).encode())  # resume not an object
 
 
 # --------------------------------------------------------------------------
@@ -187,15 +189,20 @@ def test_encode_event_rejects_unknown_event_type():
 
 
 class _FakeSession:
-    """A fake container session: a fixed container id + a fixed line stream."""
+    """A fake container session: a fixed container id + a fixed line stream, plus an
+    aclose() that records whether the provider reaped it (the teardown contract)."""
 
     def __init__(self, container_id: str, lines: list[str]) -> None:
         self.container_id = container_id
         self._lines = lines
+        self.closed = False
 
     async def events(self) -> AsyncIterator[str]:
         for line in self._lines:
             yield line
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 def _provider(lines: list[str], *, on_start=None) -> ContainerBrainProvider:
@@ -203,6 +210,21 @@ def _provider(lines: list[str], *, on_start=None) -> ContainerBrainProvider:
         return _FakeSession("c0ntainer1d", lines)
 
     return ContainerBrainProvider(start, caps=_CAPS, on_start=on_start)
+
+
+def _provider_capturing_session(
+    lines: list[str], *, on_start=None
+) -> tuple[ContainerBrainProvider, list[_FakeSession]]:
+    """A provider whose started session is captured so a test can assert it was
+    reaped (aclose) on every exit path."""
+    captured: list[_FakeSession] = []
+
+    async def start(_payload: bytes) -> _FakeSession:
+        session = _FakeSession("c0ntainer1d", lines)
+        captured.append(session)
+        return session
+
+    return ContainerBrainProvider(start, caps=_CAPS, on_start=on_start), captured
 
 
 async def test_provider_is_a_brain_provider():
@@ -252,6 +274,37 @@ async def test_provider_forwards_the_encoded_task_to_start():
     [_ev async for _ev in provider.run(task, resume=resume)]
     # The payload the container received decodes back to exactly our task+resume.
     assert decode_run_input(captured["payload"]) == (task, resume)
+
+
+async def test_provider_reaps_session_on_normal_completion():
+    provider, captured = _provider_capturing_session([encode_event(DoneEvent(result="ok"))])
+    [_ev async for _ev in provider.run(Task(prompt="p", session_id="s"))]
+    assert captured[0].closed is True  # reaped after a clean run
+
+
+async def test_provider_reaps_session_synchronously_on_decode_failure():
+    # #123 regression: a malformed line raises ValueError INSIDE run's async-for body.
+    # run's finally must reap the container synchronously (not leak it until GC) — the
+    # exact mid-stream-failure leak the seam contract warns about.
+    provider, captured = _provider_capturing_session(["this is not valid json"])
+    with pytest.raises(ValueError):
+        [_ev async for _ev in provider.run(Task(prompt="p", session_id="s"))]
+    assert captured[0].closed is True
+
+
+async def test_provider_reaps_session_when_on_start_raises():
+    # #123 regression: if on_start throws after the container started but before
+    # events() is iterated, the container must still be reaped (not leaked with no
+    # teardown path).
+    def boom(_cid: str) -> None:
+        raise RuntimeError("registry write failed")
+
+    provider, captured = _provider_capturing_session(
+        [encode_event(DoneEvent(result="ok"))], on_start=boom
+    )
+    with pytest.raises(RuntimeError, match="registry write failed"):
+        [_ev async for _ev in provider.run(Task(prompt="p", session_id="s"))]
+    assert captured[0].closed is True
 
 
 # --------------------------------------------------------------------------

@@ -189,13 +189,18 @@ class BrainContainerSession(Protocol):
 
     **Teardown.** ``container_id`` surfaces via the provider's ``on_start`` the
     instant the container starts, so the cockpit (PR2) registers it *before* the
-    run completes — that registration is the single seam through which ``/kill``
-    and restart reconciliation reap a container left running after a mid-stream
-    failure (this generator deliberately holds no teardown of its own)."""
+    run completes — that registration lets ``/kill`` and restart reconciliation reap
+    a container as a backstop. The *primary* teardown is :meth:`aclose`, which the
+    provider calls in a ``finally`` on EVERY exit (normal, error, timeout, or the
+    consumer abandoning the run) so a failed/timed-out run reaps its container and
+    feeder *synchronously* rather than leaking until GC. ``aclose`` MUST be
+    idempotent and MUST NOT hang (terminate, then SIGKILL-escalate)."""
 
     container_id: str
 
     def events(self) -> AsyncIterator[str]: ...
+
+    async def aclose(self) -> None: ...
 
 
 #: Start a brain container with the given encoded run input (stdin payload) and
@@ -229,12 +234,20 @@ class ContainerBrainProvider:
         self, task: Task, *, resume: Checkpoint | None = None
     ) -> AsyncIterator[BrainEvent]:
         session = await self._start(encode_run_input(task, resume))
-        if self._on_start is not None:
-            self._on_start(session.container_id)
-        async for line in session.events():
-            event = decode_event(line)
-            if event is not None:
-                yield event
+        # Reap the container + feeder on EVERY exit, synchronously. `async for` does
+        # NOT close its iterator when the consumer unwinds, so a decode_event ValueError
+        # (or a timeout from events(), or on_start raising, or the consumer abandoning
+        # the run) would otherwise leave the container live until GC. The session owns
+        # teardown via aclose(); we guarantee it runs here.
+        try:
+            if self._on_start is not None:
+                self._on_start(session.container_id)
+            async for line in session.events():
+                event = decode_event(line)
+                if event is not None:
+                    yield event
+        finally:
+            await session.aclose()
 
 
 # --------------------------------------------------------------------------
