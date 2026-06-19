@@ -277,8 +277,10 @@ class _DockerBrainSession:
             await asyncio.wait_for(self._proc.wait(), timeout=self._teardown_wait_s)
         except Exception:
             # SIGTERM ignored (or wait failed) — escalate to SIGKILL so teardown,
-            # the very thing that bounds a hung container, can never itself hang.
+            # the very thing that bounds a hung container, can never itself hang. The
+            # final reap is also time-bounded so even a pathological child can't wedge
+            # teardown (SIGKILL is uncatchable, so this normally returns immediately).
             with contextlib.suppress(Exception):
                 self._proc.kill()
             with contextlib.suppress(Exception):
-                await self._proc.wait()
+                await asyncio.wait_for(self._proc.wait(), timeout=self._teardown_wait_s)
