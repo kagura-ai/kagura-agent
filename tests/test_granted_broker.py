@@ -5,8 +5,9 @@ an ungranted ``(provider, scope)`` is rejected with `GrantDenied` **before** the
 inner broker is reached, so an unauthorized pair never triggers a mint. The two
 mint entries — ``acquire`` and ``renew`` — are both gated; ``renew`` re-checks
 because it trusts a caller-supplied `Lease` and would otherwise let a fabricated
-lease mint an ungranted scope. ``release`` / ``container_env`` / ``open_leases``
-/ ``sweep`` do not mint and delegate straight through.
+lease mint an ungranted scope. ``container_env`` re-checks for the same reason (it
+materialises a caller-supplied lease's cred into env). ``release`` / ``open_leases``
+/ ``sweep`` do not mint or materialise a cred and delegate straight through.
 
 `lease_requests` turns a `GrantSet` into a pure, deterministically-ordered tuple
 of `LeaseRequest`s (empty GrantSet → empty tuple: default-deny gives the empty
@@ -201,13 +202,28 @@ async def test_sweep_delegates_and_revokes_open_stateful_leases():
 
 
 async def test_container_env_delegates():
-    # container_env maps already-minted leases to env; it does not mint, so it
-    # delegates straight (the cred already exists — no escalation possible).
+    # container_env maps already-minted leases to env; for a GRANTED lease it
+    # delegates straight (the cred already exists — no escalation).
     _inner, _provider, broker = _granted("aws:s3:read")
     lease = await broker.acquire("aws", scope="s3:read", ttl=300, budget=Budget(3600))
     # FakeStatelessProvider is not an EnvCredProvider, so env is empty but the
     # call must delegate without error.
     assert broker.container_env([lease]) == {}
+
+
+def test_container_env_denies_an_ungranted_lease():
+    # #124: container_env materializes a lease's cred into container env, so a
+    # fabricated or de-scoped lease for an ungranted (provider, scope) must be denied
+    # HERE too — default-deny must cover cred MATERIALIZATION, not only minting
+    # (symmetric with renew's load-bearing re-check). The denied lease never reaches
+    # the inner broker, so its cred is never formatted into env.
+    _inner, _provider, broker = _granted("aws:s3:read")
+    forged = Lease(
+        provider="cf", scope="zone:purge", budget=Budget(3600),
+        cred="stolen-token", expires_at=0.0, handle=None, stateful=False,
+    )
+    with pytest.raises(GrantDenied):
+        broker.container_env([forged])
 
 
 # --------------------------------------------------------------------------
