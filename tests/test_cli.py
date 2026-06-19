@@ -392,6 +392,20 @@ def test_make_memory_client_fails_closed_on_malformed_mcp_context() -> None:
         make_memory_client(env={"KAGURA_AGENT_MEMORY_MCP_CONTEXT": "not-a-uuid"})
 
 
+def test_make_memory_client_config_error_is_a_cli_handled_type() -> None:
+    # #122: a misconfigured memory backend must raise MemoryUnreachableError — a type
+    # the run/repl/serve handlers already catch (→ clean exit 3 + message), NOT a bare
+    # RuntimeError that escapes every handler as a raw traceback at exit 1.
+    from kagura_agent.mcp.memory_cloud import MemoryUnreachableError
+
+    for bad_env in (
+        {"KAGURA_AGENT_MEMORY_MCP_CONTEXT": "not-a-uuid"},  # malformed context
+        {"KAGURA_AGENT_MEMORY_MCP_CONTEXT": _MEMORY_CTX_UUID},  # valid context, no server
+    ):
+        with pytest.raises(MemoryUnreachableError):
+            make_memory_client(env=bad_env)
+
+
 def test_make_memory_client_blank_mcp_context_is_not_configured() -> None:
     # A set-but-blank cloud context must NOT enter the MCP branch (which would then
     # demand a server) — it falls through to the in-memory default, like the DB env.

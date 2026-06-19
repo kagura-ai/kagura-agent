@@ -455,7 +455,10 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
       with no network/extra dependency. **Fail-closed** on an unopenable DB path.
     - otherwise → :class:`LocalMemoryClient` (in-process; today's default).
     """
-    from kagura_agent.mcp.memory_cloud import LocalMemoryClient
+    # MemoryUnreachableError (a RuntimeError subclass) is the CLI-handled config-error
+    # exception that run/repl/serve already catch → clean exit 3 + message, never a raw
+    # traceback. A bare RuntimeError would escape every handler as an unhandled crash.
+    from kagura_agent.mcp.memory_cloud import LocalMemoryClient, MemoryUnreachableError
 
     environ = os.environ if env is None else env
     mcp_context = environ.get(_MEMORY_MCP_CONTEXT_ENV, "").strip()
@@ -468,14 +471,14 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
             uuid.UUID(mcp_context)
         except ValueError as exc:
             # Fail-closed: a misconfigured cloud context must refuse, not fall back.
-            raise RuntimeError(
+            raise MemoryUnreachableError(
                 f"{_MEMORY_MCP_CONTEXT_ENV}={mcp_context!r} is not a valid context UUID "
                 f"— fix it or unset {_MEMORY_MCP_CONTEXT_ENV}"
             ) from exc
         if not environ.get(_MEMORY_MCP_SERVER_ENV, "").strip():
             # Fail-closed with a clear message at construction, not an opaque stdio
             # spawn error on the first recall/remember deep in the run loop.
-            raise RuntimeError(
+            raise MemoryUnreachableError(
                 f"{_MEMORY_MCP_CONTEXT_ENV} is set but {_MEMORY_MCP_SERVER_ENV} (the "
                 "kagura-memory MCP server command) is not — set it or unset the context"
             )
@@ -491,7 +494,7 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
         except (sqlite3.Error, OSError) as exc:
             # Gated fail-closed: the operator opted into durable memory but the DB
             # is unusable — refuse rather than silently fall back to ephemeral memory.
-            raise RuntimeError(
+            raise MemoryUnreachableError(
                 f"{_MEMORY_DB_ENV}={db_path!r} could not be opened as a memory database: "
                 f"{exc} — fix the path/permissions or unset {_MEMORY_DB_ENV} to use "
                 "in-memory storage"
