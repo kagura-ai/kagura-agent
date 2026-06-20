@@ -357,6 +357,41 @@ async def test_renew_revoke_failure_tracks_new_and_keeps_old_for_sweep() -> None
     assert handles == ["cf-handle-1", "cf-handle-2"]
 
 
+async def test_renew_forgets_old_handle_already_gone_at_provider() -> None:
+    # #131: if the OLD handle is already gone at the provider (RevokePermanent on
+    # revoke), renew forgets it — no leak, nothing to retry, same as a clean revoke.
+    # Only the NEW lease stays tracked (contrast with the transient case above, which
+    # keeps both).
+    from kagura_agent.membrane.revoke import RevokePermanent
+
+    class RevokeGoneProvider:
+        stateful = True
+
+        def __init__(self) -> None:
+            self.minted = 0
+            self.revoke_attempts: list[str] = []
+
+        async def mint(self, scope: str, ttl: int) -> tuple[str, str | None]:
+            self.minted += 1
+            return f"cf-token-{self.minted}", f"cf-handle-{self.minted}"
+
+        async def revoke(self, handle: str | None) -> None:
+            assert handle is not None
+            self.revoke_attempts.append(handle)
+            raise RevokePermanent("token already gone (HTTP 404)")
+
+    provider = RevokeGoneProvider()
+    broker = CredentialBroker({"cf": provider}, clock=_clock, ledger=LeaseLedger())
+    lease = await broker.acquire("cf", scope="z", ttl=300, budget=Budget(3600))
+
+    renewed = await broker.renew(lease, ttl=300)
+
+    assert renewed.cred == "cf-token-2"
+    assert provider.revoke_attempts == ["cf-handle-1"]  # revoke was attempted
+    handles = sorted(ln.handle for ln in broker.open_leases())
+    assert handles == ["cf-handle-2"]  # old (gone) forgotten; only the new one tracked
+
+
 async def test_renew_same_handle_does_not_drop_or_revoke_the_live_token() -> None:
     # If the provider reissues the same handle, old and new are the same token
     # at the provider: revoking "the old" would kill the live one, and

@@ -21,6 +21,7 @@ from typing import Protocol
 
 from kagura_agent.membrane.cred_env import EnvCredProvider
 from kagura_agent.membrane.providers import MemoryCloudProvider, MemoryWriteLocked
+from kagura_agent.membrane.revoke import RevokePermanent
 
 log = logging.getLogger(__name__)
 
@@ -208,9 +209,15 @@ class CredentialBroker:
         if lease.stateful and lease.handle is not None:
             try:
                 await p.revoke(lease.handle)
+            except RevokePermanent:
+                # The old handle is already gone at the provider — fall through and
+                # forget it (no leak; nothing to retry), same as a clean revoke (#131).
+                pass
             except Exception:
+                # Transient/unclassifiable — keep the OLD lease tracked so the restart
+                # sweeper retries it; do not orphan a possibly-still-valid token.
                 log.exception(
-                    "renew: revoke of old lease %s:%s failed; left tracked for sweep",
+                    "renew: revoke of old lease %s:%s failed (transient); left tracked for sweep",
                     lease.provider,
                     lease.handle,
                 )
@@ -248,17 +255,23 @@ class CredentialBroker:
                 continue
             try:
                 await self.release(lease)
+            except RevokePermanent:
+                # The handle is already gone at the provider (404/410) — there is no
+                # live credential to leak, so forget it. This stops the sweep
+                # re-attempting a confirmed-dead handle on every restart (#131).
+                log.info(
+                    "sweep: lease %s:%s already revoked at the provider — forgetting",
+                    lease.provider,
+                    lease.handle,
+                )
+                self._ledger.forget(lease)
             except Exception:
-                # KEEP the lease tracked on a revoke failure — do NOT forget it. At
-                # sweep time a transient 5xx/timeout is indistinguishable from a
-                # permanent 404, so forgetting would drop a STILL-VALID credential
-                # (an un-revocable leak — the exact thing this sweeper exists to
-                # prevent). Consistent with renew() and the unknown-provider branch
-                # above, both of which keep-on-failure. Emit a distinct WARN an
-                # operator can alert on. A genuinely-gone handle is harmlessly
-                # re-attempted on the next restart sweep (one 404, not a loop);
-                # distinguishing poison-vs-transient via a typed revoke error so the
-                # former can be forgotten is a tracked follow-up.
+                # TRANSIENT or unclassifiable failure → KEEP the lease tracked — do
+                # NOT forget it. The handle may still be valid, so forgetting would
+                # drop a STILL-VALID credential (an un-revocable leak — the exact
+                # thing this sweeper exists to prevent). Consistent with renew() and
+                # the unknown-provider branch above, both of which keep-on-failure.
+                # Emit a distinct WARN an operator can alert on; retried next sweep.
                 log.warning(
                     "LEASE_REVOKE_UNRESOLVED provider=%s handle=%s reason=sweep_error — "
                     "left tracked (will retry next sweep); a still-valid credential is "

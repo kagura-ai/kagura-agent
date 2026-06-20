@@ -32,6 +32,11 @@ from kagura_agent.membrane.cred_env import (
     gcp_cred_env,
     github_cred_env,
 )
+from kagura_agent.membrane.revoke import (
+    RevokePermanent,
+    RevokeTransient,
+    classify_revoke_error,
+)
 
 # A provider's injected transport speaks raw JSON-ish dicts in and out; the
 # cloud-specific shape is the provider's concern, not the broker's.
@@ -255,7 +260,14 @@ class CloudflareTokenProvider:
     async def revoke(self, handle: str | None) -> None:
         if handle is None:
             return
-        self._delete(handle)
+        try:
+            self._delete(handle)
+        except (RevokePermanent, RevokeTransient):
+            raise  # a custom delete may already classify; pass it through
+        except Exception as exc:
+            # Classify the raw transport error so the ledger sweeper can forget a
+            # confirmed-gone handle (404/410) yet keep a transient failure (#131).
+            raise classify_revoke_error(exc) from exc
 
     def cred_to_env(self, cred: str) -> dict[str, str]:
         return cloudflare_cred_env(cred)
