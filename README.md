@@ -89,7 +89,7 @@ The exact first-run failures and their fixes:
 | `run` exits 3 — *"the Claude brain requires the optional `claude` extra"* | `pip install -e '.[claude]'` |
 | `run` / `doctor` — *"memory-cloud is not reachable/authenticated"* | `kagura auth login` on the host (the separate `kagura` CLI) |
 | `doctor` overall **FAIL** on a fresh checkout | Expected before steps 2–3 — read it per-row; a `brain` FAIL just means the brain isn't set up yet |
-| `serve` raises `ModuleNotFoundError: slack_bolt` | install the transport extra first: `pip install -e '.[slack]'` (or `.[discord]`) |
+| `serve` exits 3 — *"the slack transport requires the optional `slack` extra"* | install the transport extra: `pip install -e '.[slack]'` (or `.[discord]`) |
 | `run` exits 2 — *"task must not be empty"* | the `--prompt-file` / stdin input was empty |
 | `pytest` / `mypy` not found | dev tools live in the dev extra: `pip install -e '.[dev]'` |
 
