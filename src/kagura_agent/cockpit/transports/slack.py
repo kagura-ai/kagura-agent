@@ -162,12 +162,23 @@ class SlackTransport:  # pragma: no cover - requires slack-bolt + a workspace
             clicker = (body.get("user") or {}).get("id")
             if not click_authorized(clicker, self._operator_id):
                 return
-            thread_id = (body.get("message") or {}).get("thread_ts") or (
-                body.get("container") or {}
-            ).get("thread_ts")
-            if thread_id is None:
+            # Resolve the pending future by the thread the prompt was keyed under
+            # (thread_ts); or, if the prompt was NOT threaded (Slack posted it
+            # top-level, e.g. a stale thread_id), by the prompt message's own ts
+            # (container.message_ts / message.ts), which `ask` also keyed the future
+            # under. Only a payload with no usable identifier at all is ignored (the
+            # awaiter then fails closed on its own timeout) rather than guessed.
+            msg = body.get("message") or {}
+            container = body.get("container") or {}
+            key = (
+                msg.get("thread_ts")
+                or container.get("thread_ts")
+                or container.get("message_ts")
+                or msg.get("ts")
+            )
+            if key is None:
                 return
-            future = self._pending.pop(thread_id, None)
+            future = self._pending.pop(key, None)
             if future is not None and not future.done():
                 future.set_result(action_value(body))
 
@@ -196,10 +207,24 @@ class SlackTransport:  # pragma: no cover - requires slack-bolt + a workspace
                 RuntimeError("approval superseded by a newer request on this thread")
             )
         self._pending[thread_id] = future
-        await self._app.client.chat_postMessage(
+        resp = await self._app.client.chat_postMessage(
             channel=resolve_channel(thread_id, self._channels),
             thread_ts=thread_id,
             text=question,
             blocks=approval_blocks(question, options),
         )
-        return await future
+        # Also key the future by the POSTED prompt's own ts so a button click resolves
+        # even when its payload carries no thread_ts (Slack posted the prompt
+        # top-level) — _on_choice falls back to container.message_ts / message.ts.
+        posted_ts = resp.get("ts") if hasattr(resp, "get") else None
+        if posted_ts and posted_ts != thread_id:
+            self._pending[posted_ts] = future
+        try:
+            return await future
+        finally:
+            # Drop our own keys when the request completes (resolved / superseded /
+            # awaiter cancelled), but only if they still point at THIS future — so a
+            # newer request that reused thread_id is never evicted.
+            for key in (thread_id, posted_ts):
+                if key is not None and self._pending.get(key) is future:
+                    del self._pending[key]
