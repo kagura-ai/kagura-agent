@@ -308,6 +308,21 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
                 f"provider {name!r} (kind={kind}) has an empty required field {req!r}"
             )
 
+    # standing_secret is the SECURITY CONSENT gate for the membrane's one sanctioned
+    # long-lived standing secret (StaticEnvProvider mints only when it is the bare
+    # bool True). Validate its TYPE here at the parse boundary — like every other
+    # field — so a mis-set consent flag (the string "true", or 1) is rejected by
+    # doctor/dry-run up front, not silently passed and only refused two layers down
+    # at mint. `isinstance(_, bool)` accepts True/False and rejects 1/0/"true"
+    # (a real bool False is well-typed declined consent; the mint-time `is True`
+    # gate enforces the VALUE — type and value are separate concerns).
+    consent = fields.get("standing_secret")
+    if consent is not None and not isinstance(consent, bool):
+        raise ValueError(
+            f"provider {name!r} (kind={kind}) field 'standing_secret' must be a bare "
+            f"boolean (true/false), not {type(consent).__name__} {consent!r}"
+        )
+
     for ref in schema.secrets:
         # Suffix-agnostic (#63): a logical secret may be satisfied by exactly one
         # backend suffix. Count the present variants — 0+required = missing

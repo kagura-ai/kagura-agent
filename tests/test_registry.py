@@ -86,6 +86,29 @@ def test_static_env_with_standing_secret_flag():
     assert specs[0].fields["standing_secret"] is True
 
 
+def test_static_env_standing_secret_must_be_a_bare_bool():
+    # #124: standing_secret is the SECURITY CONSENT gate authorizing the membrane's
+    # one sanctioned long-lived standing secret. StaticEnvProvider only mints on the
+    # bare bool True, so a non-bool (the string "true", or 1) is a mis-set consent
+    # flag. Validate the TYPE at the parse boundary like every other field — else it
+    # passes doctor/dry-run green and only surfaces two layers down at mint.
+    for bad in ("true", "True", 1, 0):
+        with pytest.raises(ValueError, match="standing_secret"):
+            parse_registry(
+                {"slack": {"kind": "static_env", "value_env": "SLACK_BOT_TOKEN",
+                           "standing_secret": bad}}
+            )
+
+
+def test_static_env_standing_secret_false_is_accepted_as_declined_consent():
+    # A real bool False is well-typed (consent explicitly declined). Parse accepts it;
+    # the mint-time `is True` gate is what refuses to mint — type vs value are separate.
+    specs = parse_registry(
+        {"slack": {"kind": "static_env", "value_env": "SLACK_BOT_TOKEN", "standing_secret": False}}
+    )
+    assert specs[0].fields["standing_secret"] is False
+
+
 # --------------------------------------------------------------------------
 # parse_registry — fail-closed gates (all ValueError)
 # --------------------------------------------------------------------------
