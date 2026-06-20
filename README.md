@@ -1,24 +1,102 @@
 # kagura-agent
 
-> **Private repository.** Part of the Kagura Memory Cloud commercial offering.
->
-> **Status: implemented skeleton (v0.1–v0.7), runnable.** The pure-Python core of
-> every milestone — brain seam, security membrane, credential leasing, cockpit +
-> HITL, capability graduation, and the egress-sealed brain-in-container — is built
-> and tested (50 test modules, `mypy --strict`, ≥95% coverage). The infrastructure
-> edges (real Docker, cloud STS/Cloudflare, the Slack/Discord/SDK clients) sit
-> behind protocol seams with their adapters wired for deployment. It runs today as
-> a CLI — `run` / `repl` / `serve` / `doctor` / `setup` — on either of two brain
-> backends (Claude Agent SDK by default, or the `kagura-brain` claude/codex/ollama
-> wrapper). This README is both the canonical **design document** and a map of what
-> is now built; the [Implementation status](#implementation-status-v01v07-skeleton)
-> table at the end gives the per-milestone breakdown.
+**Memory-backed autonomous AI agent.** Claude — via the
+[Agent SDK (Python)](https://docs.claude.com/en/api/agent-sdk) by default, or the sibling
+[`kagura-brain`](https://github.com/kagura-ai/kagura-brain) claude/codex/ollama wrapper —
+is the brain; [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud) is the
+persistent long-term memory backbone. A Docker security membrane and a Slack/Discord
+cockpit wrap it. Driven from a CLI: `run` / `repl` / `serve` / `doctor` / `setup`.
 
-Autonomous AI agent built on the
-[Claude Agent SDK (Python)](https://docs.claude.com/en/api/agent-sdk).
-Uses [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud) as its
-**long-term memory backbone** while orchestrating filesystem, shell, infra,
-and custom MCP servers to execute real, long-running tasks autonomously.
+> _Private repository — © Kagura AI, part of the Kagura Memory Cloud commercial offering.
+> Not for redistribution; see [License](#license)._
+
+**Status — implemented skeleton, runnable.** The pure-Python core of every design
+milestone (v0.1–v0.7; package version `0.5.0`) — brain seam, security membrane, credential
+leasing, cockpit + HITL, capability graduation, egress-sealed brain-in-container — is built
+and tested (50 test modules, `mypy --strict`, ≥95% coverage). The infrastructure edges
+(real Docker, cloud STS/Cloudflare, the Slack/Discord/SDK clients) sit behind protocol
+seams. **Everything below the Quickstart is the canonical design document** — architecture,
+the security membrane, capability graduation, and the per-milestone
+[Implementation status](#implementation-status-v01v07-skeleton).
+
+---
+
+## Quickstart
+
+> kagura-agent is **install-from-clone** (proprietary, not on PyPI) and needs **two
+> logins** before it will run. The full first-run setup is below; `kagura-agent doctor`
+> tells you exactly what is still missing.
+
+### Prerequisites
+
+- **Python ≥ 3.11.**
+- **Memory login — required to start.** Every `run` / `repl` / `serve` checks that Kagura
+  Memory Cloud is reachable *before doing anything else* and **refuses to start** if it is
+  not (a run is rejected, never silently degraded). Authenticate with the **separate
+  `kagura` CLI** — `kagura auth login`. There is no fully-offline mode: `KAGURA_AGENT_MEMORY_DB`
+  changes only *where* memories are stored, not this gate.
+- **A brain.** The default `sdk` brain needs the `claude` extra **and** the Claude Code CLI
+  signed in to your Pro/Max plan (or `ANTHROPIC_API_KEY`, which overrides subscription
+  auth). The bare core ships with **no brain** — you pick an extra.
+- **Docker** — only for `serve --container` and the live membrane.
+
+### Get running
+
+```bash
+# 1. Clone + isolate (not on PyPI — install from the clone).
+git clone <repo-url> && cd kagura-agent
+python -m venv .venv && source .venv/bin/activate    # Windows PowerShell: .venv\Scripts\Activate.ps1
+
+# 2. Install WITH a brain (the bare core has none). Pick one:
+pip install -e '.[claude]'        # default — Claude Agent SDK
+# pip install -e '.[brain]'       # alternate — kagura-brain (claude/codex/ollama)
+
+# 3. Authenticate (both logins are real prerequisites):
+kagura auth login                 # Kagura Memory Cloud — the separate `kagura` CLI
+claude                            # sign the Claude Code CLI into your plan…
+# export ANTHROPIC_API_KEY=sk-…   # …or bring your own key (overrides subscription)
+
+# 4. Preflight — reports exactly what is still missing:
+kagura-agent doctor
+
+# 5. Run a task:
+kagura-agent run "summarize the repository layout"
+```
+
+### More ways to drive it
+
+```bash
+kagura-agent run --prompt-file task.md      # task body from a file…
+cat task.md | kagura-agent run -            # …or from stdin (mutually exclusive with the inline task)
+kagura-agent repl                           # interactive — each line continues the same context
+kagura-agent run --session work "…"         # a named, resumable session (a later run resumes it)
+
+# Cockpit on a chat transport — install the transport extra FIRST, or serve aborts:
+pip install -e '.[slack]'                   # or '.[discord]'
+kagura-agent setup transport                # how to wire the bot token (it lives in the host env)
+kagura-agent serve --transport slack        # add --container to run the brain BYOK in a sealed container
+```
+
+**Exit codes** — `0` ok · `2` usage/config error · `3` setup not ready (memory not logged
+in, or the brain extra/CLI missing) · `4` `doctor` found a failing check.
+
+### Troubleshooting
+
+The exact first-run failures and their fixes:
+
+| Symptom | Fix |
+|---|---|
+| `run` exits 3 — *"the Claude brain requires the optional `claude` extra"* | `pip install -e '.[claude]'` |
+| `run` / `doctor` — *"memory-cloud is not reachable/authenticated"* | `kagura auth login` on the host (the separate `kagura` CLI) |
+| `doctor` overall **FAIL** on a fresh checkout | Expected before steps 2–3 — read it per-row; a `brain` FAIL just means the brain isn't set up yet |
+| `serve` raises `ModuleNotFoundError: slack_bolt` | install the transport extra first: `pip install -e '.[slack]'` (or `.[discord]`) |
+| `run` exits 2 — *"task must not be empty"* | the `--prompt-file` / stdin input was empty |
+| `pytest` / `mypy` not found | dev tools live in the dev extra: `pip install -e '.[dev]'` |
+
+**Extras**: `claude` · `brain` · `slack` · `discord` · `aws` · `gcp` · `github` ·
+`cloudflare` · `keyring` · `dev`. The brain is chosen per-deploy via `KAGURA_AGENT_BRAIN`
+(`sdk` default, or `kagura-brain`) — see [Brain-provider seam](#brain-provider-seam).
+Contributors: `pip install -e '.[dev]'`, then `pytest` and `mypy` (strict).
 
 ---
 
@@ -774,20 +852,12 @@ modules, `mypy --strict`, ≥95% coverage); the infrastructure edges (real Docke
 cloud STS/Cloudflare, the Slack/Discord/SDK clients) sit behind protocol seams with
 their adapters wired for deployment.
 
-**Running it.** Install the core plus the extras a deployment needs, then drive it
-from the CLI:
-
-```bash
-pip install -e '.[claude]'   # SDK brain (default)          — or '.[brain]' for the kagura-brain backend
-pip install -e '.[slack]'    # a chat transport for `serve`  — or '.[discord]'
-
-kagura-agent doctor          # preflight: memory / claude / docker / egress / cred providers
-kagura-agent run "task…"     # one task, in-process
-kagura-agent serve --transport slack             # the cockpit loop on a chat transport
-kagura-agent serve --transport slack --container # …with the brain in a hardened, egress-sealed container (BYOK)
-```
-
-Run the suite with `pytest`; type-check with `mypy` (strict).
+**Running it.** See the [Quickstart](#quickstart) at the top of this file for the full
+first-run setup — install with a brain extra, the two logins (`kagura auth login` +
+Claude Code CLI / `ANTHROPIC_API_KEY`), `kagura-agent doctor`, then `kagura-agent run
+"task"` (`serve --transport slack|discord` for the cockpit loop, `--container` to seal
+the brain in a hardened container). Run the test suite with `pip install -e '.[dev]'`
+then `pytest`; type-check with `mypy` (strict).
 
 | Milestone | What landed | Key modules | Tests |
 |---|---|---|---|
