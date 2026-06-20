@@ -226,9 +226,11 @@ class CredentialBroker:
     async def sweep(self) -> None:
         """Revoke every still-open stateful lease (orphan cleanup on restart).
 
-        Resilient per lease: a single failing revoke (e.g. a handle revoked
-        out-of-band -> 404) must not abort the sweep or wedge the ledger on the
-        same poison handle. Log, forget, and continue.
+        Resilient per lease: a single failing revoke must not abort the sweep. On
+        failure the lease is KEPT tracked (never forgotten) and a WARN is emitted —
+        a transient error must never drop a still-valid credential, and a genuinely
+        out-of-band-revoked (404) handle is only re-attempted on the next restart
+        sweep (harmless), not in a loop. Keep-on-failure, log, and continue.
         """
         for lease in self._ledger.open_leases():
             if lease.provider not in self._providers:
@@ -247,5 +249,20 @@ class CredentialBroker:
             try:
                 await self.release(lease)
             except Exception:
-                log.exception("sweep failed to revoke lease %s:%s", lease.provider, lease.handle)
-                self._ledger.forget(lease)  # unwedge: do not re-hit this handle
+                # KEEP the lease tracked on a revoke failure — do NOT forget it. At
+                # sweep time a transient 5xx/timeout is indistinguishable from a
+                # permanent 404, so forgetting would drop a STILL-VALID credential
+                # (an un-revocable leak — the exact thing this sweeper exists to
+                # prevent). Consistent with renew() and the unknown-provider branch
+                # above, both of which keep-on-failure. Emit a distinct WARN an
+                # operator can alert on. A genuinely-gone handle is harmlessly
+                # re-attempted on the next restart sweep (one 404, not a loop);
+                # distinguishing poison-vs-transient via a typed revoke error so the
+                # former can be forgotten is a tracked follow-up.
+                log.warning(
+                    "LEASE_REVOKE_UNRESOLVED provider=%s handle=%s reason=sweep_error — "
+                    "left tracked (will retry next sweep); a still-valid credential is "
+                    "never dropped on an unprovable revoke failure",
+                    lease.provider,
+                    lease.handle,
+                )
