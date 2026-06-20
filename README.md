@@ -123,7 +123,7 @@ the combination of **memory + actor**:
 The agent is an **actor** in the topology — it lives entirely outside `memory-cloud`,
 which it reaches CLI-first as its persistent backbone (the membrane leases a
 short-lived, read-scoped token in; the host keeps the refresh token). It can be run
-as a CLI, a daemon, or as a managed SaaS lane.
+as a CLI or a long-running daemon.
 
 ---
 
@@ -205,20 +205,19 @@ adopt.**
    ingest_events                ← push cost ledger / task tracker
 ```
 
-### Auth model (from memory `31e85a92`)
+### Auth model
 
 - **Python Agent SDK** wraps the Claude Code CLI as a subprocess →
   the user's Pro/Max subscription is inherited automatically.
 - **Self-hosted / single-user mode**: flat subscription cost regardless
   of agent load (within Anthropic's cap-based metering: 5h rolling +
-  weekly 7-day rolling). No per-token tracking required from kagura side.
-- **SaaS / multi-tenant mode**: per-tenant subscription is not viable.
-  Falls back to `workspace.external_api_keys` (BYOK) for Claude API key,
-  unifying with the chat-ingestion worker's BYOK auth path.
+  weekly 7-day rolling). No per-token tracking required.
+- **API-key (BYOK) mode**: where subscription inheritance isn't available,
+  set `ANTHROPIC_API_KEY` (BYOK) instead.
 - `ANTHROPIC_API_KEY` env, if set, overrides subscription auth.
 
-This dual-path (subscription for self-hosted, API key for SaaS) is the
-same pattern memory-cloud already uses for LLM provider keys.
+This dual-path (subscription, or a BYOK API key) is the same pattern
+memory-cloud already uses for LLM provider keys.
 
 ### Brain-provider seam
 
@@ -432,14 +431,14 @@ compromise.
 > exfiltrated."
 
 This model holds for **self-host single-user only**. Docker here is a
-_convenience boundary, not a security boundary_. A shared/SaaS lane would need
-gVisor / Firecracker / microVM-class isolation — the self-responsibility
+_convenience boundary, not a security boundary_. A shared/multi-tenant deployment
+would need gVisor / Firecracker / microVM-class isolation — the self-responsibility
 premise must not be carried into a shared environment.
 
-**This must be a code gate, not a doc promise.** When `mode=saas`, selecting the
-Docker-only isolation profile is a **hard startup error** (fail-closed): a
-multi-tenant run refuses to launch without a microVM-class profile. A
-self-host-tuned default must not be able to leak into a shared lane via one
+**This must be a code gate, not a doc promise.** In a shared/multi-tenant mode,
+selecting the Docker-only isolation profile is a **hard startup error**
+(fail-closed): the run refuses to launch without a microVM-class profile. A
+self-host-tuned default must not be able to leak into a shared environment via one
 config flag.
 
 ### The membrane: what crosses, what does not
@@ -621,7 +620,7 @@ accepting it is not airtight:
 - **never** `docker.sock`, **never** host FS beyond project root
 
 > Honest limit: a kernel 0-day defeats all of the above. For self-host
-> single-user the residual risk is **accepted**; a shared/SaaS lane demands
+> single-user the residual risk is **accepted**; a shared/multi-tenant lane demands
 > gVisor / Firecracker / microVM-class isolation. Restated here so the
 > self-responsibility premise never silently crosses into a shared environment.
 
