@@ -110,6 +110,21 @@ async def test_sweep_forgets_a_handle_already_gone_at_the_provider() -> None:
     assert ledger.open_leases() == []  # forgotten — the handle is confirmed gone
 
 
+async def test_release_forgets_a_handle_already_gone_without_raising() -> None:
+    # #131: release() treats a PERMANENT (gone, 404/410) revoke as SUCCESS — it forgets
+    # the lease and does NOT propagate. So a confirmed-dead handle is dropped immediately
+    # on the direct-release path (no stale ledger entry on the run path, no false
+    # "token may be live" alarm in doctor's probe). A transient error still propagates.
+    ledger = LeaseLedger()
+    cf = _cf([], fail_status=404)
+    broker = CredentialBroker({"cf": cf}, clock=lambda: 0.0, ledger=ledger)
+    lease = await broker.acquire("cf", scope="z", ttl=300, budget=Budget(3600))
+
+    await broker.release(lease)  # must NOT raise on a confirmed-gone handle
+
+    assert ledger.open_leases() == []  # forgotten
+
+
 # --- launcher: stamp the agent label so reconcile()/list() find containers ---
 
 def test_docker_run_args_stamps_agent_label() -> None:
