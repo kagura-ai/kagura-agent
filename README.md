@@ -1,5 +1,10 @@
 # kagura-agent
 
+[![CI](https://github.com/kagura-ai/kagura-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/kagura-ai/kagura-agent/actions/workflows/ci.yml)
+![Coverage](docs/coverage.svg)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
+
 **Memory-backed autonomous AI agent.** Claude — via the
 [Agent SDK (Python)](https://docs.claude.com/en/api/agent-sdk) by default, or the sibling
 [`kagura-brain`](https://github.com/kagura-ai/kagura-brain) claude/codex/ollama wrapper —
@@ -7,8 +12,9 @@ is the brain; [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud) i
 persistent long-term memory backbone. A Docker security membrane and a Slack/Discord
 cockpit wrap it. Driven from a CLI: `run` / `repl` / `serve` / `doctor` / `setup`.
 
-> _Private repository — © Kagura AI, part of the Kagura Memory Cloud commercial offering.
-> Not for redistribution; see [License](#license)._
+> _Licensed under [Apache-2.0](LICENSE) (© 2026 Kagura AI). The GitHub repository is
+> currently **private** — a public release is being prepared; the code is already
+> OSS-licensed._
 
 **Status — implemented skeleton, runnable.** The pure-Python core of every design
 milestone (v0.1–v0.7; package version `0.5.0`) — brain seam, security membrane, credential
@@ -23,7 +29,7 @@ the security membrane, capability graduation, and the per-milestone
 
 ## Quickstart
 
-> kagura-agent is **install-from-clone** (proprietary, not on PyPI) and needs **two
+> kagura-agent is **install-from-clone** (not yet published to PyPI) and needs **two
 > logins** before it will run. The full first-run setup is below; `kagura-agent doctor`
 > tells you exactly what is still missing.
 
@@ -896,4 +902,6 @@ that speaks to Docker.
 
 ## License
 
-Proprietary — © Kagura AI. Not for redistribution. See `LICENSE` for terms.
+[Apache License 2.0](LICENSE) — © 2026 Kagura AI. See [`LICENSE`](LICENSE) for the full
+terms and [`NOTICE`](NOTICE) for attribution. (The repository is currently private; the
+code is Apache-2.0 licensed ahead of a public release.)
