@@ -1,0 +1,94 @@
+name: Publish to PyPI
+
+# Trusted Publishing (OIDC) — no API tokens stored in the repo. The PyPI project
+# is registered as a (pending) Trusted Publisher with:
+#   owner=kagura-ai, repository=kagura-agent, workflow=publish.yml, environment=pypi
+# (https://pypi.org/manage/account/publishing/). Works from a PRIVATE repo — the
+# package is published publicly to PyPI; the repository can stay private.
+#
+# Release flow: bump src/kagura_agent/__init__.py __version__ (via PR), then
+#   git tag vX.Y.Z && git push origin vX.Y.Z
+# The tag triggers build -> publish-pypi -> github-release. A `workflow_dispatch`
+# run only builds + checks the artifacts (a safe dry run; it never publishes —
+# TestPyPI is not configured).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+# Force Node.js 24 for pinned JS actions ahead of the Node 20 deprecation
+# (actions/checkout, upload/download-artifact). Drop once those ship a Node-24 major.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Check metadata
+        run: uvx twine check dist/*
+
+      - name: Verify the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          BUILT="$(basename dist/kagura_agent-*.tar.gz .tar.gz | sed 's/^kagura_agent-//')"
+          echo "tag=$TAG  built=$BUILT"
+          if [ "$TAG" != "$BUILT" ]; then
+            echo "::error::tag v$TAG does not match the built package version $BUILT — bump src/kagura_agent/__init__.py __version__ to match the tag"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: dist
+          path: dist/
+
+  publish-pypi:
+    # Only a pushed v* tag publishes to PyPI; a manual dispatch is build-only.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # OIDC token for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create GitHub Release
+        # Idempotent: treat an already-existing release as success.
+        run: |
+          if gh release view "$REF" >/dev/null 2>&1; then
+            echo "Release $REF already exists, skipping."
+          else
+            gh release create "$REF" --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.ref_name }}
