@@ -287,20 +287,20 @@ def test_default_factory_refuses_static_env_without_standing_secret():
 
 
 def test_default_factory_refuses_static_env_with_string_standing_secret():
-    # A quoted string standing_secret="false" must not be bool()-coerced to True
-    # and bypass the gate — parse_registry stores it verbatim, the factory passes
-    # it raw, and StaticEnvProvider's identity check refuses it.
-    specs = _specs(
-        {
-            "slack": {
-                "kind": "static_env",
-                "value_env": "SLACK_BOT_TOKEN",
-                "standing_secret": "false",
-            }
-        }
+    # The factory's identity gate is load-bearing defense-in-depth: even a spec that
+    # did NOT pass through parse_registry's bool check (#124) — e.g. a hand-built
+    # ProviderSpec (#59/#60) that bypasses the registry — must not bool()-coerce a
+    # quoted "false" to True and slip past consent. StaticEnvProvider's `is True`
+    # identity check refuses it. (parse_registry now ALSO rejects a non-bool
+    # standing_secret up front — see test_registry — so this asserts the deeper gate
+    # independently of the parse boundary.)
+    spec = ProviderSpec(
+        name="slack",
+        kind="static_env",
+        fields={"value_env": "SLACK_BOT_TOKEN", "standing_secret": "false"},
     )
     with pytest.raises(StandingSecretRefused):
-        build_broker(specs, clock=_clock, resolve_env={"SLACK_BOT_TOKEN": "x"}.get)
+        build_broker((spec,), clock=_clock, resolve_env={"SLACK_BOT_TOKEN": "x"}.get)
 
 
 def test_default_factory_github_app_missing_private_key_is_valueerror():
