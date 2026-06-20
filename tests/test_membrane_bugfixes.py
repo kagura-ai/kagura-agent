@@ -25,10 +25,18 @@ from kagura_agent.membrane.lease import Budget, CredentialBroker, LeaseLedger
 from kagura_agent.membrane.providers import CloudflareTokenProvider
 
 
-def _cf(revoked: list[str], *, fail: bool = False) -> CloudflareTokenProvider:
+class _HttpErr(Exception):
+    """A minimal httpx.HTTPStatusError look-alike carrying ``.response.status_code``."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"HTTP {status}")
+        self.response = type("_R", (), {"status_code": status})()
+
+
+def _cf(revoked: list[str], *, fail_status: int | None = None) -> CloudflareTokenProvider:
     def delete(handle: str) -> None:
-        if fail:
-            raise RuntimeError("404 token already gone")
+        if fail_status is not None:
+            raise _HttpErr(fail_status)
         revoked.append(handle)
 
     return CloudflareTokenProvider(
@@ -72,24 +80,49 @@ async def test_sweep_revokes_once_provider_restored() -> None:
     assert ledger.open_leases() == []
 
 
-async def test_sweep_keeps_lease_when_present_provider_revoke_fails() -> None:
-    # #124: a revoke failure on a PRESENT provider must KEEP the lease tracked, not
-    # forget it. At sweep time a transient 5xx/timeout is indistinguishable from a
-    # permanent 404, so forgetting would drop a STILL-VALID credential — an
-    # un-revocable leak, the exact thing the sweeper exists to prevent. This makes
-    # sweep consistent with renew() and the unknown-provider branch, which both
-    # keep-on-failure. (A genuinely-gone handle is harmlessly re-attempted on the
-    # next restart sweep; distinguishing poison-vs-transient via a typed revoke error
-    # so the former can be forgotten is a tracked follow-up.)
+async def test_sweep_keeps_lease_on_a_transient_revoke_failure() -> None:
+    # #124/#131: a TRANSIENT revoke failure (5xx/timeout) on a PRESENT provider must
+    # KEEP the lease tracked — forgetting would drop a STILL-VALID credential (an
+    # un-revocable leak). Consistent with renew() and the unknown-provider branch.
     revoked: list[str] = []
     ledger = LeaseLedger()
-    cf = _cf(revoked, fail=True)
+    cf = _cf(revoked, fail_status=503)  # transient
     await _acquire_one(ledger, cf)
 
     await CredentialBroker({"cf": cf}, clock=lambda: 0.0, ledger=ledger).sweep()
 
     open_after = ledger.open_leases()
     assert len(open_after) == 1 and open_after[0].handle == "ID1"  # kept, not dropped
+
+
+async def test_sweep_forgets_a_handle_already_gone_at_the_provider() -> None:
+    # #131: a PERMANENT failure (the provider returns 404/410 — the handle no longer
+    # exists) is safe to forget: there is no live credential to leak, and forgetting
+    # stops the sweep re-attempting a confirmed-dead handle every restart. This is the
+    # poison-vs-transient distinction the #124 stopgap deferred.
+    revoked: list[str] = []
+    ledger = LeaseLedger()
+    cf = _cf(revoked, fail_status=404)  # permanent (already gone)
+    await _acquire_one(ledger, cf)
+
+    await CredentialBroker({"cf": cf}, clock=lambda: 0.0, ledger=ledger).sweep()
+
+    assert ledger.open_leases() == []  # forgotten — the handle is confirmed gone
+
+
+async def test_release_forgets_a_handle_already_gone_without_raising() -> None:
+    # #131: release() treats a PERMANENT (gone, 404/410) revoke as SUCCESS — it forgets
+    # the lease and does NOT propagate. So a confirmed-dead handle is dropped immediately
+    # on the direct-release path (no stale ledger entry on the run path, no false
+    # "token may be live" alarm in doctor's probe). A transient error still propagates.
+    ledger = LeaseLedger()
+    cf = _cf([], fail_status=404)
+    broker = CredentialBroker({"cf": cf}, clock=lambda: 0.0, ledger=ledger)
+    lease = await broker.acquire("cf", scope="z", ttl=300, budget=Budget(3600))
+
+    await broker.release(lease)  # must NOT raise on a confirmed-gone handle
+
+    assert ledger.open_leases() == []  # forgotten
 
 
 # --- launcher: stamp the agent label so reconcile()/list() find containers ---
