@@ -13,6 +13,7 @@ from kagura_agent.core.brain.base import BrainInvocationError, BrainUnavailable
 from kagura_agent.core.brain.kagura_brain_engine import (
     _result_to_turn,
     kagura_brain_available,
+    kagura_brain_invoke_kwargs,
     kagura_brain_select_kwargs,
     require_kagura_brain,
     resolve_kagura_brain_backend,
@@ -127,3 +128,65 @@ def test_select_kwargs_blank_values_treated_as_unset() -> None:
         {"KAGURA_AGENT_BRAIN_ENDPOINT": "  ", "KAGURA_BRAIN_API_KEY": ""}
     )
     assert kw == {"backend": "claude", "endpoint": None, "api_key": None}
+
+
+# --- #134: per-invoke model + local_provider knobs --------------------------
+
+
+def test_invoke_kwargs_empty_by_default() -> None:
+    # No model/local_provider → no per-invoke overrides (byte-for-byte old behavior).
+    assert kagura_brain_invoke_kwargs({}) == {}
+
+
+def test_invoke_kwargs_model_is_threaded() -> None:
+    assert kagura_brain_invoke_kwargs({"KAGURA_AGENT_BRAIN_MODEL": "gpt-oss:20b"}) == {
+        "model": "gpt-oss:20b"
+    }
+
+
+def test_invoke_kwargs_local_provider_with_codex_backend() -> None:
+    kw = kagura_brain_invoke_kwargs(
+        {
+            "KAGURA_AGENT_BRAIN_LOCAL_PROVIDER": "ollama",
+            "KAGURA_AGENT_BRAIN_BACKEND": "codex",
+        }
+    )
+    assert kw == {"local_provider": "ollama"}
+
+
+def test_invoke_kwargs_local_provider_requires_codex_backend() -> None:
+    # local_provider is codex's --oss-only concept; with the default (claude) backend
+    # it fails fast rather than surfacing at the first invoke, mid-run.
+    with pytest.raises(BrainUnavailable, match="codex-only"):
+        kagura_brain_invoke_kwargs({"KAGURA_AGENT_BRAIN_LOCAL_PROVIDER": "ollama"})
+
+
+def test_invoke_kwargs_local_provider_and_endpoint_mutually_exclusive() -> None:
+    with pytest.raises(BrainUnavailable, match="mutually exclusive"):
+        kagura_brain_invoke_kwargs(
+            {
+                "KAGURA_AGENT_BRAIN_LOCAL_PROVIDER": "ollama",
+                "KAGURA_AGENT_BRAIN_BACKEND": "codex",
+                "KAGURA_AGENT_BRAIN_ENDPOINT": "https://brain.example",
+            }
+        )
+
+
+def test_invoke_kwargs_model_and_local_provider_together() -> None:
+    kw = kagura_brain_invoke_kwargs(
+        {
+            "KAGURA_AGENT_BRAIN_MODEL": "qwen3-coder:480b",
+            "KAGURA_AGENT_BRAIN_LOCAL_PROVIDER": "ollama",
+            "KAGURA_AGENT_BRAIN_BACKEND": "codex",
+        }
+    )
+    assert kw == {"model": "qwen3-coder:480b", "local_provider": "ollama"}
+
+
+def test_invoke_kwargs_blank_values_treated_as_unset() -> None:
+    assert (
+        kagura_brain_invoke_kwargs(
+            {"KAGURA_AGENT_BRAIN_MODEL": "  ", "KAGURA_AGENT_BRAIN_LOCAL_PROVIDER": ""}
+        )
+        == {}
+    )
