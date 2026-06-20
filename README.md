@@ -2,11 +2,17 @@
 
 > **Private repository.** Part of the Kagura Memory Cloud commercial offering.
 >
-> **Status: Future placeholder.** No runnable code yet. This README is the
-> canonical design document until development begins. No fixed launch trigger —
-> development starts when memory-cloud + the chat ingestion / dataset /
-> embeddings workers have accumulated enough customer signal to justify
-> building a first-party agent on top.
+> **Status: implemented skeleton (v0.1–v0.7), runnable.** The pure-Python core of
+> every milestone — brain seam, security membrane, credential leasing, cockpit +
+> HITL, capability graduation, and the egress-sealed brain-in-container — is built
+> and tested (50 test modules, `mypy --strict`, ≥95% coverage). The infrastructure
+> edges (real Docker, cloud STS/Cloudflare, the Slack/Discord/SDK clients) sit
+> behind protocol seams with their adapters wired for deployment. It runs today as
+> a CLI — `run` / `repl` / `serve` / `doctor` / `setup` — on either of two brain
+> backends (Claude Agent SDK by default, or the `kagura-brain` claude/codex/ollama
+> wrapper). This README is both the canonical **design document** and a map of what
+> is now built; the [Implementation status](#implementation-status-v01v07-skeleton)
+> table at the end gives the per-milestone breakdown.
 
 Autonomous AI agent built on the
 [Claude Agent SDK (Python)](https://docs.claude.com/en/api/agent-sdk).
@@ -45,9 +51,10 @@ platform and an app running on it.**
 
 - **kagura-agent** — a general, Docker-based, **high-freedom** autonomous actor:
   arbitrary domains, infra/cloud hands, a Slack/Discord cockpit, the security
-  membrane, capability graduation. _v0.1–v0.5 skeleton implemented (Python core
-  + tests); container/cloud/transport edges are protocol seams with the SDK
-  glue stubbed for deployment._
+  membrane, capability graduation. _v0.1–v0.7 skeleton implemented (Python core +
+  tests), plus the egress-sealed brain-in-container and a pluggable
+  Claude-SDK / kagura-brain (codex/ollama) backend; container/cloud/transport
+  edges are protocol seams with their adapters wired for deployment._
 - **kagura-engineer** — an independent, **coding-specialized** agent that drives
   a GitHub issue to a reviewed PR (`doctor` / `setup` / `run` / `review`).
   _Shipping today (CLI + tests)._
@@ -131,9 +138,23 @@ same pattern memory-cloud already uses for LLM provider keys.
 
 ### Brain-provider seam
 
-v1 ships **one brain** (Claude Code CLI via Agent SDK). Codex is deferred to
-Phase 2 — but the v1 code must not be Claude-shaped in a way that turns Phase 2
-into a rewrite. **One boundary, drawn now, keeps Codex a pure addition.**
+The seam was drawn so a second brain would be a **pure addition, not a rewrite**:
+`core/session.py` never calls the Claude Agent SDK directly — it depends on a
+`BrainProvider`, and all provider specifics live behind an engine. **That boundary
+has now paid off** — two backends ship behind the same protocol, selected per
+deploy by `KAGURA_AGENT_BRAIN` (`sdk`, the default, or `kagura-brain`):
+
+- **`sdk`** — `SdkEngine`, the **Claude Agent SDK** (subscription-inherited Claude
+  Code CLI). The default; existing runs are unchanged.
+- **`kagura-brain`** — `KaguraBrainEngine`, wrapping the sibling
+  [`kagura-brain`](https://github.com/kagura-ai/kagura-brain) one-shot library,
+  whose `KAGURA_AGENT_BRAIN_BACKEND` picks **claude** or **codex**, with
+  `KAGURA_AGENT_BRAIN_MODEL` to pin a model and `KAGURA_AGENT_BRAIN_LOCAL_PROVIDER`
+  for a **local `--oss` ollama/lmstudio** brain (or `KAGURA_AGENT_BRAIN_ENDPOINT`
+  + key for a BYO OpenAI-compatible gateway such as Ollama Cloud).
+
+The original v1 design rule — _ship one brain, but never be Claude-shaped_ — is
+what kept that codex/ollama backend a drop-in. It is restated below unchanged.
 
 **The rule:** `core/session.py` never calls the Claude Agent SDK directly. It
 depends on a `BrainProvider`. All Claude specifics live behind `ClaudeBrain`,
@@ -184,11 +205,12 @@ subprocess; a future Codex/OpenAI brain may only have API-key / BYOK. `auth.py`
 resolves *per provider* and does not assume subscription exists. The
 `ANTHROPIC_API_KEY` override stays a Claude-specific detail behind `ClaudeBrain`.
 
-**Scope discipline.** v1 ships `ClaudeBrain` only — no `CodexBrain`, no
-config knob to pick brains, no abstraction beyond this one protocol. The seam is
-just the _shape of `session.py`'s dependency_, nothing more. Abstracting further
-now pays the very "abstraction tax before the moat" the brain decision warns
-against; the protocol is the whole insurance policy.
+**Scope discipline (held).** The original cut shipped `ClaudeBrain` only — one
+protocol, no speculative abstraction beyond it. The second backend (`kagura-brain`,
+reaching codex + local/cloud ollama) was then added **behind that same, unchanged
+protocol**, selected by one env var — exactly the "pure addition, not a rewrite"
+the seam was insurance for. The protocol is still the whole abstraction; nothing
+was generalized on paper ahead of the second real consumer.
 
 ---
 
@@ -275,7 +297,7 @@ Parent context window stays small; complex pipelines become composable.
 
 ---
 
-## Phase 1 scope (when development begins)
+## Phase 1 capability scope
 
 Tightly scoped to validate the "memory + actor" thesis before broadening:
 
@@ -595,13 +617,15 @@ Agent stdout/events are **batched, not per-token**: post tool-calls as they
 happen, stream final text in readable chunks. Avoids flooding a DM thread with
 token spam while keeping the run observable.
 
-### v1 cut
+### What shipped
 
-**CLI adapter only** · intents `launch / continue / kill / approve` · one HITL
-type (cred/egress escalation). Slack/Discord and a status dashboard come later —
-the `Transport` protocol keeps them a pure addition. The goal is one **vertical
-slice** — task in → launcher → zero-cred container → reply — proven on the CLI
-before any chat transport.
+The vertical slice landed first on the **CLI adapter** — task in → launcher →
+zero-cred container → reply — then **Slack (Bolt, Socket Mode) and Discord
+normalizers were added as pure additions** behind the same `Transport` protocol,
+no core change, driven by `kagura-agent serve --transport slack|discord` (with an
+operator-identity gate on HITL approvals so only the configured operator can
+`/approve`). Intents `launch / continue / status / approve / kill` and the
+cred/egress HITL type are all wired; a richer status dashboard is still future.
 
 > On the CLI the same intents map without thread structure: `launch` = a new
 > `kagura-agent run` invocation, `continue` = stdin to the live session,
@@ -648,84 +672,122 @@ nothing more, nothing less.
 
 ---
 
-## Phase and launch trigger
+## Status and what's next
 
-This repository is **not yet under active development**. No fixed launch date.
-Reasonable triggers to revisit:
+The v0.1–v0.7 **skeleton is built and tested** — the design above is implemented as
+a pure-Python core behind protocol seams. What remains for a production deployment
+is wiring those seams to live infrastructure (real Docker on the host, the cloud
+STS/Cloudflare provider SDKs, a live Slack/Discord workspace) and proving the full
+loop end-to-end on a real task. The earlier "when to start building" triggers now
+read as **launch (not build) triggers** — when to stand a real deployment up:
 
 1. `kagura-memory-ai-worker` Phase 1+2 in production, accumulating
    non-trivial customer memory.
-2. Internal dogfooding signal: the team has noticed they want
-   "agent that remembers past failures" while operating memory-cloud itself.
+2. Internal dogfooding signal: the team wants "an agent that remembers past
+   failures" while operating memory-cloud itself.
 3. Customer ask: at least one Enterprise customer explicitly wants
    "an agent that uses our memory autonomously" (vs just an MCP client).
 
 Unlike the dataset / embeddings workers, this agent's launch is not
 tied to a specific quantitative break-even — it's a qualitative
-"the value of memory-as-backbone is clear enough to invest in an actor
+"the value of memory-as-backbone is clear enough to run an actor
 that depends on it" call.
 
 ---
 
-## Repository layout (planned)
+## Repository layout
+
+The structure the design above maps onto — **as built** (v0.1–v0.7):
 
 ```
 kagura-agent/
-├── README.md                       # this file — canonical design doc
+├── README.md                       # this file — canonical design doc + build map
 ├── docs/
-│   ├── operations.md               # incident runbook (hijack / key rotation)
-│   ├── extending.md                # giving the agent new API hands (MCP / egress / cred lease)
-│   └── legal.md                    # ToS + self-responsibility posture
-├── pyproject.toml
-├── src/
+│   ├── operations.md               # incident runbook (hijack / key rotation, cred lifecycle)
+│   ├── extending.md                # new API hands (custom MCP / egress / cred + secret backend)
+│   ├── legal.md                    # ToS + self-responsibility posture
+│   └── architecture.svg            # architecture diagram
+├── pyproject.toml                  # extras: claude · brain · slack · discord · aws/gcp/github/cloudflare · keyring
+├── src/kagura_agent/
 │   ├── core/
-│   │   ├── session.py              # orchestration loop — depends on BrainProvider, never the SDK directly
-│   │   ├── brain/
-│   │   │   ├── base.py             # BrainProvider protocol + Turn / BrainEvent / BrainCaps
-│   │   │   ├── claude.py           # ClaudeBrain — wraps Agent SDK / Claude Code CLI (v1)
-│   │   │   └── auth.py             # per-provider auth resolver (subscription | BYOK | key)
-│   │   └── budget.py               # cost-aware planning loop
-│   ├── mcp/
-│   │   ├── memory_cloud.py         # primary MCP — recall/remember/etc.
-│   │   ├── filesystem.py
-│   │   ├── shell_docker.py
-│   │   └── infra/
-│   │       ├── cloudflare.py
-│   │       ├── aws.py
-│   │       └── gcp.py
+│   │   ├── session.py              # orchestration loop — depends on BrainProvider, never a brain SDK directly
+│   │   └── brain/
+│   │       ├── base.py             # BrainProvider protocol + Task / BrainEvent / BrainCaps
+│   │       ├── auth.py             # per-provider auth resolver (subscription | BYOK | key)
+│   │       ├── claude.py           # ClaudeBrain — the engine-agnostic wrapper
+│   │       ├── sdk_engine.py       # SdkEngine — Claude Agent SDK (default backend)
+│   │       ├── kagura_brain_engine.py  # KaguraBrainEngine — kagura-brain (claude/codex/ollama)
+│   │       ├── select.py           # KAGURA_AGENT_BRAIN dispatch (sdk | kagura-brain)
+│   │       ├── container.py        # ContainerBrainProvider — brain over JSON-lines IPC (#102)
+│   │       └── container_main.py   # in-container brain entrypoint
+│   ├── mcp/                        # 3-tier MemoryClient (memory is CLI-primary backbone)
+│   │   ├── memory_cloud.py         # MemoryClient + LocalMemoryClient (offline SQLite)
+│   │   ├── memory_sqlite.py        # SqliteMemoryClient tier
+│   │   └── mcp_memory.py           # McpMemoryClient tier (memory-cloud MCP)
 │   ├── patterns/
 │   │   ├── checkpoint.py           # long-task resume
+│   │   ├── continuity.py           # cross-turn continuity / grounding
 │   │   ├── failure_learning.py     # remember(prevents) edges
-│   │   └── subagent_dispatch.py    # memory-id handoff
-│   ├── membrane/
+│   │   └── erasure.py              # forget / right-to-erasure
+│   ├── membrane/                   # the security boundary (host-side, trusted)
 │   │   ├── launcher.py             # per-run {image, creds, mount, egress} → docker run
-│   │   └── graduation.py           # capability trust-score from prevents-edges
+│   │   ├── runtime.py              # DockerRuntime — the only docker caller
+│   │   ├── egress.py · egress_proxy.py   # default-deny allowlist + the single egress proxy
+│   │   ├── lease.py                # CredentialBroker / Lease (grants a budget, not a credential)
+│   │   ├── providers.py            # cloud cred providers (STS / Cloudflare / static / memory)
+│   │   ├── revoke.py               # typed revoke taxonomy — poison vs transient (#131)
+│   │   ├── secret_source.py        # secret references (env / OS-keychain *_keyring)
+│   │   ├── registry.py · registry_io.py  # provider registry + validator + secret resolution
+│   │   ├── granted_broker.py       # default-deny grant gate over the broker
+│   │   ├── cloud_transports.py     # build_broker — wire providers to real SDKs
+│   │   ├── cred_env.py             # cred → container env mapping
+│   │   ├── brain_container.py      # BYOK launch spec for the in-container brain
+│   │   ├── graduation.py           # capability trust-score from prevents-edges
+│   │   └── seccomp-agent.json      # the agent seccomp profile
 │   ├── cockpit/                    # trusted host process (control surface)
-│   │   ├── core.py                 # transport-agnostic intent router
-│   │   ├── registry.py             # thread ⇄ container session table
-│   │   ├── hitl.py                 # cred/egress escalation approvals
-│   │   └── transports/
-│   │       ├── slack.py            # Bolt, Socket Mode (no public URL)
-│   │       ├── discord.py          # discord.py
-│   │       └── cli.py              # local debug adapter
+│   │   ├── core.py                 # transport-agnostic intent router + serve loop
+│   │   ├── intent.py               # structural launch/continue/status/approve/kill classify
+│   │   ├── registry.py             # thread ⇄ container session table (+ restart reconcile)
+│   │   ├── hitl.py · approval.py   # cred/egress approvals + the pending-approval producer seam
+│   │   ├── memory_write.py         # memory:write HITL + write-graduation gate
+│   │   └── transports/             # base · cli · slack (Bolt, Socket Mode) · discord
 │   └── cli/
-│       └── main.py                 # `kagura-agent run "task description"`
-├── tests/
+│       ├── main.py                 # run / repl / serve / doctor / setup
+│       ├── doctor.py               # preflight (memory / claude / docker / egress / providers)
+│       └── setup.py                # operator-gated setup guidance
+├── tests/                          # 50 modules; test_seam pins the brain-seam invariant
 └── deploy/
     ├── images/
     │   ├── Dockerfile.base         # L1: essential + gh, zero creds
-    │   └── Dockerfile.python       # L2: FROM base; +python toolchain
+    │   ├── Dockerfile.python       # L2: FROM base; +python toolchain
+    │   ├── Dockerfile.agent        # the in-container brain image (#102)
+    │   └── egress-proxy/           # the egress proxy image
     └── compose.yml                 # single-user self-hosted (cockpit on host)
 ```
 
-Python, Claude Agent SDK Python, subprocess-wrapped Claude Code CLI.
+Python; the Claude Agent SDK (default) or the sibling `kagura-brain` claude/codex/ollama wrapper.
 
-### Implementation status (v0.1–v0.5 skeleton)
+### Implementation status (v0.1–v0.7 skeleton)
 
-The pure-Python core of every milestone is implemented and tested; the
-infrastructure edges (real Docker, cloud STS/Cloudflare, Slack/Discord SDKs) sit
-behind protocol seams with their adapters stubbed for deployment. Run the suite
-with `pytest`; type-check with `mypy` (strict).
+The pure-Python core of every milestone is implemented and tested (50 test
+modules, `mypy --strict`, ≥95% coverage); the infrastructure edges (real Docker,
+cloud STS/Cloudflare, the Slack/Discord/SDK clients) sit behind protocol seams with
+their adapters wired for deployment.
+
+**Running it.** Install the core plus the extras a deployment needs, then drive it
+from the CLI:
+
+```bash
+pip install -e '.[claude]'   # SDK brain (default)          — or '.[brain]' for the kagura-brain backend
+pip install -e '.[slack]'    # a chat transport for `serve`  — or '.[discord]'
+
+kagura-agent doctor          # preflight: memory / claude / docker / egress / cred providers
+kagura-agent run "task…"     # one task, in-process
+kagura-agent serve --transport slack             # the cockpit loop on a chat transport
+kagura-agent serve --transport slack --container # …with the brain in a hardened, egress-sealed container (BYOK)
+```
+
+Run the suite with `pytest`; type-check with `mypy` (strict).
 
 | Milestone | What landed | Key modules | Tests |
 |---|---|---|---|
@@ -734,11 +796,17 @@ with `pytest`; type-check with `mypy` (strict).
 | **v0.3** cockpit + HITL | HITL approval (fail-closed + graduation trail), session registry + restart reconcile, status/kill intents | `cockpit/hitl.py`, `cockpit/registry.py`, `cockpit/core.py`, `cockpit/intent.py` | `test_cockpit_v03`, `test_cockpit_control` |
 | **v0.4** graduation | per-category curve (verified successes, fail-closed, cooldown), input-trust gate, prevents-edge failure learning | `membrane/graduation.py`, `patterns/failure_learning.py` | `test_graduation`, `test_failure_learning` |
 | **v0.5** transports | Slack (Bolt) + Discord normalizers onto the shared `Event` — pure additions, no core change | `cockpit/transports/slack.py`, `cockpit/transports/discord.py` | `test_transports_v05` |
+| **v0.6** credential config | secret references (env / OS-keychain `*_keyring`), the provider registry + validator, and `GrantedBroker` — leases are minted only for explicitly `--grant`ed scopes (default-deny) | `membrane/secret_source.py`, `membrane/registry.py`, `membrane/granted_broker.py`, `membrane/cred_env.py` | `test_secret_source`, `test_granted_broker`, `test_registry`, `test_build_broker`, `test_cred_env` |
+| **v0.7** run path + doctor | grants **enforced** end-to-end (`run` builds broker → leases → container env → releases on exit), suffix-agnostic secret resolution, `doctor` secret-backend awareness, the `serve` cockpit loop, and the pre-OSS adversarial-audit hardening (lease-sweep poison-vs-transient, typed revoke taxonomy) | `cli/main.py`, `cli/doctor.py`, `membrane/cloud_transports.py`, `membrane/registry_io.py`, `membrane/revoke.py` | `test_doctor`, `test_doctor_credentials`, `test_registry_io`, `test_revoke`, `test_membrane_bugfixes` |
+| **#102** brain-in-container | run the brain **inside** the hardened, egress-sealed container over JSON-lines IPC (`ContainerBrainProvider`), with an in-container entrypoint + BYOK launch spec; `serve --container` wires launch → registry → kill | `core/brain/container.py`, `core/brain/container_main.py`, `membrane/brain_container.py` | `test_container_brain`, `test_cockpit_container`, `test_brain_container_deploy` |
+| **#134** kagura-brain backend | a second brain behind the same protocol — `KAGURA_AGENT_BRAIN=kagura-brain` → claude/codex, with `…_MODEL` / `…_LOCAL_PROVIDER` / `…_ENDPOINT` reaching local + cloud **ollama** (the BYO-endpoint mis-route was fixed upstream in kagura-brain 0.6.0) | `core/brain/select.py`, `core/brain/kagura_brain_engine.py`, `core/brain/sdk_engine.py` | `test_brain_select`, `test_kagura_brain_engine` |
 
 The seam invariant is enforced as a test: `test_seam` fails if `core/session.py`
 ever imports the SDK. `deploy/images/` ships Dockerfile *recipes* (digest-pinned,
-no prebuilt image) and `deploy/compose.yml` provisions the egress proxy; the
-cockpit runs on the host and is the only side that speaks to Docker.
+no prebuilt image) — `Dockerfile.base` / `Dockerfile.python`, plus
+`Dockerfile.agent` for the in-container brain (#102) — and `deploy/compose.yml`
+provisions the egress proxy; the cockpit runs on the host and is the only side
+that speaks to Docker.
 
 ---
 
