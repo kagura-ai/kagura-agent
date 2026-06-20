@@ -44,6 +44,8 @@ _BRAIN_API_KEY_ENV = "KAGURA_BRAIN_API_KEY"
 #: kagura-agent-side knobs for the alternate backend.
 _BACKEND_ENV = "KAGURA_AGENT_BRAIN_BACKEND"  # claude | codex
 _ENDPOINT_ENV = "KAGURA_AGENT_BRAIN_ENDPOINT"  # BYO endpoint (paired with the key)
+_MODEL_ENV = "KAGURA_AGENT_BRAIN_MODEL"  # pin the model (--model, either backend)
+_LOCAL_PROVIDER_ENV = "KAGURA_AGENT_BRAIN_LOCAL_PROVIDER"  # codex --oss (ollama|lmstudio)
 #: Default per-invoke timeout (seconds) for the one-shot brain call.
 _DEFAULT_TIMEOUT_SEC = 1800
 
@@ -141,6 +143,44 @@ def kagura_brain_select_kwargs(env: Mapping[str, str]) -> dict[str, Any]:
     }
 
 
+def kagura_brain_invoke_kwargs(env: Mapping[str, str]) -> dict[str, Any]:
+    """Build the per-*invoke* kwargs (``model`` / ``local_provider``) from env.
+
+    These are kagura-brain ``invoke`` args, not ``select`` args: ``model`` pins the
+    model (``--model``) on either backend; ``local_provider`` selects codex's local
+    ``--oss --local-provider <ollama|lmstudio>`` backend (the fully-local brain) and
+    is **codex-only**. Pure and SDK-free so the mapping is unit-tested.
+
+    Fail-fast (mirroring the BYO endpoint/key pairing in
+    :func:`kagura_brain_select_kwargs`) on the two contradictions kagura-brain would
+    otherwise surface only at the first invoke, mid-run: ``local_provider`` with a
+    non-codex backend, and ``local_provider`` together with a BYO endpoint (a local
+    backend and a remote endpoint are mutually exclusive). Keys absent unless set, so
+    the default invoke is byte-for-byte unchanged.
+    """
+    model = env.get(_MODEL_ENV, "").strip() or None
+    local_provider = env.get(_LOCAL_PROVIDER_ENV, "").strip() or None
+    if local_provider is not None:
+        backend = resolve_kagura_brain_backend(env)
+        if backend != "codex":
+            raise BrainUnavailable(
+                f"{_LOCAL_PROVIDER_ENV} is set but {_BACKEND_ENV} resolves to "
+                f"{backend!r}: a local --oss provider is codex-only "
+                f"(set {_BACKEND_ENV}=codex, or unset {_LOCAL_PROVIDER_ENV})."
+            )
+        if env.get(_ENDPOINT_ENV, "").strip():
+            raise BrainUnavailable(
+                f"{_LOCAL_PROVIDER_ENV} and {_ENDPOINT_ENV} are mutually exclusive — "
+                "choose a local --oss backend OR a remote BYO endpoint, not both."
+            )
+    kwargs: dict[str, Any] = {}
+    if model is not None:
+        kwargs["model"] = model
+    if local_provider is not None:
+        kwargs["local_provider"] = local_provider
+    return kwargs
+
+
 class KaguraBrainEngine:  # pragma: no cover - requires kagura-brain + subscription/key
     """`ClaudeEngine` adapter over a kagura-brain handle.
 
@@ -154,10 +194,12 @@ class KaguraBrainEngine:  # pragma: no cover - requires kagura-brain + subscript
         self,
         *,
         select_kwargs: dict[str, Any],
+        invoke_kwargs: dict[str, Any] | None = None,
         cwd: Path | None = None,
         timeout: int = _DEFAULT_TIMEOUT_SEC,
     ) -> None:
         self._select_kwargs = select_kwargs
+        self._invoke_kwargs = invoke_kwargs or {}
         self._cwd = cwd
         self._timeout = timeout
         self._handle: Any | None = None
@@ -180,7 +222,11 @@ class KaguraBrainEngine:  # pragma: no cover - requires kagura-brain + subscript
         # invoke() is blocking — run it off the event loop. _result_to_turn extracts
         # result.stdout and fails closed on a non-zero/timed-out invoke.
         result = await asyncio.to_thread(
-            self._handle.invoke, prompt, cwd=self._cwd, timeout=self._timeout
+            self._handle.invoke,
+            prompt,
+            cwd=self._cwd,
+            timeout=self._timeout,
+            **self._invoke_kwargs,
         )
         yield _result_to_turn(result)
 
@@ -197,6 +243,7 @@ def make_kagura_brain(
     return ClaudeBrain(
         engine=KaguraBrainEngine(
             select_kwargs=kagura_brain_select_kwargs(env),
+            invoke_kwargs=kagura_brain_invoke_kwargs(env),
             cwd=cwd if cwd is not None else Path.cwd(),
         )
     )

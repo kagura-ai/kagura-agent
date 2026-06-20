@@ -16,7 +16,7 @@ claude = ["claude-agent-sdk>=0.1.0"]
 # used by kagura-engineer). A SECOND ClaudeEngine behind the same protocol —
 # selected per deploy via KAGURA_AGENT_BRAIN=kagura-brain; SDK stays the default.
 # Optional, so a cross-repo dependency is opt-in and the core stays dep-free.
-brain = ["kagura-brain>=0.4.1,<0.5"]
+brain = ["kagura-brain>=0.6.0,<0.7"]
 # Cockpit transports — pure additions on top of the Transport protocol.
 slack = ["slack-bolt>=1.18"]
 discord = ["discord.py>=2.3"]
