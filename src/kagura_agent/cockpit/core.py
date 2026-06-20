@@ -118,7 +118,19 @@ class Cockpit:
         timeout as a denial on the graduation-trail for audit symmetry."""
         request = self._approvals.resolve(thread_id, approved=False)
         if request is not None and self._memory is not None:
-            await record_decision(self._memory, request, approved=False)
+            # The future is ALREADY denied (fail-closed) — a failed audit write on the
+            # producer's timeout path must not surface as a raised exception there (it
+            # would crash the consumer's wait_for/timeout handling). Suppress + log; the
+            # deny stands regardless. (Contrast _resolve_pending's GRANT path, which is
+            # audit-GATED and must NOT grant on a failed audit.)
+            try:
+                await record_decision(self._memory, request, approved=False)
+            except Exception:
+                log.exception(
+                    "withdraw_pending: failed to record the timeout denial on the audit "
+                    "trail for thread %s (the request is still denied)",
+                    thread_id,
+                )
 
     async def serve(self) -> None:
         # Reconcile the session table against the live containers BEFORE the loop:
