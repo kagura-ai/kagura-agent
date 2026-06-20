@@ -93,9 +93,13 @@ def test_action_value_empty_actions_raises() -> None:
 class _FakeSlackClient:
     def __init__(self) -> None:
         self.calls: list[dict] = []  # type: ignore[type-arg]
+        self.posted_ts: list[str] = []
 
-    async def chat_postMessage(self, **kw: object) -> None:
+    async def chat_postMessage(self, **kw: object) -> dict[str, str]:
         self.calls.append(dict(kw))
+        ts = f"posted-{len(self.calls)}"  # Slack assigns the posted message a new ts
+        self.posted_ts.append(ts)
+        return {"ts": ts}
 
 
 class _CapturingApp:
@@ -141,6 +145,28 @@ async def test_ask_button_resolves_only_for_operator() -> None:
     await app.action_handler(  # type: ignore[misc]
         ack=_noop_ack,
         body={"user": {"id": "op"}, "container": {"thread_ts": "1.0"},
+              "actions": [{"value": "/approve"}]},
+    )
+    assert await asyncio.wait_for(pending, timeout=1) == "/approve"
+
+
+async def test_ask_resolves_a_top_level_prompt_via_message_ts() -> None:
+    # #124: if Slack posts the approval prompt top-level (the click payload carries NO
+    # thread_ts — e.g. a stale/invalid thread_id), the click is resolved by the prompt
+    # message's own ts (container.message_ts / message.ts), which ask also keyed the
+    # future under — not a silent hang to the producer's timeout.
+    from kagura_agent.cockpit.transports.slack import SlackTransport
+
+    app = _CapturingApp()
+    t = SlackTransport(app, "UBOT", channel_map={"1.0": "C1"}, operator_id="op")
+    pending = asyncio.create_task(t.ask("1.0", "approve?", ["/approve"]))
+    await asyncio.sleep(0)  # let ask post + register both keys
+    posted_ts = app.client.posted_ts[0]
+
+    await app.action_handler(  # type: ignore[misc]
+        ack=_noop_ack,
+        body={"user": {"id": "op"},
+              "container": {"message_ts": posted_ts},  # NO thread_ts (top-level prompt)
               "actions": [{"value": "/approve"}]},
     )
     assert await asyncio.wait_for(pending, timeout=1) == "/approve"
