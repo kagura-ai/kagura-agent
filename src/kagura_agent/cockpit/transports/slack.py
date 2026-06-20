@@ -178,9 +178,14 @@ class SlackTransport:  # pragma: no cover - requires slack-bolt + a workspace
             )
             if key is None:
                 return
+            # Extract the clicked value BEFORE popping, so a malformed payload
+            # (action_value raising) leaves the future pending — re-clickable, and
+            # failing closed on its own timeout — rather than popped-but-unresolved
+            # (which would hang the awaiter).
+            value = action_value(body)
             future = self._pending.pop(key, None)
             if future is not None and not future.done():
-                future.set_result(action_value(body))
+                future.set_result(value)
 
         self._app.event("message")(_on_message)
         self._app.action({"block_id": APPROVAL_ACTION_ID})(_on_choice)
