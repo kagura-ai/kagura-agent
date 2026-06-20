@@ -186,9 +186,12 @@ async def test_reconcile_is_best_effort_when_enumeration_fails() -> None:
 
 
 async def test_failed_in_container_run_leaves_a_killable_record() -> None:
-    # If the in-container brain ends WITHOUT a terminal DoneEvent the run fails,
-    # but on_start already registered the container — so the record isn't silently
-    # lost: the operator can /kill it (and restart-reconcile would mark it dead).
+    # If the in-container brain ends WITHOUT a terminal DoneEvent the run fails. The
+    # container is already reaped (the provider's finally → session.aclose()), so the
+    # record is marked "closed" — non-resumable, but the container_id is RETAINED so
+    # the operator can still /kill (#124 item 5a). Crucially it must NOT stay
+    # "running": that would make sessions() treat it as resumable and replay a stale
+    # checkpoint against the dead container on the next message.
     class _NoDoneBackend(_FakeBackend):
         async def start(self, spec: LaunchSpec, stdin: bytes) -> _FakeContainerSession:
             self.started.append((spec, stdin))
@@ -206,6 +209,8 @@ async def test_failed_in_container_run_leaves_a_killable_record() -> None:
     assert "internal error" in transport.sent[0][1]  # the run failed (no DoneEvent)
     rec = registry.get("t1")
     assert rec is not None and rec.container_id == "cid-x"  # tracked for /kill, not lost
+    assert rec.status == "closed"  # marked non-resumable (was wrongly left "running")
+    assert "t1" not in registry.sessions()  # a follow-up can't replay a stale checkpoint
 
 
 def test_set_container_updates_in_place_and_preserves_granted_caps() -> None:
