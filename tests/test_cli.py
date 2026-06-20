@@ -21,6 +21,7 @@ from kagura_agent.cli.main import (
     plan_granted_specs,
     resolve_grants,
     resolve_log_level,
+    resolve_run_prompt,
     resolve_state_dir,
 )
 from kagura_agent.core.brain.base import BrainUnavailable
@@ -210,6 +211,96 @@ def test_parse_rejects_empty_task() -> None:
 def test_parse_rejects_whitespace_task() -> None:
     with pytest.raises(SystemExit):
         parse_args(["run", "   "])
+
+
+# --- #142: prompt body from a file or stdin -------------------------------
+
+
+def test_parse_run_prompt_file_defaults_none() -> None:
+    # Back-compat: the inline positional path leaves prompt_file unset.
+    ns = parse_args(["run", "build a thing"])
+    assert ns.task == "build a thing"
+    assert ns.prompt_file is None
+
+
+def test_parse_run_accepts_prompt_file() -> None:
+    ns = parse_args(["run", "--prompt-file", "task.md"])
+    assert ns.command == "run"
+    assert ns.prompt_file == "task.md"
+    assert ns.task is None  # the positional is omitted when --prompt-file is used
+
+
+def test_parse_run_accepts_stdin_sentinel() -> None:
+    # `-` is a valid positional (the universal stdin sentinel); it is non-empty so
+    # it survives the _nonempty_task parse guard and is resolved later.
+    ns = parse_args(["run", "-"])
+    assert ns.task == "-"
+    assert ns.prompt_file is None
+
+
+def test_parse_run_task_and_prompt_file_are_mutually_exclusive() -> None:
+    # Exactly one source: giving both fails closed at parse (argparse exit 2).
+    with pytest.raises(SystemExit):
+        parse_args(["run", "do x", "--prompt-file", "task.md"])
+
+
+def test_resolve_run_prompt_returns_inline_task_verbatim() -> None:
+    assert resolve_run_prompt("do a thing", None) == "do a thing"
+
+
+def test_resolve_run_prompt_preserves_multiline_body() -> None:
+    body = "line 1\nline 2\n  indented\n"
+    assert resolve_run_prompt(body, None) == body  # verbatim, no stripping
+
+
+def test_resolve_run_prompt_reads_file_verbatim(tmp_path: Path) -> None:
+    p = tmp_path / "task.md"
+    p.write_text("multi\nline\nprompt\n", encoding="utf-8")
+    assert resolve_run_prompt(None, str(p)) == "multi\nline\nprompt\n"
+
+
+def test_resolve_run_prompt_reads_stdin_for_positional_dash() -> None:
+    out = resolve_run_prompt("-", None, stdin_read=lambda: "piped task")
+    assert out == "piped task"
+
+
+def test_resolve_run_prompt_reads_stdin_for_prompt_file_dash() -> None:
+    out = resolve_run_prompt(None, "-", stdin_read=lambda: "piped via --prompt-file")
+    assert out == "piped via --prompt-file"
+
+
+def test_resolve_run_prompt_rejects_empty_file(tmp_path: Path) -> None:
+    p = tmp_path / "empty.md"
+    p.write_text("   \n\t\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="task must not be empty"):
+        resolve_run_prompt(None, str(p))
+
+
+def test_resolve_run_prompt_rejects_empty_stdin() -> None:
+    with pytest.raises(ValueError, match="task must not be empty"):
+        resolve_run_prompt("-", None, stdin_read=lambda: "")
+
+
+def test_resolve_run_prompt_missing_file_is_clean_valueerror(tmp_path: Path) -> None:
+    # A missing file fails closed as a ValueError (clean exit-2 message), not a
+    # raw OSError/traceback leaking out of the resolver.
+    missing = tmp_path / "nope.md"
+    with pytest.raises(ValueError, match="could not read"):
+        resolve_run_prompt(None, str(missing))
+
+
+def test_resolve_run_prompt_non_utf8_file_is_clean_valueerror(tmp_path: Path) -> None:
+    p = tmp_path / "binary.bin"
+    p.write_bytes(b"\xff\xfe\x00\x01")  # not valid UTF-8
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        resolve_run_prompt(None, str(p))
+
+
+def test_resolve_run_prompt_no_source_is_valueerror() -> None:
+    # argparse's required mutex group prevents this at parse, but the resolver is a
+    # total function: neither source → a clean ValueError, not an UnboundLocal.
+    with pytest.raises(ValueError):
+        resolve_run_prompt(None, None)
 
 
 # --- context continuity: --session, repl, store selection ----------------
