@@ -228,8 +228,11 @@ async def test_sweep_continues_past_a_failing_revoke() -> None:
 
     await broker.sweep()  # must not raise despite h1 failing
 
-    assert "h2" in provider.revoked
-    await broker.sweep()  # h1 was forgotten — second sweep does not re-hit it
+    assert "h2" in provider.revoked  # sweep continued past h1 to revoke h2
+    # #124: h1's revoke failed, so it is KEPT tracked (not forgotten) — a still-valid
+    # credential is never dropped on a revoke failure. The second sweep harmlessly
+    # re-attempts h1 (fails again, kept again) and must still not raise.
+    await broker.sweep()
 
 
 # --- bug_019: Slack subtype events must be dropped ------------------------

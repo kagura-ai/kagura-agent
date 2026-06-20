@@ -72,9 +72,15 @@ async def test_sweep_revokes_once_provider_restored() -> None:
     assert ledger.open_leases() == []
 
 
-async def test_sweep_forgets_when_present_provider_revoke_fails() -> None:
-    # Preserved unwedge behavior: a provider that IS present but whose revoke
-    # raises (poison handle) is forgotten so the sweep doesn't re-hit it forever.
+async def test_sweep_keeps_lease_when_present_provider_revoke_fails() -> None:
+    # #124: a revoke failure on a PRESENT provider must KEEP the lease tracked, not
+    # forget it. At sweep time a transient 5xx/timeout is indistinguishable from a
+    # permanent 404, so forgetting would drop a STILL-VALID credential — an
+    # un-revocable leak, the exact thing the sweeper exists to prevent. This makes
+    # sweep consistent with renew() and the unknown-provider branch, which both
+    # keep-on-failure. (A genuinely-gone handle is harmlessly re-attempted on the
+    # next restart sweep; distinguishing poison-vs-transient via a typed revoke error
+    # so the former can be forgotten is a tracked follow-up.)
     revoked: list[str] = []
     ledger = LeaseLedger()
     cf = _cf(revoked, fail=True)
@@ -82,7 +88,8 @@ async def test_sweep_forgets_when_present_provider_revoke_fails() -> None:
 
     await CredentialBroker({"cf": cf}, clock=lambda: 0.0, ledger=ledger).sweep()
 
-    assert ledger.open_leases() == []
+    open_after = ledger.open_leases()
+    assert len(open_after) == 1 and open_after[0].handle == "ID1"  # kept, not dropped
 
 
 # --- launcher: stamp the agent label so reconcile()/list() find containers ---
