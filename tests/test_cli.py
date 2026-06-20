@@ -238,6 +238,14 @@ def test_parse_run_accepts_stdin_sentinel() -> None:
     assert ns.prompt_file is None
 
 
+def test_parse_run_prompt_file_accepts_stdin_sentinel() -> None:
+    # `--prompt-file -` must reach the resolver as the '-' sentinel, not be
+    # mis-parsed as a missing option value or an option prefix.
+    ns = parse_args(["run", "--prompt-file", "-"])
+    assert ns.prompt_file == "-"
+    assert ns.task is None
+
+
 def test_parse_run_task_and_prompt_file_are_mutually_exclusive() -> None:
     # Exactly one source: giving both fails closed at parse (argparse exit 2).
     with pytest.raises(SystemExit):
@@ -249,14 +257,17 @@ def test_resolve_run_prompt_returns_inline_task_verbatim() -> None:
 
 
 def test_resolve_run_prompt_preserves_multiline_body() -> None:
-    body = "line 1\nline 2\n  indented\n"
+    # Leading AND trailing whitespace must survive verbatim — the body's first and
+    # last chars are spaces, so a stray .strip()/.lstrip()/.rstrip() is caught here.
+    body = "  leading\nline 2\n  indented\ntrailing  "
     assert resolve_run_prompt(body, None) == body  # verbatim, no stripping
 
 
 def test_resolve_run_prompt_reads_file_verbatim(tmp_path: Path) -> None:
     p = tmp_path / "task.md"
-    p.write_text("multi\nline\nprompt\n", encoding="utf-8")
-    assert resolve_run_prompt(None, str(p)) == "multi\nline\nprompt\n"
+    # Leading whitespace included so a stray lstrip on the file path would be caught.
+    p.write_text("  leading space\nsecond line\n", encoding="utf-8")
+    assert resolve_run_prompt(None, str(p)) == "  leading space\nsecond line\n"
 
 
 def test_resolve_run_prompt_reads_stdin_for_positional_dash() -> None:
@@ -272,13 +283,22 @@ def test_resolve_run_prompt_reads_stdin_for_prompt_file_dash() -> None:
 def test_resolve_run_prompt_rejects_empty_file(tmp_path: Path) -> None:
     p = tmp_path / "empty.md"
     p.write_text("   \n\t\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="task must not be empty"):
+    # The message names the source so an operator knows which input was blank.
+    with pytest.raises(ValueError, match=r"task must not be empty \(read from --prompt-file"):
         resolve_run_prompt(None, str(p))
 
 
 def test_resolve_run_prompt_rejects_empty_stdin() -> None:
-    with pytest.raises(ValueError, match="task must not be empty"):
+    with pytest.raises(ValueError, match=r"task must not be empty \(read from stdin\)"):
         resolve_run_prompt("-", None, stdin_read=lambda: "")
+
+
+def test_resolve_run_prompt_rejects_whitespace_only_inline_task() -> None:
+    # The resolver owns the empty-guard on EVERY source, not just file/stdin: a
+    # whitespace-only inline task reaching it directly (parse-time _nonempty_task
+    # bypassed) is still rejected, with the inline source named.
+    with pytest.raises(ValueError, match=r"task must not be empty \(read from task argument\)"):
+        resolve_run_prompt("   \t ", None)
 
 
 def test_resolve_run_prompt_missing_file_is_clean_valueerror(tmp_path: Path) -> None:
@@ -287,6 +307,15 @@ def test_resolve_run_prompt_missing_file_is_clean_valueerror(tmp_path: Path) -> 
     missing = tmp_path / "nope.md"
     with pytest.raises(ValueError, match="could not read"):
         resolve_run_prompt(None, str(missing))
+
+
+def test_resolve_run_prompt_directory_path_is_clean_valueerror(tmp_path: Path) -> None:
+    # A path that exists but is a directory raises IsADirectoryError/PermissionError
+    # (both OSError) — the broad `except OSError` must fold it into the same clean
+    # "could not read" ValueError, never leak a raw OSError. Pins that the catch is
+    # not narrowed to FileNotFoundError.
+    with pytest.raises(ValueError, match="could not read"):
+        resolve_run_prompt(None, str(tmp_path))
 
 
 def test_resolve_run_prompt_non_utf8_file_is_clean_valueerror(tmp_path: Path) -> None:
@@ -299,7 +328,7 @@ def test_resolve_run_prompt_non_utf8_file_is_clean_valueerror(tmp_path: Path) ->
 def test_resolve_run_prompt_no_source_is_valueerror() -> None:
     # argparse's required mutex group prevents this at parse, but the resolver is a
     # total function: neither source → a clean ValueError, not an UnboundLocal.
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="provide a task argument"):
         resolve_run_prompt(None, None)
 
 
@@ -750,6 +779,35 @@ def test_main_run_clean_error_on_invalid_mcp_json(tmp_path, capsys) -> None:  # 
     rc = main(["run", "do a thing", "--mcp-config", str(bad)])
     assert rc == 2
     assert "--mcp-config" in capsys.readouterr().err
+
+
+def test_main_run_prompt_file_body_reaches_run_task(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # #142 integration: the resolved FILE body is what main() hands _run_task as the
+    # task — not ns.task (None here). Pins the run-branch wiring of resolve_run_prompt.
+    import kagura_agent.cli.main as cli_main
+
+    seen: dict[str, str] = {}
+
+    async def _capture(task, **kwargs):  # type: ignore[no-untyped-def]
+        seen["task"] = task
+        return "captured"
+
+    monkeypatch.setattr(cli_main, "_run_task", _capture)
+    p = tmp_path / "task.md"
+    p.write_text("body from a file\n", encoding="utf-8")
+    rc = main(["run", "--prompt-file", str(p)])
+    assert rc == 0
+    assert seen["task"] == "body from a file\n"  # the file body, resolved, reached _run_task
+
+
+def test_main_run_clean_error_on_unreadable_prompt_file(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    # #142 integration: a missing --prompt-file fails closed at the run glue with a
+    # clean exit-2 message (never a traceback), before any brain/memory work.
+    rc = main(["run", "--prompt-file", str(tmp_path / "nope.md")])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "run:" in err and "could not read" in err
+    assert "Traceback" not in err
 
 
 # --- console output: CLI text uses em-dash/arrow glyphs a cp932 console can't encode ---
