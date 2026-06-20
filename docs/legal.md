@@ -58,7 +58,7 @@ accepted**, not buried, to be enforceable.
 
 ## 3. External-chat PII flowing through the agent
 
-`kagura-memory-ai-worker` ingests Slack/Teams chat into memory-cloud, which the
+An external connector worker ingests Slack/Teams chat into memory-cloud, which the
 agent reads (`recall`) and may act on, transmit, or derive new memories from.
 That chat contains **third parties' personal data** whose authors never consented
 to Kagura — so the operator/Kagura takes on processor/controller obligations
