@@ -270,6 +270,37 @@ def _reject_unhonored_parent_token(spec: ProviderSpec) -> None:
         )
 
 
+#: Optional schema fields a kind's DEFAULT factory accepts but does not yet honor.
+#: The registry keeps them (forward-compat / a custom _factory may consume them),
+#: but the default ambient-credential factory ignores them — so a *present* one is
+#: a silent least-privilege defeat (a tightened token_lifetime / a constrained
+#: delegation chain / a pinned region quietly replaced by the provider default).
+_UNHONORED_OPTIONAL: dict[str, tuple[str, ...]] = {
+    "aws_sts": ("region",),
+    "gcp_impersonation": ("token_lifetime", "delegates"),
+}
+
+
+def _reject_unhonored_optional(spec: ProviderSpec) -> None:
+    """Refuse an optional field the default factory cannot honor (#124).
+
+    Same discipline as :func:`_reject_unhonored_parent_token` (#82): the schema keeps
+    these fields, but the default ambient-credential factory (:func:`aws_provider` /
+    :func:`gcp_provider`) does not thread them through, so a *present* one would
+    silently mint a broader/longer-lived token than the operator's tightened config
+    intended. Fail loud rather than silently defeat least-privilege. (Pass a custom
+    ``_factory`` that consumes the field, or remove it.)
+    """
+    present = sorted(f for f in _UNHONORED_OPTIONAL.get(spec.kind, ()) if f in spec.fields)
+    if present:
+        plural = "them" if len(present) > 1 else "it"
+        raise ValueError(
+            f"provider {spec.name!r} ({spec.kind}) sets {present}, but this kind's default "
+            f"factory mints with the host's ambient credentials and does not honor {plural} "
+            f"— remove {present} (or pass a custom _factory that consumes {plural})"
+        )
+
+
 def _default_factory(  # pragma: no cover - deployment edge (needs cloud SDKs)
     spec: ProviderSpec, secrets: Mapping[str, str]
 ) -> CredProvider:
@@ -284,9 +315,11 @@ def _default_factory(  # pragma: no cover - deployment edge (needs cloud SDKs)
     kind = spec.kind
     if kind == "aws_sts":
         _reject_unhonored_parent_token(spec)
+        _reject_unhonored_optional(spec)
         return aws_provider(session_name=str(spec.fields.get("session_name", "kagura-agent")))
     if kind == "gcp_impersonation":
         _reject_unhonored_parent_token(spec)
+        _reject_unhonored_optional(spec)
         return gcp_provider()
     if kind == "github_app":
         return github_app_provider(
