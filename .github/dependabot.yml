@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Python dependencies declared in pyproject.toml. The core has no runtime deps;
+  # Dependabot tracks the optional extras and the dev toolchain (ruff/mypy/pytest).
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+  # GitHub Actions pinned in the CI / image-build workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
