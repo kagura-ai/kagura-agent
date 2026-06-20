@@ -158,8 +158,51 @@ async def test_cloudflare_orphan_swept_by_broker_on_restart() -> None:
     await broker.acquire("cf", scope="zone:edit", ttl=600, budget=Budget(3600))
 
     await broker.sweep()  # crash/restart leaves the CF token open; sweeper revokes it
-
     assert revoked == ["tok-1"]
+
+
+class _HttpErr(Exception):
+    """A minimal httpx.HTTPStatusError look-alike carrying ``.response.status_code``."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"HTTP {status}")
+        self.response = type("_R", (), {"status_code": status})()
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [(404, "RevokePermanent"), (410, "RevokePermanent"), (503, "RevokeTransient"),
+     (500, "RevokeTransient"), (429, "RevokeTransient")],
+)
+async def test_cloudflare_revoke_classifies_a_raw_transport_error(status, expected) -> None:
+    # #131: revoke wraps a raw delete() transport error into the typed taxonomy so the
+    # sweeper can forget a confirmed-gone handle (404/410 -> RevokePermanent) yet keep
+    # a transient one (5xx/429 -> RevokeTransient).
+    from kagura_agent.membrane import revoke as rv
+
+    def delete(_h: str) -> None:
+        raise _HttpErr(status)
+
+    provider = CloudflareTokenProvider(
+        create=lambda req: {"result": {"id": "i", "value": "v"}}, delete=delete
+    )
+    with pytest.raises(getattr(rv, expected)):
+        await provider.revoke("i")
+
+
+async def test_cloudflare_revoke_passes_through_a_pre_typed_error() -> None:
+    # A delete that already raises a typed RevokeError is re-raised unchanged (not
+    # double-wrapped), so a custom transport can pre-classify.
+    from kagura_agent.membrane.revoke import RevokeTransient
+
+    def delete(_h: str) -> None:
+        raise RevokeTransient("already classified")
+
+    provider = CloudflareTokenProvider(
+        create=lambda req: {"result": {"id": "i", "value": "v"}}, delete=delete
+    )
+    with pytest.raises(RevokeTransient, match="already classified"):
+        await provider.revoke("i")
 
 
 # --- memory-cloud (stateless, scoped, leased from the host auth-login session) --
