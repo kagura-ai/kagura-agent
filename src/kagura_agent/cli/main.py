@@ -216,14 +216,61 @@ def make_run_store(session_id: str | None) -> tuple[CheckpointStore, str]:
     return FileCheckpointStore(resolve_state_dir()), session_id
 
 
+#: Rejected at parse time (_nonempty_task) AND after a file/stdin read
+#: (resolve_run_prompt): a blank prompt would spin a billed empty-prompt run.
+_EMPTY_TASK_MSG = "task must not be empty"
+
+
 def _nonempty_task(value: str) -> str:
     """Reject an empty/whitespace-only task at parse time.
 
     A blank prompt would otherwise spin a billed empty-prompt brain run (the
     transports already drop empty inbound messages; the CLI is the other entry)."""
     if not value.strip():
-        raise argparse.ArgumentTypeError("task must not be empty")
+        raise argparse.ArgumentTypeError(_EMPTY_TASK_MSG)
     return value
+
+
+def _read_stdin() -> str:  # pragma: no cover - trivial stdin shim, injected in tests
+    return sys.stdin.read()
+
+
+def resolve_run_prompt(
+    task: str | None,
+    prompt_file: str | None,
+    *,
+    stdin_read: Callable[[], str] = _read_stdin,
+) -> str:
+    """Resolve the run's prompt body from the inline task, --prompt-file, or stdin.
+
+    Exactly one source is expected — argparse's required mutually-exclusive group
+    enforces that at parse time — but this stays a *total* function (every branch
+    defined, defensive on "neither") so it is unit-tested in isolation. A ``-`` in
+    either the positional or ``--prompt-file`` means "read stdin" (the universal
+    convention). The resolved body is returned verbatim; only an empty/whitespace
+    result is rejected, so an empty file or empty stdin can't spin a billed
+    empty-prompt brain run (the same guard ``_nonempty_task`` gives the inline
+    positional). File/stdin read failures are folded into a clean ``ValueError``
+    so ``main()`` surfaces a one-line exit-2 message, never a raw traceback (#142)."""
+    if task == "-" or prompt_file == "-":
+        text = stdin_read()
+        source = "stdin"
+    elif prompt_file is not None:
+        try:
+            text = Path(prompt_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"could not read --prompt-file {prompt_file!r}: {exc}") from exc
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"--prompt-file {prompt_file!r} is not valid UTF-8 text") from exc
+        source = f"--prompt-file {prompt_file!r}"
+    elif task is not None:
+        text = task
+        source = "task argument"
+    else:  # neither source — argparse prevents this; defensive total-function branch
+        raise ValueError("provide a task argument, --prompt-file PATH, or '-' for stdin")
+    if not text.strip():
+        raise ValueError(f"{_EMPTY_TASK_MSG} (read from {source})")
+    return text
 
 
 def _add_observability_args(p: argparse.ArgumentParser) -> None:
@@ -249,7 +296,25 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="kagura-agent")
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="run a single task")
-    run.add_argument("task", type=_nonempty_task, help="natural-language task description")
+    # The task body comes from exactly one source: the inline positional, a file
+    # (--prompt-file), or stdin ('-' in either). A *required* mutually-exclusive
+    # group makes argparse enforce "exactly one" at parse time — neither and both
+    # fail closed with exit 2 (#142).
+    src = run.add_mutually_exclusive_group(required=True)
+    src.add_argument(
+        "task",
+        nargs="?",
+        type=_nonempty_task,
+        help="natural-language task description, or '-' to read it from stdin",
+    )
+    src.add_argument(
+        "--prompt-file",
+        dest="prompt_file",
+        default=None,
+        metavar="PATH",
+        help="read the task body from PATH ('-' for stdin); mutually exclusive with "
+        "the inline task argument",
+    )
     # Memory is CLI-primary; these knobs are for *other* MCP servers, mirroring
     # Claude Code's own flags (orthogonal to memory — v0.2-A6).
     run.add_argument(
@@ -759,9 +824,17 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
             print(f"--mcp-config {ns.mcp_config!r}: {exc}", file=sys.stderr)
             return 2
         try:
+            # Resolve the task body from the inline positional, --prompt-file, or
+            # stdin ('-'). A missing/unreadable/non-UTF-8 file or an empty file/
+            # stdin fails closed with a clean message (exit 2), never a traceback.
+            task_text = resolve_run_prompt(ns.task, ns.prompt_file)
+        except ValueError as exc:
+            print(f"run: {exc}", file=sys.stderr)
+            return 2
+        try:
             result = asyncio.run(
                 _run_task(
-                    ns.task,
+                    task_text,
                     session_id=ns.session,
                     grants=grants,
                     registry_path=ns.registry,
