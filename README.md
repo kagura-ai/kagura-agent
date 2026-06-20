@@ -450,7 +450,7 @@ config flag.
 | **`docker.sock`** | **Never mounted into an agent container.** | Mounting it = host root. Only the cockpit (trusted host process) speaks to Docker. |
 | **Filesystem** | Mount **project root only**. No home / host FS. | Limits what a hijacked run can read or corrupt. |
 | **Egress** | **Enforcing**, not just logged: a single egress proxy is the only route out (default-deny + allowlist + log). | A self-host operator has no on-call — egress must *block* during the window before a human reads the alert, not merely record. See `docs/operations.md`. |
-| **Memory provenance** | Recall results carry a `source` / trust-tier. Externally-ingested memories (e.g. chat via `kagura-memory-ai-worker`) are **untrusted input**. | memory-cloud is read every run and ingests attacker-reachable chat — it is a cross-system injection channel (separate bot ids do not help; the *data* is shared). |
+| **Memory provenance** | Recall results carry a `source` / trust-tier. Externally-ingested memories (e.g. chat pulled in by an external connector) are **untrusted input**. | memory-cloud is read every run and ingests attacker-reachable chat — it is a cross-system injection channel (separate bot ids do not help; the *data* is shared). |
 | **User namespace** | userns-remap / rootless Docker. | Container root ≠ host root. |
 
 ### Image composition: bake tools, inject secrets
@@ -745,11 +745,11 @@ To prevent scope creep, several adjacent things are explicitly out of scope:
   (launch / steer / approve / kill tasks — see "Control surface internals"), not
   a window onto memory-cloud. Different job, separate bot id (`@kagura-agent`).
 - **NOT a fine-tuned model.** It runs base Claude, not a customer-specific LLM.
-  Custom-model concerns belong to `kagura-memory-dataset-worker` Layer 2.
-- **NOT an ingestion source.** Slack / Teams chat ingestion belongs to
-  `kagura-memory-ai-worker`. The agent may *use* those memories, not produce them.
+  Custom-model / dataset concerns live in a separate component.
+- **NOT an ingestion source.** Slack / Teams chat ingestion belongs to a separate
+  connector worker. The agent may *use* those memories, not produce them.
 - **NOT a memory analyzer.** broadlistening lives in memory-cloud.
-- **NOT a domain LLM** (Layer 3 rejected — see dataset-worker README).
+- **NOT a domain LLM** (Layer 3 rejected).
 
 The agent's job is **autonomous task execution with persistent memory**,
 nothing more, nothing less.
@@ -765,7 +765,7 @@ STS/Cloudflare provider SDKs, a live Slack/Discord workspace) and proving the fu
 loop end-to-end on a real task. The earlier "when to start building" triggers now
 read as **launch (not build) triggers** — when to stand a real deployment up:
 
-1. `kagura-memory-ai-worker` Phase 1+2 in production, accumulating
+1. The chat-ingestion pipeline in production, accumulating
    non-trivial customer memory.
 2. Internal dogfooding signal: the team wants "an agent that remembers past
    failures" while operating memory-cloud itself.
@@ -894,9 +894,6 @@ that speaks to Docker.
 | [`kagura-ai/kagura-code-reviewer`](https://github.com/kagura-ai/kagura-code-reviewer) | Review subagent | Ollama-powered code reviewer with a green/yellow/red verdict; launched by kagura-engineer's `review`. A model for the agent's own sub-agent dispatch. |
 | [`kagura-ai/memory-cloud`](https://github.com/kagura-ai/memory-cloud) | Persistence + MCP server | **The backbone.** Agent's primary MCP. |
 | [`kagura-ai/kagura-memory-python-sdk`](https://github.com/kagura-ai/kagura-memory-python-sdk) | Primitive SDK | Used by the memory MCP client wrapper inside the agent. |
-| [`kagura-ai/kagura-memory-ai-worker`](https://github.com/kagura-ai/kagura-memory-ai-worker) | Chat ingestion | Produces memories the agent later reads. Not in the agent's execution path. |
-| [`kagura-ai/kagura-memory-dataset-worker`](https://github.com/kagura-ai/kagura-memory-dataset-worker) | Export + fine-tune | Independent. May export agent-produced memories as datasets. |
-| [`kagura-ai/kagura-embeddings-worker`](https://github.com/kagura-ai/kagura-embeddings-worker) | Sovereign embeddings | Indirect — agent's `recall` quality depends on which embeddings lane the workspace uses. |
 
 ---
 
