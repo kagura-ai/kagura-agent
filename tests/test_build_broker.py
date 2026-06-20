@@ -343,6 +343,43 @@ def test_reject_unhonored_parent_token_allows_absent():
     assert _reject_unhonored_parent_token(spec) is None
 
 
+def test_reject_unhonored_optional_rejects_unhonored_least_privilege_fields():
+    # #124: gcp token_lifetime/delegates and aws region are schema-accepted but the
+    # default ambient-cred factory does NOT honor them — silently minting a broader/
+    # longer token than the operator's tightened config intended (a least-privilege
+    # defeat). Fail loud at build, mirroring _reject_unhonored_parent_token (#82),
+    # rather than silently ignoring the operator's posture.
+    from kagura_agent.membrane.cloud_transports import _reject_unhonored_optional
+
+    cases = [
+        ProviderSpec(name="g", kind="gcp_impersonation",
+                     fields={"service_account": "sa@p.iam", "token_lifetime": "1800s"}),
+        ProviderSpec(name="g", kind="gcp_impersonation",
+                     fields={"service_account": "sa@p.iam", "delegates": ["mid@p.iam"]}),
+        ProviderSpec(name="a", kind="aws_sts",
+                     fields={"role_arn": "r", "region": "us-east-1"}),
+    ]
+    for spec, field in zip(cases, ("token_lifetime", "delegates", "region"), strict=True):
+        with pytest.raises(ValueError, match=field):
+            _reject_unhonored_optional(spec)
+
+
+def test_reject_unhonored_optional_allows_absent():
+    # The common case (none set) passes; a kind with no unhonored optional fields
+    # (e.g. github_app) passes unconditionally.
+    from kagura_agent.membrane.cloud_transports import _reject_unhonored_optional
+
+    assert _reject_unhonored_optional(
+        ProviderSpec(name="a", kind="aws_sts", fields={"role_arn": "r"})
+    ) is None
+    assert _reject_unhonored_optional(
+        ProviderSpec(name="g", kind="gcp_impersonation", fields={"service_account": "sa@p.iam"})
+    ) is None
+    assert _reject_unhonored_optional(
+        ProviderSpec(name="gh", kind="github_app", fields={"app_id": "1", "installation_id": "2"})
+    ) is None
+
+
 def test_default_factory_static_env_requires_value_env_not_value_file():
     # parse_registry now rejects value_file/value_keyring for static_env (value is
     # _env-only), but build_broker accepts any hand-built ProviderSpec, so the
