@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -47,6 +48,41 @@ class CredentialSetupError(RuntimeError):
     missing registry, a --grant naming a provider absent from it, or a provider
     kind needing deployment wiring). Distinct from a ValueError raised later by
     the agent run, so main() surfaces only the former as a clean exit-2 message."""
+
+
+class TransportUnavailable(RuntimeError):
+    """A `serve` transport's optional extra (slack-bolt / discord.py) is not
+    installed. Surfaced by the serve gate as a clean exit-3 message (like the
+    brain's `BrainUnavailable`), never a raw `ModuleNotFoundError` traceback."""
+
+
+#: serve --transport NAME → (the module to probe for importability, the pip extra
+#: that provides it). Used by `require_transport_sdk` to fail closed before the
+#: real SDK import in `_build_transport`.
+_TRANSPORT_SDKS: dict[str, tuple[str, str]] = {
+    "slack": ("slack_bolt", "slack"),
+    "discord": ("discord", "discord"),
+}
+
+
+def require_transport_sdk(
+    name: str, *, find_spec: Callable[[str], object | None] = importlib.util.find_spec
+) -> None:
+    """Raise `TransportUnavailable` with an install hint if the transport SDK is absent.
+
+    Mirrors the brain's `require_claude_sdk`: pure and SDK-free (inject `find_spec`
+    to unit-test; the real `find_spec` only inspects import metadata, never importing
+    the heavy SDK). Called at the top of `_build_transport` so a missing
+    `[slack]`/`[discord]` extra fails closed with a clean message instead of a raw
+    `ModuleNotFoundError` once `serve` is wired. `name` is one of the argparse
+    `--transport` choices, so the dict lookup never misses in practice."""
+    module, extra = _TRANSPORT_SDKS[name]
+    if find_spec(module) is None:
+        raise TransportUnavailable(
+            f"The {name} transport requires the optional '{extra}' extra ({module}), "
+            "which is not installed. Install it with:\n"
+            f"  pip install 'kagura-agent[{extra}]'"
+        )
 
 #: Lease tuning for the run path's granted credentials (#65). A short TTL plus a
 #: renewable budget keeps a leaked cred short-lived; the run releases on exit.
@@ -402,7 +438,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     serve = sub.add_parser("serve", help="run the cockpit serve loop on a chat transport")
     serve.add_argument(
-        "--transport", choices=["slack", "discord"], required=True,
+        # Choices are the _TRANSPORT_SDKS keys, so a transport can never be a valid
+        # --transport value without a matching missing-extra guard (no drift → no
+        # fail-open KeyError in require_transport_sdk).
+        "--transport", choices=tuple(_TRANSPORT_SDKS), required=True,
         help="chat transport to serve (the bot token is read from the host environment)",
     )
     serve.add_argument(
@@ -966,8 +1005,10 @@ def _serve(ns: argparse.Namespace) -> int:  # pragma: no cover - glue (real tran
         )
         memory = make_memory_client()
         checkpoints = FileCheckpointStore(resolve_state_dir(os.environ))
-    except (BrainUnavailable, MemoryUnreachableError) as exc:
-        # A missing runtime dependency / unreachable memory: exit 3 (matches run/repl).
+    except (BrainUnavailable, MemoryUnreachableError, TransportUnavailable) as exc:
+        # A missing runtime dependency (brain or transport extra) / unreachable memory:
+        # exit 3 (matches run/repl). TransportUnavailable folds the would-be raw
+        # ModuleNotFoundError from a missing slack-bolt / discord.py into this gate.
         print(str(exc), file=sys.stderr)
         return 3
     except (ValueError, KeyError, OSError) as exc:
@@ -1020,6 +1061,9 @@ def _build_transport(  # pragma: no cover - needs slack-bolt / discord.py + a li
     Discord needs ``DISCORD_BOT_TOKEN`` / ``DISCORD_BOT_USER_ID``. Reading the bot
     id from config sidesteps the connect-then-discover ordering the SDKs impose.
     """
+    # Fail closed BEFORE the SDK import: a missing extra becomes a clean
+    # TransportUnavailable (exit 3 at the serve gate), not a raw ModuleNotFoundError.
+    require_transport_sdk(name)
     if name == "slack":
         from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
         from slack_bolt.async_app import AsyncApp

@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from kagura_agent.cli.main import (
+    TransportUnavailable,
     configure_output_stream,
     load_mcp_config,
     main,
@@ -19,6 +20,7 @@ from kagura_agent.cli.main import (
     make_run_store,
     parse_args,
     plan_granted_specs,
+    require_transport_sdk,
     resolve_grants,
     resolve_log_level,
     resolve_run_prompt,
@@ -184,6 +186,67 @@ def test_parse_serve_mcp_config() -> None:
         ["serve", "--transport", "slack", "--mcp-config", "/m.json", "--strict-mcp-config"]
     )
     assert ns.mcp_config == "/m.json" and ns.strict_mcp_config is True
+
+
+# --- #146: serve fails closed (not a raw traceback) when a transport extra is absent ---
+
+
+def test_require_transport_sdk_passes_when_present() -> None:
+    # find_spec returning a truthy spec => the SDK is importable => no raise.
+    present = lambda _module: object()  # noqa: E731
+    require_transport_sdk("slack", find_spec=present)
+    require_transport_sdk("discord", find_spec=present)
+
+
+def test_require_transport_sdk_slack_missing_raises_actionable_hint() -> None:
+    with pytest.raises(TransportUnavailable) as exc:
+        require_transport_sdk("slack", find_spec=lambda _m: None)
+    msg = str(exc.value)
+    assert "slack" in msg and "slack_bolt" in msg
+    assert "pip install 'kagura-agent[slack]'" in msg  # the exact remedy
+
+
+def test_require_transport_sdk_discord_missing_raises_actionable_hint() -> None:
+    with pytest.raises(TransportUnavailable) as exc:
+        require_transport_sdk("discord", find_spec=lambda _m: None)
+    msg = str(exc.value)
+    # Pin both the module-probe slot and the extra slot (both happen to be "discord")
+    # via the exact template, so a wrong probed module would be caught.
+    assert "optional 'discord' extra (discord)" in msg
+    assert "pip install 'kagura-agent[discord]'" in msg
+
+
+def test_transport_sdk_keys_match_serve_transport_choices() -> None:
+    # The structural anti-drift contract: every --transport choice has a missing-extra
+    # guard entry (and vice-versa), so an added transport can never fail open with a
+    # bare KeyError in require_transport_sdk. (--transport choices = tuple(_TRANSPORT_SDKS).)
+    import kagura_agent.cli.main as cli_main
+
+    for name in cli_main._TRANSPORT_SDKS:
+        assert parse_args(["serve", "--transport", name]).transport == name
+    with pytest.raises(SystemExit):
+        parse_args(["serve", "--transport", "irc"])  # not a key → rejected at parse
+
+
+@pytest.mark.parametrize("transport", ["slack", "discord"])
+def test_main_serve_missing_transport_extra_is_clean_exit3(monkeypatch, capsys, transport) -> None:  # type: ignore[no-untyped-def]
+    # The bug: a missing transport SDK raised a raw ModuleNotFoundError (exit 1) because
+    # _serve's gate didn't catch it. Drive the REAL require_transport_sdk (not a stub)
+    # by pointing the transport's probe at a guaranteed-absent module, so this pins the
+    # _build_transport → require_transport_sdk → _serve-gate wiring end to end,
+    # independent of whether slack-bolt/discord.py is installed in the test env. The
+    # result must be a clean exit-3 message, never a traceback.
+    import kagura_agent.cli.main as cli_main
+
+    monkeypatch.delenv("KAGURA_AGENT_BRAIN", raising=False)  # reach _build_transport cleanly
+    monkeypatch.setitem(
+        cli_main._TRANSPORT_SDKS, transport, ("kagura_no_such_transport_sdk", transport)
+    )
+    rc = main(["serve", "--transport", transport])
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert transport in err and "Traceback" not in err
+    assert f"pip install 'kagura-agent[{transport}]'" in err  # the actionable remedy reaches stderr
 
 
 def test_parse_run_with_task() -> None:
