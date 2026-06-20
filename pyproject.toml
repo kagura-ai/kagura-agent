@@ -1,6 +1,6 @@
 [project]
 name = "kagura-agent"
-version = "0.5.0"
+dynamic = ["version"]
 description = "Memory-backed autonomous agent with a Docker membrane, a Slack/Discord cockpit, and capability graduation."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -59,6 +59,12 @@ kagura-agent = "kagura_agent.cli.main:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# Single source of truth for the version: src/kagura_agent/__init__.py __version__
+# (same as kagura-brain). Bump it in lockstep with the release tag — the publish
+# workflow fails the build if the tag and this version disagree.
+[tool.hatch.version]
+path = "src/kagura_agent/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kagura_agent"]
