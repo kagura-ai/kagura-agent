@@ -151,6 +151,39 @@ async def test_withdraw_pending_records_denied_and_clears() -> None:
     assert trail and "denied" in trail[0].text  # audit symmetry: timeout logs a deny
 
 
+async def test_withdraw_pending_audit_failure_does_not_raise() -> None:
+    # #124: the producer's timeout path calls withdraw_pending. The pending future is
+    # already denied (fail-closed); a FAILED audit write must not surface as a raised
+    # exception there (it would crash the consumer's wait_for/timeout path). Suppress +
+    # log — the deny stands regardless. (Contrast the /approve GRANT path, which IS
+    # audit-gated and must not grant on a failed audit.)
+    class _FailingMemory:
+        async def remember(self, *_a: object, **_k: object) -> str:
+            raise RuntimeError("memory backend down")
+
+        async def recall(self, *_a: object, **_k: object) -> list:  # type: ignore[type-arg]
+            return []
+
+        async def create_edge(self, *_a: object, **_k: object) -> None:
+            pass
+
+    reg = PendingApprovalRegistry()
+    cockpit = Cockpit(
+        CliTransport(inbox=[]),
+        _FakeBrain(),
+        InMemoryCheckpointStore(),
+        approvals=reg,
+        memory=_FailingMemory(),
+    )
+    await cockpit.request_capability(
+        CapabilityRequest(thread_id="t1", capability="memory:write", reason="r")
+    )
+
+    await cockpit.withdraw_pending("t1")  # must NOT raise despite the audit write failing
+
+    assert reg.pending("t1") is False  # still cleared — the deny stands
+
+
 async def test_withdraw_pending_with_no_pending_is_a_noop() -> None:
     reg = PendingApprovalRegistry()
     cockpit = _cockpit(CliTransport(inbox=[]), reg)
