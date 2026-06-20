@@ -186,10 +186,12 @@ class Cockpit:
 
         Failure-path lifecycle: if the in-container run then fails (a hijacked or
         crashed container that ends without a terminal DoneEvent), ``Session``
-        raises and the record is left ``running`` pointing at a now-gone container —
-        recoverable by the operator's ``/kill`` (which fail-closes on a vanished
-        cid and closes the session) or by restart reconciliation. Mid-serve health
-        reconciliation is a deliberate PR3 improvement, not handled here."""
+        raises; the container is already reaped (the provider's finally →
+        ``session.aclose()``), and ``_handle_task`` marks the record ``closed``
+        (non-resumable, ``container_id`` retained so ``/kill`` still works) so a
+        follow-up message cannot replay a stale checkpoint against the dead
+        container (#124 5a). Restart reconciliation independently marks a record
+        ``dead`` if its cid has vanished."""
         assert self._container is not None  # guarded by the caller
         spec = validate_spec(
             self._container.spec_for(thread_id), project_root=self._container.project_root
@@ -210,12 +212,25 @@ class Cockpit:
         # LAUNCH registers after the run (no container id) — today's behaviour.
         brain = self._brain if self._container is None else self._container_brain(event.thread_id)
         session = Session(brain, self._checkpoints)
-        if intent is Intent.CONTINUE:
-            result = await session.resume(event.thread_id, prompt=event.text)
-        else:  # LAUNCH
-            result = await session.run(Task(prompt=event.text, session_id=event.thread_id))
-            if self._container is None:
-                self._registry.add(event.thread_id)
+        try:
+            if intent is Intent.CONTINUE:
+                result = await session.resume(event.thread_id, prompt=event.text)
+            else:  # LAUNCH
+                result = await session.run(Task(prompt=event.text, session_id=event.thread_id))
+                if self._container is None:
+                    self._registry.add(event.thread_id)
+        except Exception:
+            # A failed in-container run leaves the on_start-armed record "running"
+            # pointing at a now-gone container (the provider's finally already reaped
+            # it via session.aclose()). Mark it "closed" — non-resumable, but the
+            # container_id is retained so /kill still works — BEFORE the error
+            # propagates to serve(). Otherwise sessions() keeps treating it as
+            # resumable and the next message replays a stale checkpoint against the
+            # dead container (#124 item 5a). The in-process path registers only on
+            # success (below), so there is nothing to close there.
+            if self._container is not None:
+                self._registry.close(event.thread_id)
+            raise
         await self._transport.send(event.thread_id, result.text)
 
     async def _handle_status(self, event: Event) -> None:

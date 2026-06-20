@@ -39,7 +39,10 @@ class MemoryWriteApprover:
         cockpit: Cockpit,
         grant: Callable[[], Awaitable[Lease]],
         *,
-        timeout: float = 300.0,
+        # Strictly LESS than PendingApprovalRegistry.ttl_seconds (300s, approval.py)
+        # so the producer's withdraw is authoritative and never races the registry's
+        # lazy expiry at exactly t=ttl (#124 item 5c).
+        timeout: float = 270.0,
     ) -> None:
         self._cockpit = cockpit
         self._grant = grant
@@ -82,7 +85,8 @@ class WriteGraduationGate:
         cockpit: Cockpit,
         promote: Callable[[str], None],
         *,
-        timeout: float = 300.0,
+        # Strictly LESS than the registry TTL (300s) — see MemoryWriteApprover (#124 5c).
+        timeout: float = 270.0,
     ) -> None:
         self._engine = engine
         self._cockpit = cockpit

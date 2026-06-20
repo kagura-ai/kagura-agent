@@ -9,13 +9,15 @@ denied or timed-out request grants nothing — fail-closed.
 """
 
 import asyncio
+import contextlib
+import inspect
 
 import pytest
 
 from kagura_agent.cockpit.approval import PendingApprovalExists, PendingApprovalRegistry
 from kagura_agent.cockpit.core import Cockpit
 from kagura_agent.cockpit.hitl import CapabilityRequest
-from kagura_agent.cockpit.memory_write import MemoryWriteApprover
+from kagura_agent.cockpit.memory_write import MemoryWriteApprover, WriteGraduationGate
 from kagura_agent.cockpit.transports.cli import CliTransport
 from kagura_agent.mcp.memory_cloud import LocalMemoryClient
 from kagura_agent.membrane.lease import Budget, CredentialBroker
@@ -191,6 +193,49 @@ async def test_withdraw_pending_with_no_pending_is_a_noop() -> None:
     await cockpit.withdraw_pending("ghost")  # must not raise
 
     assert reg.pending("ghost") is False
+
+
+def test_producer_timeout_strictly_less_than_registry_ttl() -> None:
+    # #124(c): the producer's asyncio.wait_for window must be STRICTLY LESS than the
+    # registry TTL, so the producer's withdraw is authoritative and never races the
+    # registry's lazy expiry at exactly t=ttl (both used to default to 300). Pinned on
+    # the signature defaults so a future bump that re-equalizes them fails here.
+    def _default(fn: object, name: str) -> float:
+        return inspect.signature(fn).parameters[name].default  # type: ignore[arg-type]
+
+    ttl = _default(PendingApprovalRegistry.__init__, "ttl_seconds")
+    assert _default(MemoryWriteApprover.__init__, "timeout") < ttl
+    assert _default(WriteGraduationGate.__init__, "timeout") < ttl
+
+
+async def test_withdraw_after_producer_timeout_still_audits_denied() -> None:
+    # The producer's asyncio.wait_for CANCELS the registry future on timeout, so by
+    # the time withdraw_pending runs the future is already `done()` (cancelled). The
+    # deny audit MUST still be written — the timeout IS the denial. This pins the
+    # real production path (a direct withdraw_pending call leaves the future pending,
+    # so it would NOT catch a `future.done()`-based "already resolved, skip" guard
+    # that silently drops the deny here). #124(c).
+    reg = PendingApprovalRegistry()
+    memory = LocalMemoryClient()
+    cockpit = Cockpit(
+        CliTransport(inbox=[]),
+        _FakeBrain(),
+        InMemoryCheckpointStore(),
+        approvals=reg,
+        memory=memory,
+    )
+    future = await cockpit.request_capability(
+        CapabilityRequest(thread_id="t1", capability="memory:write", reason="r")
+    )
+    future.cancel()  # what asyncio.wait_for does to the awaited future on timeout
+    with contextlib.suppress(asyncio.CancelledError):
+        await future
+
+    await cockpit.withdraw_pending("t1")
+
+    assert reg.pending("t1") is False  # cleared
+    trail = await memory.recall("memory:write", tags=("graduation-trail",))
+    assert trail and "denied" in trail[0].text  # the timeout denial is still audited
 
 
 async def test_approved_acquires_memory_write_lease_through_the_broker() -> None:
