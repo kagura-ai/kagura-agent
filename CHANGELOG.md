@@ -7,6 +7,50 @@ the [README implementation-status table](README.md#implementation-status-v01v07-
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-21
+
+The forge-resistant self-improve loop (milestone v0.8). A host-arbitrated verified outcome
+reinforces the recall ranking of the trusted memories that grounded a run. Every piece ships
+**default-OFF**, so existing runs are byte-for-byte unchanged; flipping the re-rank default-ON
+is gated on the [#166](https://github.com/kagura-ai/kagura-agent/issues/166) outcome eval. The
+loop only persists across runs with a persistent backend (`KAGURA_AGENT_MEMORY_DB`).
+
+### Added
+
+- **Forge-resistant verified outcome** — `VerifiedOutcome`, a frozen value object whose
+  `verified=True` is reachable only from an independent host signal (a check's exit code or
+  HITL approval), never the agent's self-report (#170).
+- **Grounding provenance with trust tiers** — `ProvenanceLog` captures the trust tier of each
+  memory used to ground a run, so the input-trust gate derives from real tiers, not an
+  ids-only vacuous check (#171).
+- **Host-side MEASURE producer** — `measure_outcome(...)` turns a run plus an independent
+  verdict (exit code / approval) into a `VerifiedOutcome` (#172).
+- **`OutcomeReinforcer`** — verified outcomes reinforce the recall ranking of the trusted
+  memories that grounded them; unverified runs reinforce nothing (#174, #175).
+- **`FeedbackSink` protocol + `verify_and_reinforce`** — the config-armed loop arm reading
+  `KAGURA_AGENT_VERIFY_CHECK` / `KAGURA_AGENT_VERIFY_CATEGORY` (#176), wired into
+  `kagura-agent run` (#177).
+- **Bounded recall re-rank (default-OFF)** — `KAGURA_AGENT_RECALL_RERANK` surfaces
+  verified-useful trusted memories first, clamped to ±`RERANK_BOUND` with a stable cold-start
+  floor; `LocalMemoryClient` and `SqliteMemoryClient` re-rank identically (#178, #179).
+- **Exploration floor** — `KAGURA_AGENT_RECALL_EXPLORE` adds a strictly-nonzero, seeded
+  exploration probability so feedback never permanently buries a memory (the Δ4 positivity
+  floor); non-finite values are rejected to off (#180).
+
+### Changed
+
+- **Fail-closed operator gate** — cockpit gate callers accept `require_operator`; when set,
+  only the originating operator's click authorizes, and an absent operator id denies (#173).
+- README storefront: removed stale "private repository" claims now that the repo is public on
+  PyPI, and aligned `keywords` with the repo topics (#181). Added a GitHub social-preview card
+  (#182).
+
+### Security
+
+- The self-improve loop cannot be steered by a hijacked agent: verdicts come only from an
+  independent host signal, and `record_feedback` / promotion live off the agent's memory
+  surface — a forged "done" cannot reinforce anything (#170, #173, #174).
+
 ## [0.5.1] - 2026-06-21
 
 ### Fixed
