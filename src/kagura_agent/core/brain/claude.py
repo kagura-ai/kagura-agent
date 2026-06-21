@@ -12,7 +12,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from kagura_agent.core.brain.sdk_engine import PermissionMode
 
 from kagura_agent.core.brain.base import (
     BrainCaps,
@@ -64,11 +67,17 @@ def make_default_brain(  # pragma: no cover - requires the SDK
     *,
     mcp_servers: dict[str, Any] | None = None,
     strict_mcp_config: bool = False,
+    permission_mode: PermissionMode = "default",
 ) -> ClaudeBrain:
     """Construct ClaudeBrain over the real SDK engine (lazy import).
 
     `mcp_servers` (from `--mcp-config`) is threaded into the SDK engine for
     non-memory MCP servers; memory itself is reached via the CLI, not here.
+    `permission_mode` (resolved from `KAGURA_AGENT_PERMISSION_MODE` by `make_brain`,
+    which is the only caller and always passes it explicitly) is the headless
+    tool-approval policy. The literal default here is the SAFE `default`; the live
+    per-path value (operator-typed `run`/`repl` -> `acceptEdits`) comes from
+    `make_brain`.
     """
 
     from kagura_agent.core.brain.sdk_engine import SdkEngine, require_claude_sdk
@@ -78,5 +87,9 @@ def make_default_brain(  # pragma: no cover - requires the SDK
     # hint instead of a raw ModuleNotFoundError surfaced as "internal error".
     require_claude_sdk()
     return ClaudeBrain(
-        engine=SdkEngine(mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
+        engine=SdkEngine(
+            mcp_servers=mcp_servers,
+            strict_mcp_config=strict_mcp_config,
+            permission_mode=permission_mode,
+        )
     )

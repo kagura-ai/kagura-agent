@@ -31,8 +31,8 @@ def test_resolve_unknown_is_fail_closed() -> None:
 
 
 def _sdk_factory_spy(calls):  # type: ignore[no-untyped-def]
-    def _factory(*, mcp_servers=None, strict_mcp_config=False):
-        calls.append(("sdk", mcp_servers, strict_mcp_config))
+    def _factory(*, mcp_servers=None, strict_mcp_config=False, permission_mode="acceptEdits"):
+        calls.append(("sdk", mcp_servers, strict_mcp_config, permission_mode))
         return "SDK_BRAIN"
     return _factory
 
@@ -54,8 +54,37 @@ def test_make_brain_defaults_to_sdk_factory() -> None:
         kagura_factory=_kagura_factory_spy(calls),
     )
     assert brain == "SDK_BRAIN"
-    # mcp knobs forwarded to the SDK factory only
-    assert calls == [("sdk", {"fs": {}}, True)]
+    # mcp knobs + the SAFE default permission mode forwarded to the SDK factory.
+    assert calls == [("sdk", {"fs": {}}, True, "default")]
+
+
+def test_make_brain_uses_default_permission_mode_param() -> None:
+    # Operator-typed callers (run/repl) raise the per-path default to acceptEdits.
+    calls: list = []
+    make_brain(
+        {},
+        default_permission_mode="acceptEdits",
+        sdk_factory=_sdk_factory_spy(calls),
+        kagura_factory=_kagura_factory_spy(calls),
+    )
+    assert calls == [("sdk", None, False, "acceptEdits")]
+
+
+def test_make_brain_env_overrides_default_permission_mode_param() -> None:
+    # An explicit KAGURA_AGENT_PERMISSION_MODE wins over the per-path default.
+    calls: list = []
+    make_brain(
+        {"KAGURA_AGENT_PERMISSION_MODE": "plan"},
+        default_permission_mode="acceptEdits",
+        sdk_factory=_sdk_factory_spy(calls),
+        kagura_factory=_kagura_factory_spy(calls),
+    )
+    assert calls == [("sdk", None, False, "plan")]
+
+
+def test_make_brain_fail_closed_on_invalid_permission_mode() -> None:
+    with pytest.raises(ValueError, match="not a known permission mode"):
+        make_brain({"KAGURA_AGENT_PERMISSION_MODE": "nope"})
 
 
 def test_make_brain_routes_to_kagura_when_selected() -> None:

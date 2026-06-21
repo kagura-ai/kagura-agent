@@ -632,6 +632,27 @@ def test_main_repl_rejects_invalid_brain_backend(monkeypatch, capsys) -> None:  
     assert "KAGURA_AGENT_BRAIN" in capsys.readouterr().err
 
 
+def test_main_run_rejects_invalid_permission_mode(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    # An unknown KAGURA_AGENT_PERMISSION_MODE must fail closed up front (exit 2),
+    # NOT crash with a raw traceback deep inside make_brain — mirroring the
+    # KAGURA_AGENT_BRAIN guard. (SDK backend: the env var only applies there.)
+    monkeypatch.delenv("KAGURA_AGENT_BRAIN", raising=False)
+    monkeypatch.setenv("KAGURA_AGENT_PERMISSION_MODE", "bogus")
+    rc = main(["run", "do a thing"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "KAGURA_AGENT_PERMISSION_MODE" in err
+    assert "Traceback" not in err
+
+
+def test_main_repl_rejects_invalid_permission_mode(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("KAGURA_AGENT_BRAIN", raising=False)
+    monkeypatch.setenv("KAGURA_AGENT_PERMISSION_MODE", "bogus")
+    rc = main(["repl"])
+    assert rc == 2
+    assert "KAGURA_AGENT_PERMISSION_MODE" in capsys.readouterr().err
+
+
 # --- v0.2-A6: --mcp-config / --strict-mcp-config --------------------------
 
 def test_parse_run_defaults_have_no_mcp_config() -> None:

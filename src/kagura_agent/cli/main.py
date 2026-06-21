@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from kagura_agent.core.brain.sdk_engine import PermissionMode
     from kagura_agent.membrane.brain_container import DockerBrainBackend
 
 from kagura_agent.cli.doctor import (
@@ -657,6 +658,7 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
     registry_path: str = "kagura-agent.toml",
     mcp_servers: dict[str, Any] | None = None,
     strict_mcp_config: bool = False,
+    default_permission_mode: PermissionMode = "default",
     verbose: bool = False,
 ) -> str:
     import time
@@ -717,7 +719,12 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
                 env_restore[key] = os.environ.get(key)
                 os.environ[key] = value
 
-        brain = make_brain(os.environ, mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
+        brain = make_brain(
+            os.environ,
+            default_permission_mode=default_permission_mode,
+            mcp_servers=mcp_servers,
+            strict_mcp_config=strict_mcp_config,
+        )
         # A named --session uses a persistent on-disk store (resume across runs);
         # a one-shot run uses a throwaway in-memory store (no persisted context).
         store, sid = make_run_store(session_id)
@@ -836,6 +843,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
         return 0
     if ns.command == "run":
         from kagura_agent.core.brain.kagura_brain_engine import resolve_kagura_brain_backend
+        from kagura_agent.core.brain.sdk_engine import resolve_permission_mode
         from kagura_agent.core.brain.select import resolve_brain_backend
 
         # Wire logging once, up front (#105): internal logs stay quiet unless
@@ -843,9 +851,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
         logging.basicConfig(level=resolve_log_level(ns.log_level, os.environ))
         try:
             # Validate KAGURA_AGENT_BRAIN (+ _BACKEND for the kagura-brain backend)
-            # up front so a typo fails closed with a clean exit 2, not deep in _run_task.
+            # and the SDK-only KAGURA_AGENT_PERMISSION_MODE up front so a typo fails
+            # closed with a clean exit 2, not a raw traceback deep in make_brain.
             if resolve_brain_backend(os.environ) == "kagura-brain":
                 resolve_kagura_brain_backend(os.environ)
+            else:
+                resolve_permission_mode(os.environ, default="acceptEdits")
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
@@ -879,6 +890,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
                     registry_path=ns.registry,
                     mcp_servers=mcp_servers,
                     strict_mcp_config=ns.strict_mcp_config,
+                    default_permission_mode="acceptEdits",
                     verbose=ns.verbose,
                 )
             )
@@ -917,12 +929,15 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
         return 0
     if ns.command == "repl":
         from kagura_agent.core.brain.kagura_brain_engine import resolve_kagura_brain_backend
+        from kagura_agent.core.brain.sdk_engine import resolve_permission_mode
         from kagura_agent.core.brain.select import resolve_brain_backend
 
         logging.basicConfig(level=resolve_log_level(ns.log_level, os.environ))
         try:
             if resolve_brain_backend(os.environ) == "kagura-brain":
                 resolve_kagura_brain_backend(os.environ)
+            else:
+                resolve_permission_mode(os.environ, default="acceptEdits")
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
@@ -937,6 +952,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - glue
                     session_id=ns.session,
                     mcp_servers=mcp_servers,
                     strict_mcp_config=ns.strict_mcp_config,
+                    default_permission_mode="acceptEdits",
                     verbose=ns.verbose,
                 )
             )
@@ -1103,6 +1119,7 @@ async def _run_repl(  # pragma: no cover - needs SDK + subscription + interactiv
     session_id: str,
     mcp_servers: dict[str, Any] | None = None,
     strict_mcp_config: bool = False,
+    default_permission_mode: PermissionMode = "default",
     verbose: bool = False,
 ) -> None:
     from kagura_agent.core.brain.select import make_brain
@@ -1110,7 +1127,12 @@ async def _run_repl(  # pragma: no cover - needs SDK + subscription + interactiv
     from kagura_agent.patterns.continuity import run_repl
 
     ensure_memory_reachable(reachable=memory_reachable())
-    brain = make_brain(os.environ, mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
+    brain = make_brain(
+        os.environ,
+        default_permission_mode=default_permission_mode,
+        mcp_servers=mcp_servers,
+        strict_mcp_config=strict_mcp_config,
+    )
     store = FileCheckpointStore(resolve_state_dir())
     print(f"kagura-agent repl — session {session_id!r}. /exit to quit.")
     await run_repl(

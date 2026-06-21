@@ -14,6 +14,11 @@ from typing import Any
 
 from kagura_agent.core.brain.claude import ClaudeBrain, make_default_brain
 from kagura_agent.core.brain.kagura_brain_engine import make_kagura_brain
+from kagura_agent.core.brain.sdk_engine import (
+    DEFAULT_PERMISSION_MODE,
+    PermissionMode,
+    resolve_permission_mode,
+)
 
 #: Env var selecting the brain backend.
 BRAIN_ENV = "KAGURA_AGENT_BRAIN"
@@ -44,6 +49,7 @@ def resolve_brain_backend(env: Mapping[str, str]) -> str:
 def make_brain(
     env: Mapping[str, str],
     *,
+    default_permission_mode: PermissionMode = DEFAULT_PERMISSION_MODE,
     mcp_servers: dict[str, Any] | None = None,
     strict_mcp_config: bool = False,
     sdk_factory: Callable[..., ClaudeBrain] = make_default_brain,
@@ -51,12 +57,21 @@ def make_brain(
 ) -> ClaudeBrain:
     """Build the brain for the selected backend.
 
-    The `--mcp-config` knobs (`mcp_servers`, `strict_mcp_config`) are SDK-specific
-    and forwarded only to the SDK factory; the kagura-brain backend does not wire
-    in-task MCP here (memory is CLI-primary; grounding is the agent's own layer),
-    so those knobs are intentionally not threaded into it. Factories are injected
-    so the dispatch is unit-tested without the real SDK / brain extra installed.
+    The `--mcp-config` knobs (`mcp_servers`, `strict_mcp_config`) and the Agent SDK
+    permission mode are SDK-specific and forwarded only to the SDK factory; the
+    kagura-brain backend does not wire in-task MCP here (memory is CLI-primary;
+    grounding is the agent's own layer) and handles its own tool approvals, so those
+    knobs are intentionally not threaded into it. An explicit
+    `KAGURA_AGENT_PERMISSION_MODE` always wins; otherwise `default_permission_mode`
+    is used — operator-typed `run`/`repl` pass `acceptEdits` (so a self-host run can
+    write files), while the unsealed in-process `serve` brain keeps the safe
+    `default`. Factories are injected so the dispatch is unit-tested without the real
+    SDK / brain extra installed.
     """
     if resolve_brain_backend(env) == _KAGURA_BRAIN:
         return kagura_factory(env)
-    return sdk_factory(mcp_servers=mcp_servers, strict_mcp_config=strict_mcp_config)
+    return sdk_factory(
+        mcp_servers=mcp_servers,
+        strict_mcp_config=strict_mcp_config,
+        permission_mode=resolve_permission_mode(env, default=default_permission_mode),
+    )
