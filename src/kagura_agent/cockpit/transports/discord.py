@@ -89,11 +89,17 @@ class DiscordTransport:  # pragma: no cover - requires discord.py + a bot token
     """
 
     def __init__(
-        self, client: Any, bot_user_id: int, *, operator_id: str | None = None
+        self,
+        client: Any,
+        bot_user_id: int,
+        *,
+        operator_id: str | None = None,
+        require_operator: bool = False,
     ) -> None:
         self._client = client
         self._bot_user_id = bot_user_id
         self._operator_id = operator_id
+        self._require_operator = require_operator
         self._inbox: asyncio.Queue[Event] = asyncio.Queue()
         self._client.add_listener(self._on_message, "on_message")
 
@@ -132,7 +138,11 @@ class DiscordTransport:  # pragma: no cover - requires discord.py + a bot token
             async def _callback(interaction: Any, _option: str = option) -> None:
                 await interaction.response.defer()
                 # Operator-identity gate (#14): only the operator's click resolves.
-                if not click_authorized(str(interaction.user.id), self._operator_id):
+                if not click_authorized(
+                    str(interaction.user.id),
+                    self._operator_id,
+                    require_operator=self._require_operator,
+                ):
                     return
                 if not future.done():
                     future.set_result(_option)

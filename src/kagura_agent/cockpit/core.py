@@ -67,6 +67,7 @@ class Cockpit:
         memory: MemoryClient | None = None,
         operator_id: str | None = None,
         container: _ContainerBackend | None = None,
+        require_operator: bool = False,
     ) -> None:
         self._transport = transport
         self._brain = brain
@@ -83,6 +84,14 @@ class Cockpit:
         # HITL approval (#14: prevents a hijacked agent self-approving). None =
         # single-user CLI default: no operator gate (#32-compatible).
         self._operator_id = operator_id
+        # Opt-in fail-closed gate (#165 S1 part 4): when set, an UNSET operator DENIES
+        # privileged actions (approve/kill) instead of the permissive single-user
+        # fallback — so a hijacked agent's sender-less /approve can never self-approve.
+        # A non-trivial deployment (brain-in-container / egress / multi-party) should
+        # enable it; the CLI/serve wiring that turns it on — paired with a STARTUP
+        # operator requirement so it can't silently lock the operator out — is a
+        # follow-up, not an auto-default here.
+        self._require_operator = require_operator
 
     async def request_capability(self, request: CapabilityRequest) -> asyncio.Future[Decision]:
         """Producer seam (#32): register a pending approval, surface it to the
@@ -248,11 +257,15 @@ class Cockpit:
         """Whether this event may drive a privileged control action.
 
         When an operator is configured, only that identity qualifies; with no
-        operator (single-user CLI default) every event qualifies. Shared by the
-        approve/deny and /kill gates so destructive control surfaces enforce the
-        same operator-identity boundary (#14). Single source of truth for the rule
-        is `click_authorized` (also used by the transport button path)."""
-        return click_authorized(event.sender, self._operator_id)
+        operator (single-user CLI default) every event qualifies — unless this is a
+        fail-closed deployment (`require_operator`, e.g. brain-in-container), where an
+        unset operator denies every event (#165 S1 part 4). Shared by the approve/deny
+        and /kill gates so destructive control surfaces enforce the same
+        operator-identity boundary (#14). Single source of truth for the rule is
+        `click_authorized` (also used by the transport button path)."""
+        return click_authorized(
+            event.sender, self._operator_id, require_operator=self._require_operator
+        )
 
     async def _resolve_pending(self, event: Event, *, approved: bool) -> None:
         # A typed /approve|/deny resolves the thread's *pending* capability

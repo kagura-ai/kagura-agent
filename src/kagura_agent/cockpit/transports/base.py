@@ -40,7 +40,9 @@ class Transport(Protocol):
     async def ask(self, thread_id: str, question: str, options: list[str]) -> str: ...
 
 
-def click_authorized(clicker: str | None, operator_id: str | None) -> bool:
+def click_authorized(
+    clicker: str | None, operator_id: str | None, *, require_operator: bool = False
+) -> bool:
     """Whether a HITL button click may resolve a pending request.
 
     The button (`ask`) path is the synchronous twin of the typed `/approve`
@@ -48,5 +50,14 @@ def click_authorized(clicker: str | None, operator_id: str | None) -> bool:
     operator configured (single-user CLI), any click is allowed; otherwise only
     the operator's click qualifies — so a non-operator (e.g. a hijacked agent)
     cannot self-approve by clicking ✅.
+
+    ``require_operator`` is the **fail-closed** mode for a non-trivial deployment
+    (#165 S1 part 4): an UNSET operator then denies *everyone* rather than falling
+    back to the permissive single-user default, and a sender-less (agent-emitted)
+    event can never qualify — only a real, matching operator identity passes.
     """
+    if require_operator:
+        # Only a real (non-empty) operator identity passes — an unset OR empty
+        # operator, and a sender-less (agent-emitted) event, all deny.
+        return bool(operator_id) and clicker == operator_id
     return operator_id is None or clicker == operator_id

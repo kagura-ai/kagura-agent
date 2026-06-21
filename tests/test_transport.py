@@ -22,6 +22,20 @@ def test_click_authorized_only_operator_when_configured() -> None:
     assert click_authorized("attacker", "op") is False
     assert click_authorized(None, "op") is False
 
+
+def test_click_authorized_require_operator_denies_unset_operator() -> None:
+    # Fail-closed (#165 S1 part 4): with require_operator, an UNSET operator denies
+    # everyone — vs the permissive single-user default that allows any clicker.
+    assert click_authorized("anyone", None, require_operator=True) is False
+    assert click_authorized(None, None, require_operator=True) is False
+    assert click_authorized("", "", require_operator=True) is False  # empty != a real operator
+
+
+def test_click_authorized_require_operator_allows_only_the_operator() -> None:
+    assert click_authorized("op", "op", require_operator=True) is True
+    assert click_authorized("attacker", "op", require_operator=True) is False
+    assert click_authorized(None, "op", require_operator=True) is False  # agent sender=None
+
 # --- structural intent routing --------------------------------------------
 
 def test_top_level_message_is_launch() -> None:

@@ -123,3 +123,54 @@ async def test_operator_gated_but_sender_none_is_fail_closed() -> None:
 
     assert not fut.done()             # fail-closed
     assert reg.pending("t1") is True  # stays open for the real operator
+
+
+async def test_require_operator_denies_unset_operator_fail_closed() -> None:
+    # #165 S1 part 4: a deployment that opts into require_operator with NO operator
+    # configured must DENY privileged actions, not fall back to the permissive
+    # single-user default — so a hijacked agent's /approve can never self-approve.
+    transport = CliTransport(inbox=[])
+    reg = PendingApprovalRegistry()
+    cockpit = Cockpit(
+        transport, _FakeBrain(), InMemoryCheckpointStore(), approvals=reg, require_operator=True
+    )
+    fut = await cockpit.request_capability(_REQ)
+
+    await cockpit.handle(Event(thread_id="t1", text="/approve", is_thread_reply=True, sender="x"))
+
+    assert not fut.done()             # fail-closed: no operator -> no approval
+    assert reg.pending("t1") is True  # stays open until an operator is configured
+
+
+async def test_require_operator_still_resolves_for_the_configured_operator() -> None:
+    # Fail-closed mode does not lock out a properly-configured operator: with an
+    # operator set, that identity still resolves its own request.
+    transport = CliTransport(inbox=[])
+    reg = PendingApprovalRegistry()
+    cockpit = Cockpit(
+        transport,
+        _FakeBrain(),
+        InMemoryCheckpointStore(),
+        approvals=reg,
+        operator_id="op1",
+        require_operator=True,
+    )
+    fut = await cockpit.request_capability(_REQ)
+
+    await cockpit.handle(Event(thread_id="t1", text="/approve", is_thread_reply=True, sender="op1"))
+
+    assert (await fut).approved is True
+    assert reg.pending("t1") is False
+
+
+async def test_require_operator_denies_kill_when_operator_unset() -> None:
+    # /kill is privileged too and shares the gate (#14): under require_operator with
+    # no operator configured, a /kill (e.g. from a hijacked agent) is rejected.
+    transport = CliTransport(inbox=[])
+    cockpit = Cockpit(
+        transport, _FakeBrain(), InMemoryCheckpointStore(), require_operator=True
+    )
+
+    await cockpit.handle(Event(thread_id="t1", text="/kill", is_thread_reply=True, sender="agent"))
+
+    assert any("only the operator" in text.lower() for _, text in transport.sent)
