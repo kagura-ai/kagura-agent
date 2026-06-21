@@ -236,6 +236,18 @@ deploy by `KAGURA_AGENT_BRAIN` (`sdk`, the default, or `kagura-brain`):
   for a **local `--oss` ollama/lmstudio** brain (or `KAGURA_AGENT_BRAIN_ENDPOINT`
   + key for a BYO OpenAI-compatible gateway such as Ollama Cloud).
 
+**`KAGURA_AGENT_PERMISSION_MODE`** (sdk backend only) sets the Agent SDK's headless
+tool-approval policy: `default` | `acceptEdits` | `plan` | `bypassPermissions` |
+`dontAsk` | `auto`. There is **no interactive approval channel in a headless run**,
+so `default` dead-ends every mutating tool. The per-path default reflects *who*
+drives the run: the **operator-typed `run` / `repl`** default to **`acceptEdits`**
+(you ran the command at your own shell — the agent may write/edit files), while the
+**`serve`** cockpit brain keeps the safe **`default`** (a chat participant is not
+necessarily the operator, and the in-process serve brain is unsandboxed). Set the
+variable explicitly to override on any path — e.g. `bypassPermissions` for full
+autonomy (shell, git). A typo fails closed (exit 2). _Inside a `serve --container`
+run the membrane, not this mode, bounds reach._
+
 The original v1 design rule — _ship one brain, but never be Claude-shaped_ — is
 what kept that codex/ollama backend a drop-in. It is restated below unchanged.
 

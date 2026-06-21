@@ -7,8 +7,8 @@ smoke path, not unit tests (it needs the SDK installed and a subscription).
 from __future__ import annotations
 
 import importlib.util
-from collections.abc import AsyncIterator, Callable
-from typing import Any
+from collections.abc import AsyncIterator, Callable, Mapping
+from typing import Any, Literal
 
 from kagura_agent.core.brain.base import BrainUnavailable
 from kagura_agent.core.brain.claude import RawTurn
@@ -51,6 +51,62 @@ def require_claude_sdk(
         raise BrainUnavailable(_INSTALL_HINT)
 
 
+#: The Agent SDK permission modes we expose == the SDK's own PermissionMode
+#: Literal, so a value is both assignable to its option AND never wrongly rejected
+#: (the SDK accepts all six — including the stricter `dontAsk` and `auto`).
+PermissionMode = Literal[
+    "default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"
+]
+#: Env var picking the Agent SDK permission mode for a run (SDK-specific).
+PERMISSION_MODE_ENV = "KAGURA_AGENT_PERMISSION_MODE"
+#: The permission modes, in the SDK's canonical spelling.
+_PERMISSION_MODES: tuple[PermissionMode, ...] = (
+    "default",
+    "acceptEdits",
+    "plan",
+    "bypassPermissions",
+    "dontAsk",
+    "auto",
+)
+_PERMISSION_MODE_BY_LOWER: dict[str, PermissionMode] = {
+    mode.lower(): mode for mode in _PERMISSION_MODES
+}
+#: The SAFE module default. A headless `query()` with permission_mode="default"
+#: and no approval channel dead-ends every mutating tool — correct for paths that
+#: are NOT operator-typed (the in-process `serve` brain is unsealed and its task
+#: path is not operator-gated, so a blanket auto-write default would let a
+#: non-operator mutate the host). Operator-typed callers (`run`/`repl`) opt into
+#: `acceptEdits` via the `default` arg so a self-host run can write files; full
+#: autonomy (shell, git) is opt-in via `bypassPermissions`. In a container run the
+#: membrane, not this mode, bounds reach.
+DEFAULT_PERMISSION_MODE: PermissionMode = "default"
+
+
+def resolve_permission_mode(
+    env: Mapping[str, str], *, default: PermissionMode = DEFAULT_PERMISSION_MODE
+) -> PermissionMode:
+    """Resolve the Agent SDK permission mode from the env. Pure (env in, value out).
+
+    An explicit ``KAGURA_AGENT_PERMISSION_MODE`` always wins; otherwise (unset or a
+    set-but-blank value) the caller's ``default`` is used — operator-typed
+    ``run``/``repl`` pass ``acceptEdits``, ``serve`` keeps the safe ``default``.
+    Matching is case-insensitive but the SDK's exact spelling is returned. An
+    unknown value is a fail-closed ``ValueError`` rather than a silent fallback — a
+    typo like ``bypasspermisions`` must not quietly land on a more- or
+    less-permissive mode.
+    """
+    raw = env.get(PERMISSION_MODE_ENV, "").strip()
+    if not raw:
+        return default
+    mode = _PERMISSION_MODE_BY_LOWER.get(raw.lower())
+    if mode is None:
+        raise ValueError(
+            f"{PERMISSION_MODE_ENV}={raw!r} is not a known permission mode "
+            f"(expected one of: {', '.join(_PERMISSION_MODES)})"
+        )
+    return mode
+
+
 def _mcp_option_kwargs(
     mcp_servers: dict[str, Any] | None, strict_mcp_config: bool
 ) -> dict[str, Any]:
@@ -88,9 +144,11 @@ class SdkEngine:  # pragma: no cover - requires claude-agent-sdk + subscription
         *,
         mcp_servers: dict[str, Any] | None = None,
         strict_mcp_config: bool = False,
+        permission_mode: PermissionMode = DEFAULT_PERMISSION_MODE,
     ) -> None:
         self._mcp_servers = mcp_servers
         self._strict_mcp_config = strict_mcp_config
+        self._permission_mode = permission_mode
 
     async def query(
         self, prompt: str, *, resume_state: dict[str, Any] | None
@@ -99,7 +157,7 @@ class SdkEngine:  # pragma: no cover - requires claude-agent-sdk + subscription
 
         options = ClaudeAgentOptions(
             resume=(resume_state or {}).get("sdk_session_id"),
-            permission_mode="default",
+            permission_mode=self._permission_mode,
             **_mcp_option_kwargs(self._mcp_servers, self._strict_mcp_config),
         )
 
