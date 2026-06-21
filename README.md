@@ -12,12 +12,11 @@ is the brain; [Kagura Memory Cloud](https://github.com/kagura-ai/memory-cloud) i
 persistent long-term memory backbone. A Docker security membrane and a Slack/Discord
 cockpit wrap it. Driven from a CLI: `run` / `repl` / `serve` / `doctor` / `setup`.
 
-> _Licensed under [Apache-2.0](LICENSE) (© 2026 Kagura AI). The GitHub repository is
-> currently **private** — a public release is being prepared; the code is already
-> OSS-licensed._
+> _Licensed under [Apache-2.0](LICENSE) (© 2026 Kagura AI) and published on
+> [PyPI](https://pypi.org/project/kagura-agent/)._
 
 **Status — implemented skeleton, runnable.** The pure-Python core of every design
-milestone (v0.1–v0.7; package version `0.5.0`) — brain seam, security membrane, credential
+milestone (v0.1–v0.7; package version `0.5.1`) — brain seam, security membrane, credential
 leasing, cockpit + HITL, capability graduation, egress-sealed brain-in-container — is built
 and tested (50 test modules, `mypy --strict`, ≥95% coverage). The infrastructure edges
 (real Docker, cloud STS/Cloudflare, the Slack/Discord/SDK clients) sit behind protocol
@@ -909,5 +908,4 @@ that speaks to Docker.
 ## License
 
 [Apache License 2.0](LICENSE) — © 2026 Kagura AI. See [`LICENSE`](LICENSE) for the full
-terms and [`NOTICE`](NOTICE) for attribution. (The repository is currently private; the
-code is Apache-2.0 licensed ahead of a public release.)
+terms and [`NOTICE`](NOTICE) for attribution.
