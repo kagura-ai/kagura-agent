@@ -525,6 +525,36 @@ async def test_make_memory_client_uses_sqlite_when_db_configured(tmp_path) -> No
     assert [m.text for m in await again.recall("persisted")] == ["persisted across runs"]
 
 
+def test_make_memory_client_rerank_off_by_default() -> None:
+    # #165 S3: the recall re-rank is opt-in — unset KAGURA_AGENT_RECALL_RERANK keeps OFF.
+    from kagura_agent.mcp.memory_cloud import LocalMemoryClient
+
+    client = make_memory_client(env={})
+    assert isinstance(client, LocalMemoryClient)
+    assert client._rerank_feedback is False
+
+
+def test_make_memory_client_enables_rerank_from_env() -> None:
+    from kagura_agent.mcp.memory_cloud import LocalMemoryClient
+
+    client = make_memory_client(env={"KAGURA_AGENT_RECALL_RERANK": "1"})
+    assert isinstance(client, LocalMemoryClient)
+    assert client._rerank_feedback is True
+
+
+def test_make_memory_client_sqlite_honours_rerank_env(tmp_path) -> None:
+    # The persistent backend also picks up the flag — the cross-run loop's home.
+    from kagura_agent.mcp.memory_sqlite import SqliteMemoryClient
+
+    db = str(tmp_path / "mem.db")
+    client = make_memory_client(
+        env={"KAGURA_AGENT_MEMORY_DB": db, "KAGURA_AGENT_RECALL_RERANK": "1"}
+    )
+    assert isinstance(client, SqliteMemoryClient)
+    assert client._rerank_feedback is True
+    client.close()
+
+
 async def test_make_memory_client_reads_os_environ_when_env_none(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     # The shipped call site is make_memory_client() with NO arg → it must read
     # os.environ. This is the actually-deployed path; the env= dict is a test seam.

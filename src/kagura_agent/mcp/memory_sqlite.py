@@ -29,6 +29,7 @@ from pathlib import Path
 from kagura_agent.mcp.memory_cloud import (
     _VALID_DELIVERY,
     ALWAYS_DELIVERY,
+    RERANK_BOUND,
     TRUSTED_TIER,
     FeedbackRecord,
     Memory,
@@ -63,7 +64,7 @@ class SqliteMemoryClient:
     relies on that to fail closed rather than silently degrade to in-memory.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, rerank_feedback: bool = False) -> None:
         # check_same_thread stays True (default): all access is on the event-loop
         # thread. isolation_level=None → autocommit, so a single-statement write is
         # durable the moment it returns and a *separate* instance/process sees it
@@ -74,6 +75,9 @@ class SqliteMemoryClient:
         # keeps the durable backend a drop-in when two processes share the file.
         self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.executescript(_SCHEMA)
+        # #165 S3: bounded recall re-rank by verified feedback, DEFAULT-OFF (parity with
+        # LocalMemoryClient). The durable backend is where the cross-run loop lives.
+        self._rerank_feedback = rerank_feedback
 
     def close(self) -> None:
         self._conn.close()
@@ -147,7 +151,17 @@ class SqliteMemoryClient:
             haystack = mem.text.lower()
             if any(term in haystack for term in terms):
                 results.append(mem)
+        if self._rerank_feedback:
+            # #165 S3 (default-OFF): the identical bounded re-rank to LocalMemoryClient —
+            # a stable sort by net-helpful feedback clamped to ±RERANK_BOUND. See that
+            # client's recall for the Δ4 caveats (deferred exploration floor, etc.).
+            results.sort(key=lambda m: self._feedback_score(m.id), reverse=True)
         return results
+
+    def _feedback_score(self, memory_id: str) -> int:
+        """Net-helpful feedback clamped to ±RERANK_BOUND (mirrors LocalMemoryClient)."""
+        score = sum(1 if f.helpful else -1 for f in self.feedback_for(memory_id))
+        return max(-RERANK_BOUND, min(RERANK_BOUND, score))
 
     async def load_pinned(self) -> list[Memory]:
         # Deterministic + unranked: the COMPLETE pinned set, insertion order, every
