@@ -24,12 +24,15 @@ id), never a crash mid-loop.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable, Mapping
 from typing import Protocol, runtime_checkable
 
 from kagura_agent.membrane.verified_outcome import VerifiedOutcome
 from kagura_agent.patterns.erasure import ProvenanceLog
 from kagura_agent.patterns.measure import measure_outcome
+
+log = logging.getLogger(__name__)
 
 #: Config key (host env) holding the verify-check command; unset => no independent
 #: verdict on the run path, so reinforcement stays unwired (#168).
@@ -146,3 +149,34 @@ def verify_and_reinforce(
         query=query,
         exit_code=exit_code,
     )
+
+
+def reinforce_after_run(
+    memory: object,
+    provenance: ProvenanceLog,
+    env: Mapping[str, str],
+    *,
+    session_id: str,
+    query: str,
+    run_check: Callable[[str], int],
+) -> None:
+    """Best-effort #165 S2 hook for the run path: if the backend is a host-side sync
+    :class:`FeedbackSink`, run the configured verify check and reinforce the run's
+    grounding.
+
+    Skips a non-sink backend (the async cloud client, gated by ``isinstance``) and NEVER
+    lets a check error turn a completed run into a failure — like ``remember_outcome``, a
+    post-run side effect is logged, not raised.
+
+    The loop only accumulates across runs with a **persistent** backend (e.g.
+    ``KAGURA_AGENT_MEMORY_DB`` -> ``SqliteMemoryClient``): the default in-memory client is
+    a host-side sink too, so the check still runs, but its feedback is discarded at exit.
+    """
+    if not isinstance(memory, FeedbackSink):
+        return
+    try:
+        verify_and_reinforce(
+            memory, provenance, env, session_id=session_id, query=query, run_check=run_check
+        )
+    except Exception:
+        log.exception("verify-and-reinforce failed for session %s", session_id)
