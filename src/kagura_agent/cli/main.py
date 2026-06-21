@@ -534,6 +534,11 @@ _MEMORY_MCP_CONTEXT_ENV = "KAGURA_AGENT_MEMORY_MCP_CONTEXT"
 #: cloud context is set — read by build_mcp_call_tool.
 _MEMORY_MCP_SERVER_ENV = "KAGURA_AGENT_MEMORY_MCP_SERVER"
 
+#: #165 S3: opt-in flag for the bounded recall re-rank by verified feedback. DEFAULT-OFF
+#: (unset/falsy) — recall is byte-for-byte unchanged. Applies to the host-side sync
+#: backends (Local/Sqlite); the default-ON flip stays gated on the #166 outcome eval.
+_RECALL_RERANK_ENV = "KAGURA_AGENT_RECALL_RERANK"
+
 
 def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
     """The grounding seam (B): the MemoryClient used to recall prior context and
@@ -566,6 +571,7 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
     from kagura_agent.mcp.memory_cloud import LocalMemoryClient, MemoryUnreachableError
 
     environ = os.environ if env is None else env
+    rerank = environ.get(_RECALL_RERANK_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
     mcp_context = environ.get(_MEMORY_MCP_CONTEXT_ENV, "").strip()
     if mcp_context:
         import uuid
@@ -595,7 +601,7 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
         from kagura_agent.mcp.memory_sqlite import SqliteMemoryClient
 
         try:
-            return SqliteMemoryClient(db_path)
+            return SqliteMemoryClient(db_path, rerank_feedback=rerank)
         except (sqlite3.Error, OSError) as exc:
             # Gated fail-closed: the operator opted into durable memory but the DB
             # is unusable — refuse rather than silently fall back to ephemeral memory.
@@ -604,7 +610,7 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
                 f"{exc} — fix the path/permissions or unset {_MEMORY_DB_ENV} to use "
                 "in-memory storage"
             ) from exc
-    return LocalMemoryClient()
+    return LocalMemoryClient(rerank_feedback=rerank)
 
 
 def build_container_backend(

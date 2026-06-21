@@ -6,7 +6,10 @@ never-reinforced memories keep insertion order (the cold-start floor), and nothi
 excluded. Default-OFF: recall is byte-for-byte unchanged.
 """
 
+from pathlib import Path
+
 from kagura_agent.mcp.memory_cloud import RERANK_BOUND, TRUSTED_TIER, LocalMemoryClient
+from kagura_agent.mcp.memory_sqlite import SqliteMemoryClient
 
 
 async def _seed(memory: LocalMemoryClient, *texts: str) -> list[str]:
@@ -94,6 +97,53 @@ async def test_rerank_uses_net_helpful_score() -> None:
     out = await memory.recall("alpha")
 
     assert [m.id for m in out] == [m2, m1]
+
+
+# --- SqliteMemoryClient parity: the persistent backend re-ranks the SAME way --
+
+
+async def test_sqlite_recall_unchanged_when_rerank_off(tmp_path: Path) -> None:
+    memory = SqliteMemoryClient(tmp_path / "mem.db")  # default: rerank off
+    m1 = await memory.remember("alpha one", trust_tier=TRUSTED_TIER)
+    m2 = await memory.remember("alpha two", trust_tier=TRUSTED_TIER)
+    memory.record_feedback(m2, "alpha", helpful=True)
+
+    out = await memory.recall("alpha")
+
+    assert [m.id for m in out] == [m1, m2]  # insertion order, feedback ignored
+    memory.close()
+
+
+async def test_sqlite_reranks_persisted_feedback_across_instances(tmp_path: Path) -> None:
+    # The cross-run loop: feedback recorded by one instance re-ranks recall in a
+    # FRESH instance over the same file — the headline cross-process acceptance.
+    db = tmp_path / "mem.db"
+    writer = SqliteMemoryClient(db)
+    m1 = await writer.remember("alpha one", trust_tier=TRUSTED_TIER)
+    m2 = await writer.remember("alpha two", trust_tier=TRUSTED_TIER)
+    writer.record_feedback(m2, "alpha", helpful=True)
+    writer.close()
+
+    reader = SqliteMemoryClient(db, rerank_feedback=True)
+    out = await reader.recall("alpha")
+
+    assert [m.id for m in out] == [m2, m1]  # persisted feedback re-ranks the new instance
+    reader.close()
+
+
+async def test_sqlite_rerank_boost_is_bounded(tmp_path: Path) -> None:
+    memory = SqliteMemoryClient(tmp_path / "mem.db", rerank_feedback=True)
+    m1 = await memory.remember("alpha x", trust_tier=TRUSTED_TIER)
+    m2 = await memory.remember("alpha y", trust_tier=TRUSTED_TIER)
+    for _ in range(RERANK_BOUND):
+        memory.record_feedback(m1, "alpha", helpful=True)
+    for _ in range(RERANK_BOUND + 50):
+        memory.record_feedback(m2, "alpha", helpful=True)
+
+    out = await memory.recall("alpha")
+
+    assert [m.id for m in out] == [m1, m2]  # both clamp equal -> insertion order
+    memory.close()
 
 
 async def test_rerank_net_negative_sinks_below_unproven() -> None:
