@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Kagura AI" }]
-keywords = ["agent", "ai", "claude", "memory", "autonomous", "mcp", "llm"]
+keywords = ["agent", "ai", "claude", "memory", "autonomous", "mcp", "llm", "anthropic", "security", "ai-agent", "claude-agent-sdk"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
