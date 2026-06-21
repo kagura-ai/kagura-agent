@@ -283,6 +283,31 @@ async def test_ground_and_run_records_provenance_of_injected_memories() -> None:
     assert provenance.sessions_for(mid) == {"s"}
 
 
+async def test_ground_and_run_records_grounding_tiers() -> None:
+    # The input-trust rail's evidence (Δ2): the host captures the ACTUAL trust tier
+    # of each grounding memory, not just its id, so the gate is no longer vacuous.
+    brain = FakeBrain()
+    store = InMemoryCheckpointStore()
+    memory = LocalMemoryClient()
+    await memory.remember("the auth flow uses refresh tokens", trust_tier="trusted")
+    provenance = ProvenanceLog()
+
+    await ground_and_run(
+        brain,
+        store,
+        memory,
+        session_id="s",
+        prompt="explain the refresh tokens flow",
+        provenance=provenance,
+    )
+
+    # Wiring check: ground_and_run records a tier per grounding memory. Grounding is
+    # trusted-only, so the value is "trusted" here; tier *fidelity* (that the real
+    # m.trust_tier flows through, incl. non-trusted) is pinned by the erasure unit
+    # test test_record_grounding_captures_ids_and_tiers.
+    assert provenance.tiers_for("s") == ("trusted",)
+
+
 async def test_ground_and_run_provenance_unrecorded_on_recall_miss() -> None:
     # No trusted recall hit → nothing injected → nothing to attribute (and no crash
     # from recording an empty source set).
