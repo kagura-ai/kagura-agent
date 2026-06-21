@@ -1,15 +1,30 @@
 # Changelog
 
 All notable changes to **kagura-agent** are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project will follow
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html) from its first tagged release.
-
-This is a pre-1.0 implemented skeleton: milestones v0.1–v0.7 are built and tested, but no
-versioned release has been tagged yet, so everything to date lives under _Unreleased_. The
-per-milestone module map is the
-[README implementation-status table](README.md#implementation-status-v01v07-skeleton).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). The per-milestone module map is
+the [README implementation-status table](README.md#implementation-status-v01v07-skeleton).
 
 ## [Unreleased]
+
+## [0.5.1] - 2026-06-21
+
+### Fixed
+
+- **Headless `run` / `repl` can write files.** The Agent SDK permission mode is now
+  configurable via `KAGURA_AGENT_PERMISSION_MODE`; operator-typed `run` / `repl` default to
+  `acceptEdits` — 0.5.0 used `default`, which dead-ended every mutating tool in a headless
+  run — while `serve` keeps the safe `default` (#162).
+
+### Changed
+
+- README installs from PyPI (`pip install 'kagura-agent[claude]'`) now that the package is
+  published (#163).
+- CI: bump `actions/upload-artifact` and `actions/download-artifact` (#160, #161).
+
+## [0.5.0] - 2026-06-20
+
+First public release — Apache-2.0, on PyPI. The implemented skeleton of milestones v0.1–v0.7.
 
 ### Added
 
@@ -39,4 +54,6 @@ per-milestone module map is the
   and `NOTICE` (#95, #150); and the community-health files — `CONTRIBUTING.md` (DCO),
   `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue/PR templates, and Dependabot (#97).
 
-[Unreleased]: https://github.com/kagura-ai/kagura-agent/commits/main
+[Unreleased]: https://github.com/kagura-ai/kagura-agent/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/kagura-ai/kagura-agent/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/kagura-ai/kagura-agent/releases/tag/v0.5.0
