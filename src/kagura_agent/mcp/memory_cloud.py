@@ -24,6 +24,11 @@ from typing import Protocol, runtime_checkable
 QUARANTINE_TIER = "quarantine"
 TRUSTED_TIER = "trusted"
 
+#: #165 S3 bounded boost: net-helpful feedback can move a memory's recall rank by at
+#: most this many net votes — so reinforcement can't dominate match or drive runaway
+#: monoculture (Δ4). Eval-tunable; the default-ON flip is gated on the #166 outcome eval.
+RERANK_BOUND = 3
+
 #: Delivery mode (#88) — orthogonal to trust. ``always`` = pinned: deterministically
 #: surfaced every turn via ``load_pinned()`` (Goal/Guardrail), never left to
 #: probabilistic ``recall``. ``on_recall`` = the default; only via ``recall``.
@@ -88,13 +93,17 @@ class MemoryClient(Protocol):
 class LocalMemoryClient:
     """Self-host backend. No admin verbs by construction."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, rerank_feedback: bool = False) -> None:
         self._memories: dict[str, Memory] = {}
         self._edges: dict[str, list[tuple[str, str]]] = {}
         # #90: retrieval-quality side lane, keyed by memory_id like _edges — O(1)
         # record + lookup, and the scan stays bounded to one memory's records.
         self._feedback: dict[str, list[FeedbackRecord]] = {}
         self._ids = itertools.count(1)
+        # #165 S3: bounded recall re-rank by verified feedback. DEFAULT-OFF keeps recall
+        # byte-for-byte unchanged; the default-ON flip is gated on the #166 outcome eval
+        # (the Δ4 research: the reinforcement mechanism is unproven until measured).
+        self._rerank_feedback = rerank_feedback
 
     async def remember(
         self,
@@ -139,7 +148,24 @@ class LocalMemoryClient:
             haystack = mem.text.lower()
             if any(term in haystack for term in terms):
                 results.append(mem)
+        if self._rerank_feedback:
+            # #165 S3 (default-OFF): surface verified-useful memories first by net-helpful
+            # feedback clamped to ±RERANK_BOUND (bounded boost). The sort is STABLE, so
+            # never-reinforced (score-0) memories keep insertion order, and every match is
+            # still returned here (nothing excluded). NOTE this is a *deterministic*
+            # reorder: a DOWN-ranked memory sinks and — since the consumer grounds on only
+            # the top few — may stop being recalled, so the stochastic EXPLORATION floor
+            # that re-surfaces demoted memories, plus per-memory attribution, are the Δ4
+            # guardrails REQUIRED before the default-ON flip (#166). Feedback is the sole
+            # signal over the binary text match; combining with match strength is future.
+            results.sort(key=lambda m: self._feedback_score(m.id), reverse=True)
         return results
+
+    def _feedback_score(self, memory_id: str) -> int:
+        """Net-helpful feedback for a memory, clamped to ±RERANK_BOUND (the bounded
+        boost): each helpful record is +1, each unhelpful -1."""
+        score = sum(1 if f.helpful else -1 for f in self._feedback.get(memory_id, []))
+        return max(-RERANK_BOUND, min(RERANK_BOUND, score))
 
     async def load_pinned(self) -> list[Memory]:
         # Deterministic + unranked: the COMPLETE pinned set, insertion order, every
