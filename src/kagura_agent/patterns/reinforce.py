@@ -24,23 +24,44 @@ id), never a crash mid-loop.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
+from typing import Protocol, runtime_checkable
 
-from kagura_agent.mcp.memory_cloud import LocalMemoryClient
 from kagura_agent.membrane.verified_outcome import VerifiedOutcome
 from kagura_agent.patterns.erasure import ProvenanceLog
 from kagura_agent.patterns.measure import measure_outcome
+
+#: Config key (host env) holding the verify-check command; unset => no independent
+#: verdict on the run path, so reinforcement stays unwired (#168).
+VERIFY_CHECK_ENV = "KAGURA_AGENT_VERIFY_CHECK"
+#: Optional config key for the graduation category of a verified run (default "run").
+VERIFY_CATEGORY_ENV = "KAGURA_AGENT_VERIFY_CATEGORY"
+_DEFAULT_CATEGORY = "run"
+
+
+@runtime_checkable
+class FeedbackSink(Protocol):
+    """The host-side memory verbs the reinforcer needs — present (sync) on
+    ``LocalMemoryClient`` and ``SqliteMemoryClient``, and deliberately OFF the agent
+    surface (the ``MemoryClient`` protocol / ``QuarantinedMemoryClient`` have neither),
+    so a confined/hijacked agent can never drive the ranking lane. ``runtime_checkable``
+    so the run path can ``isinstance``-gate which backends reinforce — the async cloud
+    ``McpMemoryClient`` lacks ``has_memory`` and is excluded (a separate async arm)."""
+
+    def has_memory(self, memory_id: str) -> bool: ...
+
+    def record_feedback(self, memory_id: str, query: str, *, helpful: bool) -> None: ...
 
 
 class OutcomeReinforcer:
     """Records a verified outcome's independent verdict against its grounding memories.
 
-    Typed against the concrete :class:`LocalMemoryClient` (not the narrow
-    ``MemoryClient`` protocol) on purpose: ``record_feedback`` / ``has_memory`` are
-    host-side only and deliberately off the agent surface (like the erasure cascade).
+    Typed against the :class:`FeedbackSink` protocol (``LocalMemoryClient`` /
+    ``SqliteMemoryClient``), not the narrow ``MemoryClient`` protocol: ``record_feedback``
+    / ``has_memory`` are host-side only and deliberately off the agent surface.
     """
 
-    def __init__(self, memory: LocalMemoryClient) -> None:
+    def __init__(self, memory: FeedbackSink) -> None:
         self._memory = memory
 
     def reinforce(
@@ -64,7 +85,7 @@ class OutcomeReinforcer:
 
 
 def reinforce_run(
-    memory: LocalMemoryClient,
+    memory: FeedbackSink,
     provenance: ProvenanceLog,
     *,
     session_id: str,
@@ -92,3 +113,36 @@ def reinforce_run(
         outcome, query=query, source_memory_ids=provenance.memories_for(session_id)
     )
     return outcome
+
+
+def verify_and_reinforce(
+    memory: FeedbackSink,
+    provenance: ProvenanceLog,
+    env: Mapping[str, str],
+    *,
+    session_id: str,
+    query: str,
+    run_check: Callable[[str], int],
+) -> VerifiedOutcome | None:
+    """The config-key independent-verdict arm for the run path.
+
+    If ``VERIFY_CHECK_ENV`` is set, run that check host-side (via the injected
+    ``run_check``: command -> exit code) after a finished run and reinforce the run's
+    grounding with the exit-code verdict, returning the :class:`VerifiedOutcome`. With
+    no check configured, returns ``None`` and writes nothing — the run stays UNVERIFIED
+    and reinforcement stays unwired (#168). ``run_check`` is injected so the subprocess
+    edge stays out of the unit-tested path.
+    """
+    check = env.get(VERIFY_CHECK_ENV, "").strip()
+    if not check:
+        return None
+    category = env.get(VERIFY_CATEGORY_ENV, "").strip() or _DEFAULT_CATEGORY
+    exit_code = run_check(check)
+    return reinforce_run(
+        memory,
+        provenance,
+        session_id=session_id,
+        category=category,
+        query=query,
+        exit_code=exit_code,
+    )

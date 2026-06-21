@@ -7,10 +7,19 @@ grounding. A verified failure down-ranks (helpful=False). Best-effort: a source 
 erased before reinforce is skipped, not a crash.
 """
 
+from pathlib import Path
+
+from kagura_agent.mcp.mcp_memory import McpMemoryClient
 from kagura_agent.mcp.memory_cloud import TRUSTED_TIER, LocalMemoryClient
+from kagura_agent.mcp.memory_sqlite import SqliteMemoryClient
 from kagura_agent.membrane.verified_outcome import VerifiedOutcome
 from kagura_agent.patterns.erasure import ProvenanceLog
-from kagura_agent.patterns.reinforce import OutcomeReinforcer, reinforce_run
+from kagura_agent.patterns.reinforce import (
+    FeedbackSink,
+    OutcomeReinforcer,
+    reinforce_run,
+    verify_and_reinforce,
+)
 
 
 async def test_verified_outcome_records_helpful_feedback_for_each_source() -> None:
@@ -177,3 +186,141 @@ async def test_reinforce_run_skips_a_grounding_forgotten_from_the_store() -> Non
     assert outcome.verified is True
     assert [r.helpful for r in memory.feedback_for(m1)] == [True]  # m1 reinforced
     assert memory.feedback_for(m2) == []  # m2 skipped, no crash
+
+
+# --- FeedbackSink: the loop needs a PERSISTENT host-side sink ------------------
+
+
+async def test_reinforcer_accepts_a_sqlite_backend(tmp_path: Path) -> None:
+    # LocalMemoryClient is in-memory/throwaway; the loop only persists with a backend
+    # like SqliteMemoryClient, which satisfies the FeedbackSink protocol.
+    memory = SqliteMemoryClient(tmp_path / "mem.db")
+    m1 = await memory.remember("a", trust_tier=TRUSTED_TIER)
+    reinforcer = OutcomeReinforcer(memory)
+    outcome = VerifiedOutcome.from_exit_code(0, "tests", input_trust=TRUSTED_TIER)
+
+    reinforcer.reinforce(outcome, query="q", source_memory_ids=[m1])
+
+    assert [r.helpful for r in memory.feedback_for(m1)] == [True]
+
+
+def test_feedback_sink_includes_sync_backends_excludes_async_cloud() -> None:
+    # Load-bearing: Local/Sqlite (sync) satisfy FeedbackSink; the async cloud
+    # McpMemoryClient lacks has_memory and must be excluded — a sync reinforcer must
+    # never be handed an async record_feedback.
+    assert isinstance(LocalMemoryClient(), FeedbackSink)
+    assert not hasattr(McpMemoryClient, "has_memory")
+
+
+# --- verify_and_reinforce: the config-key arm ---------------------------------
+
+
+async def test_verify_and_reinforce_no_check_configured_is_a_noop() -> None:
+    memory = LocalMemoryClient()
+    m1 = await memory.remember("a", trust_tier=TRUSTED_TIER)
+    provenance = ProvenanceLog()
+    provenance.record_grounding("s", [(m1, TRUSTED_TIER)])
+
+    outcome = verify_and_reinforce(
+        memory, provenance, {}, session_id="s", query="q", run_check=lambda cmd: 0
+    )
+
+    assert outcome is None  # no KAGURA_AGENT_VERIFY_CHECK -> loop stays unwired (#168)
+    assert memory.feedback_for(m1) == []
+
+
+async def test_verify_and_reinforce_blank_check_is_a_noop() -> None:
+    # A blank-but-present env var (common from a deploy template) is treated as unset:
+    # the check never runs and nothing is reinforced.
+    memory = LocalMemoryClient()
+    m1 = await memory.remember("a", trust_tier=TRUSTED_TIER)
+    provenance = ProvenanceLog()
+    provenance.record_grounding("s", [(m1, TRUSTED_TIER)])
+    ran: list[str] = []
+
+    outcome = verify_and_reinforce(
+        memory,
+        provenance,
+        {"KAGURA_AGENT_VERIFY_CHECK": "   "},
+        session_id="s",
+        query="q",
+        run_check=lambda cmd: ran.append(cmd) or 0,
+    )
+
+    assert outcome is None
+    assert ran == []  # the check never ran
+    assert memory.feedback_for(m1) == []
+
+
+async def test_verify_and_reinforce_runs_the_check_and_reinforces() -> None:
+    memory = LocalMemoryClient()
+    m1 = await memory.remember("a", trust_tier=TRUSTED_TIER)
+    provenance = ProvenanceLog()
+    provenance.record_grounding("s", [(m1, TRUSTED_TIER)])
+    ran: list[str] = []
+
+    outcome = verify_and_reinforce(
+        memory,
+        provenance,
+        {"KAGURA_AGENT_VERIFY_CHECK": "pytest -q"},
+        session_id="s",
+        query="q",
+        run_check=lambda cmd: ran.append(cmd) or 0,
+    )
+
+    assert ran == ["pytest -q"]  # the configured check ran
+    assert outcome is not None and outcome.verified is True
+    assert [r.helpful for r in memory.feedback_for(m1)] == [True]
+
+
+async def test_verify_and_reinforce_failed_check_down_ranks() -> None:
+    memory = LocalMemoryClient()
+    m1 = await memory.remember("a", trust_tier=TRUSTED_TIER)
+    provenance = ProvenanceLog()
+    provenance.record_grounding("s", [(m1, TRUSTED_TIER)])
+
+    outcome = verify_and_reinforce(
+        memory,
+        provenance,
+        {"KAGURA_AGENT_VERIFY_CHECK": "pytest"},
+        session_id="s",
+        query="q",
+        run_check=lambda cmd: 1,
+    )
+
+    assert outcome is not None and outcome.verified is False
+    assert [r.helpful for r in memory.feedback_for(m1)] == [False]
+
+
+async def test_verify_and_reinforce_category_defaults_and_overrides() -> None:
+    memory = LocalMemoryClient()
+    provenance = ProvenanceLog()
+
+    default = verify_and_reinforce(
+        memory,
+        provenance,
+        {"KAGURA_AGENT_VERIFY_CHECK": "x"},
+        session_id="s",
+        query="q",
+        run_check=lambda cmd: 0,
+    )
+    override = verify_and_reinforce(
+        memory,
+        provenance,
+        {"KAGURA_AGENT_VERIFY_CHECK": "x", "KAGURA_AGENT_VERIFY_CATEGORY": "deploy"},
+        session_id="s",
+        query="q",
+        run_check=lambda cmd: 0,
+    )
+    blank = verify_and_reinforce(
+        memory,
+        provenance,
+        {"KAGURA_AGENT_VERIFY_CHECK": "x", "KAGURA_AGENT_VERIFY_CATEGORY": "  "},
+        session_id="s",
+        query="q",
+        run_check=lambda cmd: 0,
+    )
+
+    assert default is not None and default.category == "run"
+    assert override is not None and override.category == "deploy"
+    assert blank is not None and blank.category == "run"  # blank-but-present -> default
