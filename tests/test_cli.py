@@ -555,6 +555,26 @@ def test_make_memory_client_sqlite_honours_rerank_env(tmp_path) -> None:
     client.close()
 
 
+def test_make_memory_client_explore_epsilon_from_env() -> None:
+    # #165 S3: the exploration floor is config'd via KAGURA_AGENT_RECALL_EXPLORE; a blank
+    # / invalid value falls back to 0.0 (off), and a valid float is clamped to [0, 1].
+    from kagura_agent.mcp.memory_cloud import LocalMemoryClient
+
+    off = make_memory_client(env={})
+    on = make_memory_client(env={"KAGURA_AGENT_RECALL_EXPLORE": "0.2"})
+    bad = make_memory_client(env={"KAGURA_AGENT_RECALL_EXPLORE": "not-a-number"})
+    over = make_memory_client(env={"KAGURA_AGENT_RECALL_EXPLORE": "9"})
+    assert isinstance(off, LocalMemoryClient) and off._explore_epsilon == 0.0
+    assert isinstance(on, LocalMemoryClient) and on._explore_epsilon == 0.2
+    nan = make_memory_client(env={"KAGURA_AGENT_RECALL_EXPLORE": "nan"})
+    inf = make_memory_client(env={"KAGURA_AGENT_RECALL_EXPLORE": "inf"})
+    assert isinstance(bad, LocalMemoryClient) and bad._explore_epsilon == 0.0
+    assert isinstance(over, LocalMemoryClient) and over._explore_epsilon == 1.0
+    # nan/inf parse as floats but are not a probability -> off (never silently full)
+    assert isinstance(nan, LocalMemoryClient) and nan._explore_epsilon == 0.0
+    assert isinstance(inf, LocalMemoryClient) and inf._explore_epsilon == 0.0
+
+
 async def test_make_memory_client_reads_os_environ_when_env_none(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     # The shipped call site is make_memory_client() with NO arg → it must read
     # os.environ. This is the actually-deployed path; the env= dict is a test seam.

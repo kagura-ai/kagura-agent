@@ -131,6 +131,58 @@ async def test_sqlite_reranks_persisted_feedback_across_instances(tmp_path: Path
     reader.close()
 
 
+async def test_exploration_overrides_feedback_when_certain() -> None:
+    # explore_epsilon=1.0: every candidate is "explored" (surfaced at the top tier), so
+    # feedback is ignored and insertion order stands — a demoted memory is NOT buried
+    # (the Δ4 positivity floor; with epsilon 0 the re-rank is the deterministic sort).
+    memory = LocalMemoryClient(rerank_feedback=True, explore_epsilon=1.0, explore_seed=0)
+    m1, m2 = await _seed(memory, "alpha one", "alpha two")
+    memory.record_feedback(m1, "alpha", helpful=False)  # would sink m1 deterministically
+    memory.record_feedback(m2, "alpha", helpful=True)
+
+    out = await memory.recall("alpha")
+
+    assert [m.id for m in out] == [m1, m2]  # exploration surfaces m1 despite -1 feedback
+
+
+async def test_exploration_is_reproducible_and_seed_dependent() -> None:
+    async def _order(seed: int) -> list[str]:
+        mem = LocalMemoryClient(rerank_feedback=True, explore_epsilon=0.5, explore_seed=seed)
+        ids = await _seed(mem, "alpha a", "alpha b", "alpha c", "alpha d")
+        mem.record_feedback(ids[0], "alpha", helpful=False)
+        mem.record_feedback(ids[3], "alpha", helpful=True)
+        return [m.id for m in await mem.recall("alpha")]
+
+    assert await _order(42) == await _order(42)  # same seed -> identical (reproducible)
+    orders = {tuple(await _order(s)) for s in range(8)}
+    assert len(orders) > 1  # the seed actually drives exploration (not a no-op RNG)
+
+
+async def test_exploration_only_reorders_never_drops() -> None:
+    # The Δ4 reorder-only invariant: exploration permutes, never excludes a match.
+    memory = LocalMemoryClient(rerank_feedback=True, explore_epsilon=1.0, explore_seed=1)
+    ids = await _seed(memory, "alpha a", "alpha b", "alpha c", "alpha d", "alpha e")
+    memory.record_feedback(ids[0], "alpha", helpful=False)
+    memory.record_feedback(ids[2], "alpha", helpful=True)
+
+    out = await memory.recall("alpha")
+
+    assert {m.id for m in out} == set(ids)  # same set, nothing dropped
+    assert len(out) == len(ids)
+
+
+async def test_sqlite_exploration_overrides_feedback(tmp_path: Path) -> None:
+    memory = SqliteMemoryClient(tmp_path / "mem.db", rerank_feedback=True, explore_epsilon=1.0)
+    m1 = await memory.remember("alpha one", trust_tier=TRUSTED_TIER)
+    m2 = await memory.remember("alpha two", trust_tier=TRUSTED_TIER)
+    memory.record_feedback(m1, "alpha", helpful=False)
+
+    out = await memory.recall("alpha")
+
+    assert [m.id for m in out] == [m1, m2]  # exploration surfaces m1 despite -1 feedback
+    memory.close()
+
+
 async def test_sqlite_rerank_boost_is_bounded(tmp_path: Path) -> None:
     memory = SqliteMemoryClient(tmp_path / "mem.db", rerank_feedback=True)
     m1 = await memory.remember("alpha x", trust_tier=TRUSTED_TIER)

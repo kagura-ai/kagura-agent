@@ -13,6 +13,7 @@ import asyncio
 import importlib.util
 import json
 import logging
+import math
 import os
 import sys
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -539,6 +540,23 @@ _MEMORY_MCP_SERVER_ENV = "KAGURA_AGENT_MEMORY_MCP_SERVER"
 #: backends (Local/Sqlite); the default-ON flip stays gated on the #166 outcome eval.
 _RECALL_RERANK_ENV = "KAGURA_AGENT_RECALL_RERANK"
 
+#: #165 S3: the Δ4 exploration-floor epsilon (float in [0, 1]) for the re-rank — the
+#: per-recall probability a candidate surfaces regardless of feedback, so a demoted
+#: memory can re-surface. Blank/invalid -> 0.0 (off); a nonzero floor is required before
+#: the default-ON flip (#166 tunes it).
+_RECALL_EXPLORE_ENV = "KAGURA_AGENT_RECALL_EXPLORE"
+
+
+def _parse_explore_epsilon(value: str) -> float:
+    """``KAGURA_AGENT_RECALL_EXPLORE`` -> a float in [0, 1]; blank/invalid -> 0.0 (off)."""
+    try:
+        eps = float(value.strip())
+    except ValueError:
+        return 0.0
+    if not math.isfinite(eps):  # nan/inf are not a probability -> off (never full)
+        return 0.0
+    return max(0.0, min(1.0, eps))
+
 
 def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
     """The grounding seam (B): the MemoryClient used to recall prior context and
@@ -572,6 +590,7 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
 
     environ = os.environ if env is None else env
     rerank = environ.get(_RECALL_RERANK_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+    explore = _parse_explore_epsilon(environ.get(_RECALL_EXPLORE_ENV, ""))
     mcp_context = environ.get(_MEMORY_MCP_CONTEXT_ENV, "").strip()
     if mcp_context:
         import uuid
@@ -601,7 +620,7 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
         from kagura_agent.mcp.memory_sqlite import SqliteMemoryClient
 
         try:
-            return SqliteMemoryClient(db_path, rerank_feedback=rerank)
+            return SqliteMemoryClient(db_path, rerank_feedback=rerank, explore_epsilon=explore)
         except (sqlite3.Error, OSError) as exc:
             # Gated fail-closed: the operator opted into durable memory but the DB
             # is unusable — refuse rather than silently fall back to ephemeral memory.
@@ -610,7 +629,7 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
                 f"{exc} — fix the path/permissions or unset {_MEMORY_DB_ENV} to use "
                 "in-memory storage"
             ) from exc
-    return LocalMemoryClient(rerank_feedback=rerank)
+    return LocalMemoryClient(rerank_feedback=rerank, explore_epsilon=explore)
 
 
 def build_container_backend(
