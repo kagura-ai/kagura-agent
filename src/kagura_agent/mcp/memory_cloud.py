@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -93,7 +94,13 @@ class MemoryClient(Protocol):
 class LocalMemoryClient:
     """Self-host backend. No admin verbs by construction."""
 
-    def __init__(self, *, rerank_feedback: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        rerank_feedback: bool = False,
+        explore_epsilon: float = 0.0,
+        explore_seed: int | None = None,
+    ) -> None:
         self._memories: dict[str, Memory] = {}
         self._edges: dict[str, list[tuple[str, str]]] = {}
         # #90: retrieval-quality side lane, keyed by memory_id like _edges — O(1)
@@ -104,6 +111,14 @@ class LocalMemoryClient:
         # byte-for-byte unchanged; the default-ON flip is gated on the #166 outcome eval
         # (the Δ4 research: the reinforcement mechanism is unproven until measured).
         self._rerank_feedback = rerank_feedback
+        # #165 S3 Δ4 EXPLORATION FLOOR (positivity): with explore_epsilon>0, each candidate
+        # has that per-recall probability of surfacing regardless of its feedback — so a
+        # down-ranked memory keeps a nonzero chance to be recalled and re-evaluated rather
+        # than buried forever (the feedback-loop-collapse guard). DEFAULT 0.0 (off, no RNG
+        # draw -> deterministic); a nonzero floor is REQUIRED before the default-ON flip,
+        # with #166 tuning the value. The RNG is seedable for reproducible tests/eval.
+        self._explore_epsilon = explore_epsilon
+        self._rng = random.Random(explore_seed)
 
     async def remember(
         self,
@@ -150,16 +165,25 @@ class LocalMemoryClient:
                 results.append(mem)
         if self._rerank_feedback:
             # #165 S3 (default-OFF): surface verified-useful memories first by net-helpful
-            # feedback clamped to ±RERANK_BOUND (bounded boost). The sort is STABLE, so
-            # never-reinforced (score-0) memories keep insertion order, and every match is
-            # still returned here (nothing excluded). NOTE this is a *deterministic*
-            # reorder: a DOWN-ranked memory sinks and — since the consumer grounds on only
-            # the top few — may stop being recalled, so the stochastic EXPLORATION floor
-            # that re-surfaces demoted memories, plus per-memory attribution, are the Δ4
-            # guardrails REQUIRED before the default-ON flip (#166). Feedback is the sole
-            # signal over the binary text match; combining with match strength is future.
-            results.sort(key=lambda m: self._feedback_score(m.id), reverse=True)
+            # feedback clamped to ±RERANK_BOUND (bounded boost). STABLE sort, so score-0
+            # memories keep insertion order and every match is still returned. The
+            # exploration floor (_rerank_key) gives each candidate an explore_epsilon
+            # chance to surface regardless of feedback, so a demoted memory can re-surface
+            # (Δ4 positivity); with epsilon 0 the key is the plain deterministic score.
+            # Per-memory attribution (vs the bounded grounded set) is the remaining Δ4
+            # guardrail before the default-ON flip (#166). Feedback is the sole signal
+            # over the binary text match; combining with match strength is future.
+            results.sort(key=self._rerank_key, reverse=True)
         return results
+
+    def _rerank_key(self, mem: Memory) -> int:
+        # Exploration floor (Δ4): with probability explore_epsilon, surface this memory at
+        # the top tier regardless of feedback (IPS positivity — a demoted memory keeps a
+        # nonzero chance to be recalled and re-evaluated). Short-circuits when epsilon is 0
+        # (no RNG draw), so the unexplored re-rank stays deterministic.
+        if self._explore_epsilon and self._rng.random() < self._explore_epsilon:
+            return RERANK_BOUND
+        return self._feedback_score(mem.id)
 
     def _feedback_score(self, memory_id: str) -> int:
         """Net-helpful feedback for a memory, clamped to ±RERANK_BOUND (the bounded

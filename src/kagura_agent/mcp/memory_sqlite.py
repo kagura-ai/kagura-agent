@@ -23,6 +23,7 @@ prompt-injected agent gets append + scoped read only; ``promote`` / ``forget`` /
 from __future__ import annotations
 
 import json
+import random
 import sqlite3
 from pathlib import Path
 
@@ -64,7 +65,14 @@ class SqliteMemoryClient:
     relies on that to fail closed rather than silently degrade to in-memory.
     """
 
-    def __init__(self, path: str | Path, *, rerank_feedback: bool = False) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        rerank_feedback: bool = False,
+        explore_epsilon: float = 0.0,
+        explore_seed: int | None = None,
+    ) -> None:
         # check_same_thread stays True (default): all access is on the event-loop
         # thread. isolation_level=None → autocommit, so a single-statement write is
         # durable the moment it returns and a *separate* instance/process sees it
@@ -78,6 +86,10 @@ class SqliteMemoryClient:
         # #165 S3: bounded recall re-rank by verified feedback, DEFAULT-OFF (parity with
         # LocalMemoryClient). The durable backend is where the cross-run loop lives.
         self._rerank_feedback = rerank_feedback
+        # #165 S3 Δ4 exploration floor — see LocalMemoryClient for the rationale (a
+        # nonzero explore_epsilon lets a down-ranked memory re-surface; default 0.0/off).
+        self._explore_epsilon = explore_epsilon
+        self._rng = random.Random(explore_seed)
 
     def close(self) -> None:
         self._conn.close()
@@ -155,8 +167,15 @@ class SqliteMemoryClient:
             # #165 S3 (default-OFF): the identical bounded re-rank to LocalMemoryClient —
             # a stable sort by net-helpful feedback clamped to ±RERANK_BOUND. See that
             # client's recall for the Δ4 caveats (deferred exploration floor, etc.).
-            results.sort(key=lambda m: self._feedback_score(m.id), reverse=True)
+            results.sort(key=self._rerank_key, reverse=True)
         return results
+
+    def _rerank_key(self, mem: Memory) -> int:
+        # Exploration floor (Δ4) — mirrors LocalMemoryClient: with prob explore_epsilon,
+        # surface this memory at the top tier regardless of feedback (IPS positivity).
+        if self._explore_epsilon and self._rng.random() < self._explore_epsilon:
+            return RERANK_BOUND
+        return self._feedback_score(mem.id)
 
     def _feedback_score(self, memory_id: str) -> int:
         """Net-helpful feedback clamped to ±RERANK_BOUND (mirrors LocalMemoryClient)."""
