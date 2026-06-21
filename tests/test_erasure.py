@@ -43,6 +43,61 @@ def test_provenance_sessions_for_returns_a_copy() -> None:
     assert log.sessions_for("m1") == {"s1"}
 
 
+def test_record_grounding_captures_ids_and_tiers() -> None:
+    log = ProvenanceLog()
+    log.record_grounding("s", [("m1", "trusted"), ("m2", "quarantine")])
+    # the erasure trail still works (memory -> sessions)...
+    assert log.sessions_for("m1") == {"s"}
+    assert log.sessions_for("m2") == {"s"}
+    # ...and the ACTUAL grounding tiers are captured, so a run's input_trust is
+    # derived from real provenance instead of vacuously "trusted".
+    assert log.tiers_for("s") == ("trusted", "quarantine")
+
+
+def test_tiers_for_unknown_session_is_empty() -> None:
+    # Fail-closed basis: no recorded grounding -> no tiers -> caller derives untrusted.
+    assert ProvenanceLog().tiers_for("nope") == ()
+
+
+def test_record_grounding_accumulates_tiers_across_turns() -> None:
+    log = ProvenanceLog()
+    log.record_grounding("s", [("m1", "trusted")])
+    log.record_grounding("s", [("m2", "quarantine")])  # a later turn grounds more
+    assert log.tiers_for("s") == ("trusted", "quarantine")
+
+
+def test_record_grounding_empty_records_no_tiers() -> None:
+    log = ProvenanceLog()
+    log.record_grounding("s", [])  # no sources injected this turn
+    assert log.tiers_for("s") == ()
+
+
+def test_record_grounding_dedups_repeated_tiers() -> None:
+    # A long REPL session re-recalls the same trusted memory every turn; the tier
+    # list must stay distinct (bounded), not grow one entry per turn.
+    log = ProvenanceLog()
+    log.record_grounding("s", [("m1", "trusted")])
+    log.record_grounding("s", [("m1", "trusted")])  # same memory, next turn
+    assert log.tiers_for("s") == ("trusted",)
+
+
+def test_low_level_record_does_not_populate_tiers() -> None:
+    # The two lanes are separate: the ids-only erasure primitive must NOT fabricate
+    # tier provenance — tiers_for stays empty (fail-closed) for a record()-only session.
+    log = ProvenanceLog()
+    log.record("s", ["m1"])
+    assert log.tiers_for("s") == ()
+    assert log.sessions_for("m1") == {"s"}
+
+
+def test_tiers_for_is_a_snapshot() -> None:
+    log = ProvenanceLog()
+    log.record_grounding("s", [("m1", "trusted")])
+    snapshot = log.tiers_for("s")
+    log.record_grounding("s", [("m2", "quarantine")])  # a later turn must not mutate it
+    assert snapshot == ("trusted",)
+
+
 # --- forget_cascade: the full erasure ----------------------------------------
 
 
@@ -143,6 +198,21 @@ async def test_cascade_leaves_unrelated_sessions_untouched() -> None:
 
     assert await store.load("s2") is not None  # unrelated checkpoint survives
     assert memory.has_memory(other_summary)  # unrelated summary survives
+
+
+async def test_cascade_drops_session_tier_provenance() -> None:
+    # The captured-tier provenance is a session-derived artifact, so an erasure
+    # cascade must drop it too — it must not outlive the forgotten run.
+    memory = LocalMemoryClient()
+    store = InMemoryCheckpointStore()
+    provenance = ProvenanceLog()
+    source = await memory.remember("PII", trust_tier="trusted")
+    provenance.record_grounding("s", [(source, "trusted")])
+    await store.save(Checkpoint(session_id="s", turn=1, state={}))
+
+    await forget_cascade(source, memory=memory, checkpoints=store, provenance=provenance)
+
+    assert provenance.tiers_for("s") == ()
 
 
 # --- host-side ONLY: the agent surface exposes no erasure verb ----------------

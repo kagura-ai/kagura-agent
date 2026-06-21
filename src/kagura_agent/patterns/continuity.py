@@ -186,9 +186,10 @@ async def ground_and_run(
     guardrails = await load_guardrails(memory)
     grounded, used = await _grounded_with_sources(memory, prompt)
     if provenance is not None and used:
-        # Record which trusted source memories fed this session, so a later
-        # erasure of any of them cascades to this run's derived artifacts.
-        provenance.record(session_id, [m.id for m in used])
+        # Record which source memories (and their tiers) fed this session: the tier
+        # capture is the host evidence for the run's input_trust, and the memory ids
+        # let a later erasure of any of them cascade to this run's derived artifacts.
+        provenance.record_grounding(session_id, [(m.id, m.trust_tier) for m in used])
     if guardrails:
         # Fence the task so guardrail bullets never run straight into it.
         # ``ground_prompt`` returns the bare prompt on a recall miss (no "Task:"

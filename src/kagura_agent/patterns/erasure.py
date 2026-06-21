@@ -40,14 +40,48 @@ class ProvenanceLog:
     to reach the *session-keyed* derived artifacts (checkpoints, outcome-summaries)
     that may carry the memory's content. NOT exposed to the agent — a host-side
     erasure-support structure, like ``LocalMemoryClient.promote``.
+
+    It also captures, per session, the *trust tier* of each grounding memory
+    (``record_grounding`` / ``tiers_for``) — the host evidence a run's ``input_trust``
+    is derived from. Without the real tiers the input-trust gate is vacuous: a
+    trusted-only read path makes "all grounding was trusted" unconditionally true.
     """
 
     _by_memory: dict[str, set[str]] = field(default_factory=dict)
+    _tiers_by_session: dict[str, list[str]] = field(default_factory=dict)
 
     def record(self, session_id: str, memory_ids: Iterable[str]) -> None:
         """Note that ``session_id`` consumed each of ``memory_ids`` (idempotent)."""
         for mid in memory_ids:
             self._by_memory.setdefault(mid, set()).add(session_id)
+
+    def record_grounding(self, session_id: str, sources: Iterable[tuple[str, str]]) -> None:
+        """Record ``(memory_id, trust_tier)`` pairs that grounded ``session_id``.
+
+        Populates BOTH the erasure trail (memory -> sessions, via ``record``) and the
+        per-session tier provenance ``tiers_for`` exposes, so a run's ``input_trust``
+        is derived from the memories' *actual* tiers rather than assumed. The
+        grounding-site entry point; ``record`` stays the low-level ids-only primitive.
+
+        Tiers are kept **distinct** (first-seen order): ``input_trust`` only asks "were
+        all grounding memories trusted?", so re-recalling the same memory across a long
+        session's turns must not grow the list unboundedly or skew tier multiplicities.
+        """
+        pairs = list(sources)
+        self.record(session_id, [mid for mid, _ in pairs])
+        for _, tier in pairs:
+            tiers = self._tiers_by_session.setdefault(session_id, [])
+            if tier not in tiers:
+                tiers.append(tier)
+
+    def tiers_for(self, session_id: str) -> tuple[str, ...]:
+        """The distinct trust tiers that grounded ``session_id`` — a snapshot tuple.
+
+        Immutable, so a caller cannot corrupt the log. Empty for a session with no
+        recorded grounding — the fail-closed basis for ``input_trust`` (no provenance
+        -> not trusted).
+        """
+        return tuple(self._tiers_by_session.get(session_id, ()))
 
     def sessions_for(self, memory_id: str) -> set[str]:
         """The sessions that consumed ``memory_id`` (a copy, never the live set)."""
@@ -56,6 +90,10 @@ class ProvenanceLog:
     def forget_memory(self, memory_id: str) -> None:
         """Drop the source's provenance entry once it has been cascaded (idempotent)."""
         self._by_memory.pop(memory_id, None)
+
+    def forget_session_tiers(self, session_id: str) -> None:
+        """Drop a session's captured tier provenance once cascaded (idempotent)."""
+        self._tiers_by_session.pop(session_id, None)
 
 
 @dataclass(frozen=True)
@@ -113,6 +151,8 @@ async def forget_cascade(
             if summary_id != memory_id and memory.has_memory(summary_id):
                 memory.forget(summary_id)
                 forgotten.append(summary_id)
+        # The captured-tier provenance for this session is a derived artifact too.
+        provenance.forget_session_tiers(session_id)
     # The source still exists: the top-level guard proved it and the loop skipped
     # it, so this final forget is safe and unconditional.
     memory.forget(memory_id)
