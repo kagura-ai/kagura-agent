@@ -29,7 +29,7 @@ the security membrane, capability graduation, and the per-milestone
 
 ## Quickstart
 
-> kagura-agent is **install-from-clone** (not yet published to PyPI) and needs **two
+> kagura-agent is on PyPI — `pip install 'kagura-agent[claude]'` — and needs **two
 > logins** before it will run. The full first-run setup is below; `kagura-agent doctor`
 > tells you exactly what is still missing.
 
@@ -49,23 +49,20 @@ the security membrane, capability graduation, and the per-milestone
 ### Get running
 
 ```bash
-# 1. Clone + isolate (not on PyPI — install from the clone).
-git clone <repo-url> && cd kagura-agent
+# 1. (recommended) isolate, then install WITH a brain extra (the bare core has none):
 python -m venv .venv && source .venv/bin/activate    # Windows PowerShell: .venv\Scripts\Activate.ps1
+pip install 'kagura-agent[claude]'    # default — Claude Agent SDK
+# pip install 'kagura-agent[brain]'   # alternate — kagura-brain (claude/codex/ollama)
 
-# 2. Install WITH a brain (the bare core has none). Pick one:
-pip install -e '.[claude]'        # default — Claude Agent SDK
-# pip install -e '.[brain]'       # alternate — kagura-brain (claude/codex/ollama)
-
-# 3. Authenticate (both logins are real prerequisites):
+# 2. Authenticate (both logins are real prerequisites):
 kagura auth login                 # Kagura Memory Cloud — the separate `kagura` CLI
 claude                            # sign the Claude Code CLI into your plan…
 # export ANTHROPIC_API_KEY=sk-…   # …or bring your own key (overrides subscription)
 
-# 4. Preflight — reports exactly what is still missing:
+# 3. Preflight — reports exactly what is still missing:
 kagura-agent doctor
 
-# 5. Run a task:
+# 4. Run a task:
 kagura-agent run "summarize the repository layout"
 ```
 
@@ -78,7 +75,7 @@ kagura-agent repl                           # interactive — each line continue
 kagura-agent run --session work "…"         # a named, resumable session (a later run resumes it)
 
 # Cockpit on a chat transport — install the transport extra FIRST, or serve aborts:
-pip install -e '.[slack]'                   # or '.[discord]'
+pip install 'kagura-agent[slack]'           # or 'kagura-agent[discord]'
 kagura-agent setup transport                # how to wire the bot token (it lives in the host env)
 kagura-agent serve --transport slack        # add --container to run the brain BYOK in a sealed container
 ```
@@ -92,17 +89,18 @@ The exact first-run failures and their fixes:
 
 | Symptom | Fix |
 |---|---|
-| `run` exits 3 — *"the Claude brain requires the optional `claude` extra"* | `pip install -e '.[claude]'` |
+| `run` exits 3 — *"the Claude brain requires the optional `claude` extra"* | `pip install 'kagura-agent[claude]'` |
 | `run` / `doctor` — *"memory-cloud is not reachable/authenticated"* | `kagura auth login` on the host (the separate `kagura` CLI) |
 | `doctor` overall **FAIL** on a fresh checkout | Expected before steps 2–3 — read it per-row; a `brain` FAIL just means the brain isn't set up yet |
-| `serve` exits 3 — *"the slack transport requires the optional `slack` extra"* | install the transport extra: `pip install -e '.[slack]'` (or `.[discord]`) |
+| `serve` exits 3 — *"the slack transport requires the optional `slack` extra"* | install the transport extra: `pip install 'kagura-agent[slack]'` (or `[discord]`) |
 | `run` exits 2 — *"task must not be empty"* | the `--prompt-file` / stdin input was empty |
-| `pytest` / `mypy` not found | dev tools live in the dev extra: `pip install -e '.[dev]'` |
+| `pytest` / `mypy` not found | dev tools live in the dev extra (from a clone): `pip install -e '.[dev]'` |
 
 **Extras**: `claude` · `brain` · `slack` · `discord` · `aws` · `gcp` · `github` ·
 `cloudflare` · `keyring` · `dev`. The brain is chosen per-deploy via `KAGURA_AGENT_BRAIN`
 (`sdk` default, or `kagura-brain`) — see [Brain-provider seam](#brain-provider-seam).
-Contributors: `pip install -e '.[dev]'`, then `pytest` and `mypy` (strict).
+Contributors install from a clone: `git clone` + `pip install -e '.[dev]'`, then `pytest`
+and `mypy` (strict) — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
