@@ -132,6 +132,7 @@ class SlackTransport:  # pragma: no cover - requires slack-bolt + a workspace
         channel_map: dict[str, str] | None = None,
         *,
         operator_id: str | None = None,
+        require_operator: bool = False,
     ) -> None:
         self._app = app
         self._bot_user_id = bot_user_id
@@ -139,6 +140,7 @@ class SlackTransport:  # pragma: no cover - requires slack-bolt + a workspace
         self._pending: dict[str, asyncio.Future[str]] = {}
         self._inbox: asyncio.Queue[Event] = asyncio.Queue()
         self._operator_id = operator_id
+        self._require_operator = require_operator
         self._wire_handlers()
 
     def _wire_handlers(self) -> None:
@@ -160,7 +162,9 @@ class SlackTransport:  # pragma: no cover - requires slack-bolt + a workspace
             # Operator-identity gate (#14) for the button path: ignore a click
             # from anyone but the operator (leave the request pending).
             clicker = (body.get("user") or {}).get("id")
-            if not click_authorized(clicker, self._operator_id):
+            if not click_authorized(
+                clicker, self._operator_id, require_operator=self._require_operator
+            ):
                 return
             # Resolve the pending future by the thread the prompt was keyed under
             # (thread_ts); or, if the prompt was NOT threaded (Slack posted it
