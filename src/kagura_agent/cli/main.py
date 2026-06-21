@@ -650,6 +650,15 @@ def _narrate(text: str) -> None:  # pragma: no cover - I/O
     print(text, file=sys.stderr, flush=True)
 
 
+def _verify_check(command: str) -> int:  # pragma: no cover - host subprocess edge
+    """Run the configured verify check (KAGURA_AGENT_VERIFY_CHECK) on the host and
+    return its exit code. shell=True: the command is operator-supplied config, run at
+    the operator's own privilege, like the rest of the run path."""
+    import subprocess
+
+    return subprocess.run(command, shell=True).returncode
+
+
 async def _run_task(  # pragma: no cover - needs SDK + subscription
     task: str,
     *,
@@ -670,6 +679,8 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
     from kagura_agent.membrane.lease import Budget, Lease
     from kagura_agent.membrane.registry_io import load_registry
     from kagura_agent.patterns.continuity import ground_and_run
+    from kagura_agent.patterns.erasure import ProvenanceLog
+    from kagura_agent.patterns.reinforce import reinforce_after_run
 
     # Redefined startup gate (v0.2-A6): memory must be reachable via the CLI,
     # independent of the brain. Fail-closed; no silent memory-less degrade.
@@ -728,13 +739,22 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
         # A named --session uses a persistent on-disk store (resume across runs);
         # a one-shot run uses a throwaway in-memory store (no persisted context).
         store, sid = make_run_store(session_id)
+        memory = make_memory_client()
+        provenance = ProvenanceLog()
         result = await ground_and_run(
             brain,
             store,
-            make_memory_client(),
+            memory,
             session_id=sid,
             prompt=task,
+            provenance=provenance,
             on_message=_narrate if verbose else None,
+        )
+        # Independent-verdict arm (#165 S2): when KAGURA_AGENT_VERIFY_CHECK is set and
+        # the backend is a host-side sync sink, run the check and reinforce the run's
+        # grounding. Best-effort — a check that cannot spawn must not fail a done run.
+        reinforce_after_run(
+            memory, provenance, os.environ, session_id=sid, query=task, run_check=_verify_check
         )
         return result.text
     finally:

@@ -17,6 +17,7 @@ from kagura_agent.patterns.erasure import ProvenanceLog
 from kagura_agent.patterns.reinforce import (
     FeedbackSink,
     OutcomeReinforcer,
+    reinforce_after_run,
     reinforce_run,
     verify_and_reinforce,
 )
@@ -324,3 +325,63 @@ async def test_verify_and_reinforce_category_defaults_and_overrides() -> None:
     assert default is not None and default.category == "run"
     assert override is not None and override.category == "deploy"
     assert blank is not None and blank.category == "run"  # blank-but-present -> default
+
+
+# --- reinforce_after_run: the best-effort run-path hook -----------------------
+
+
+async def test_reinforce_after_run_reinforces_a_sink_backend() -> None:
+    memory = LocalMemoryClient()
+    m1 = await memory.remember("a", trust_tier=TRUSTED_TIER)
+    provenance = ProvenanceLog()
+    provenance.record_grounding("s", [(m1, TRUSTED_TIER)])
+
+    reinforce_after_run(
+        memory,
+        provenance,
+        {"KAGURA_AGENT_VERIFY_CHECK": "x"},
+        session_id="s",
+        query="q",
+        run_check=lambda c: 0,
+    )
+
+    assert [r.helpful for r in memory.feedback_for(m1)] == [True]
+
+
+def test_reinforce_after_run_skips_a_non_sink_backend() -> None:
+    # A backend without the host-side sync verbs (e.g. the async cloud client) is
+    # skipped before the check even runs.
+    def boom(_c: str) -> int:
+        raise AssertionError("run_check must not be called for a non-sink backend")
+
+    reinforce_after_run(
+        object(),
+        ProvenanceLog(),
+        {"KAGURA_AGENT_VERIFY_CHECK": "x"},
+        session_id="s",
+        query="q",
+        run_check=boom,
+    )  # returns without raising
+
+
+async def test_reinforce_after_run_is_best_effort_on_check_error() -> None:
+    # A check that cannot spawn must not turn a completed run into a crash (logged,
+    # not raised) — and records nothing.
+    memory = LocalMemoryClient()
+    m1 = await memory.remember("a", trust_tier=TRUSTED_TIER)
+    provenance = ProvenanceLog()
+    provenance.record_grounding("s", [(m1, TRUSTED_TIER)])
+
+    def boom(_c: str) -> int:
+        raise OSError("cannot spawn check")
+
+    reinforce_after_run(
+        memory,
+        provenance,
+        {"KAGURA_AGENT_VERIFY_CHECK": "x"},
+        session_id="s",
+        query="q",
+        run_check=boom,
+    )  # logged, not raised
+
+    assert memory.feedback_for(m1) == []
