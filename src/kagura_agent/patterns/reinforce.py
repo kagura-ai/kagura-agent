@@ -28,6 +28,8 @@ from collections.abc import Iterable
 
 from kagura_agent.mcp.memory_cloud import LocalMemoryClient
 from kagura_agent.membrane.verified_outcome import VerifiedOutcome
+from kagura_agent.patterns.erasure import ProvenanceLog
+from kagura_agent.patterns.measure import measure_outcome
 
 
 class OutcomeReinforcer:
@@ -59,3 +61,34 @@ class OutcomeReinforcer:
             self._memory.record_feedback(memory_id, query, helpful=outcome.verified)
             written += 1
         return written
+
+
+def reinforce_run(
+    memory: LocalMemoryClient,
+    provenance: ProvenanceLog,
+    *,
+    session_id: str,
+    category: str,
+    query: str,
+    exit_code: int | None = None,
+    approved: bool | None = None,
+) -> VerifiedOutcome:
+    """Close the loop for one finished run: MEASURE its outcome from an independent
+    verdict, then reinforce the memories that grounded it. Returns the
+    :class:`VerifiedOutcome` (for logging / a later graduation step).
+
+    Host-side composition of ``measure_outcome`` + :class:`OutcomeReinforcer` over the
+    session's recorded grounding. With no verdict supplied the outcome is UNVERIFIED
+    and reinforcement is a no-op (zero feedback) — the fail-closed default.
+    """
+    outcome = measure_outcome(
+        category,
+        session_id=session_id,
+        provenance=provenance,
+        exit_code=exit_code,
+        approved=approved,
+    )
+    OutcomeReinforcer(memory).reinforce(
+        outcome, query=query, source_memory_ids=provenance.memories_for(session_id)
+    )
+    return outcome

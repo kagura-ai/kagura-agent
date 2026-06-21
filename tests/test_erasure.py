@@ -98,6 +98,28 @@ def test_tiers_for_is_a_snapshot() -> None:
     assert snapshot == ("trusted",)
 
 
+def test_memories_for_returns_the_sessions_grounding_ids() -> None:
+    # The reverse of sessions_for: which sources fed a session, so the host can
+    # reinforce them after a verified outcome.
+    log = ProvenanceLog()
+    log.record_grounding("s", [("m1", "trusted"), ("m2", "quarantine")])
+    log.record_grounding("other", [("m3", "trusted")])
+    assert set(log.memories_for("s")) == {"m1", "m2"}
+    assert set(log.memories_for("other")) == {"m3"}
+
+
+def test_memories_for_unknown_session_is_empty() -> None:
+    assert ProvenanceLog().memories_for("nope") == ()
+
+
+def test_memories_for_is_distinct() -> None:
+    # A memory re-recalled across turns is one source, not many.
+    log = ProvenanceLog()
+    log.record_grounding("s", [("m1", "trusted")])
+    log.record_grounding("s", [("m1", "trusted")])
+    assert log.memories_for("s") == ("m1",)
+
+
 # --- forget_cascade: the full erasure ----------------------------------------
 
 

@@ -87,6 +87,12 @@ class ProvenanceLog:
         """The sessions that consumed ``memory_id`` (a copy, never the live set)."""
         return set(self._by_memory.get(memory_id, set()))
 
+    def memories_for(self, session_id: str) -> tuple[str, ...]:
+        """The distinct memory ids that grounded ``session_id`` — the reverse of
+        ``sessions_for``, so the host can reinforce a run's sources after a verified
+        outcome. Empty for an unrecorded session."""
+        return tuple(mid for mid, sessions in self._by_memory.items() if session_id in sessions)
+
     def forget_memory(self, memory_id: str) -> None:
         """Drop the source's provenance entry once it has been cascaded (idempotent)."""
         self._by_memory.pop(memory_id, None)
