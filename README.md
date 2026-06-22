@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/kagura-ai-logo.png" alt="Kagura AI" width="420">
+</p>
+
 # kagura-agent
 
 [![CI](https://github.com/kagura-ai/kagura-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/kagura-ai/kagura-agent/actions/workflows/ci.yml)
