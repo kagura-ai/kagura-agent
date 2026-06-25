@@ -897,6 +897,86 @@ def test_main_run_does_not_mislabel_an_unrelated_value_error(monkeypatch) -> Non
         main(["run", "do a thing"])
 
 
+async def test_run_task_normalizes_unresolved_secret_ref_to_credential_setup_error(
+    monkeypatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    # #code-review F2: build_broker raises SecretRefError (a RuntimeError, NOT a
+    # ValueError) when a granted provider's *_env ref is unset. The provisioning block
+    # caught only ValueError, so it escaped as a raw traceback + exit 1. It must be
+    # normalized to CredentialSetupError (which main() surfaces as a clean exit 2).
+    import kagura_agent.cli.main as cli_main
+    from kagura_agent.membrane.registry import Grant, GrantSet
+    from kagura_agent.membrane.registry_io import SecretRefError
+
+    monkeypatch.setattr("kagura_agent.mcp.memory_cloud.memory_reachable", lambda: True)
+    monkeypatch.setattr(cli_main, "plan_granted_specs", lambda *_a, **_k: ("spec",))
+    monkeypatch.setattr(
+        "kagura_agent.membrane.granted_broker.lease_requests",
+        lambda grants, **_k: ("one-request",),  # non-empty -> the credential block runs
+    )
+
+    def _raise_secret_ref(*_a, **_k):  # type: ignore[no-untyped-def]
+        raise SecretRefError("env var 'GH_PEM' is not set")
+
+    monkeypatch.setattr(
+        "kagura_agent.membrane.cloud_transports.build_broker", _raise_secret_ref
+    )
+    reg = tmp_path / "reg.toml"
+    reg.write_text("")  # empty but valid: load_registry -> ()
+    grants = GrantSet(frozenset({Grant("gh", "installation:42")}))
+
+    with pytest.raises(cli_main.CredentialSetupError):
+        await cli_main._run_task("task", grants=grants, registry_path=str(reg))
+
+
+async def test_run_task_normalizes_acquire_failure_to_credential_setup_error(
+    monkeypatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    # #code-review F2: the acquire loop + container_env sat OUTSIDE the wrapped try, so
+    # a MemoryWriteLocked (RuntimeError) from acquire escaped as a raw traceback.
+    # Moving them inside the broadened except normalizes it to CredentialSetupError.
+    import kagura_agent.cli.main as cli_main
+    from kagura_agent.membrane.providers import MemoryWriteLocked
+    from kagura_agent.membrane.registry import Grant, GrantSet
+
+    monkeypatch.setattr("kagura_agent.mcp.memory_cloud.memory_reachable", lambda: True)
+    monkeypatch.setattr(cli_main, "plan_granted_specs", lambda *_a, **_k: ("spec",))
+
+    class _Req:
+        provider, scope, ttl, budget_seconds = "mem", "memory:write", 60, 60
+
+    monkeypatch.setattr(
+        "kagura_agent.membrane.granted_broker.lease_requests",
+        lambda grants, **_k: (_Req(),),
+    )
+    monkeypatch.setattr(
+        "kagura_agent.membrane.cloud_transports.build_broker", lambda *_a, **_k: object()
+    )
+
+    class _FakeGrantedBroker:
+        def __init__(self, inner, grants) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        async def acquire(self, *_a, **_k):  # type: ignore[no-untyped-def]
+            raise MemoryWriteLocked("memory:write is locked by default")
+
+        async def release(self, lease) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        def container_env(self, leases):  # type: ignore[no-untyped-def]
+            return {}
+
+    monkeypatch.setattr(
+        "kagura_agent.membrane.granted_broker.GrantedBroker", _FakeGrantedBroker
+    )
+    reg = tmp_path / "reg.toml"
+    reg.write_text("")
+    grants = GrantSet(frozenset({Grant("mem", "memory:write")}))
+
+    with pytest.raises(cli_main.CredentialSetupError):
+        await cli_main._run_task("task", grants=grants, registry_path=str(reg))
+
+
 # --- --mcp-config load failures surface cleanly, not as a raw traceback ---
 
 def test_main_run_clean_error_on_missing_mcp_config(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
