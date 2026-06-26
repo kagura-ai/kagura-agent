@@ -702,7 +702,8 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
     from kagura_agent.membrane.cloud_transports import build_broker
     from kagura_agent.membrane.granted_broker import GrantedBroker, lease_requests
     from kagura_agent.membrane.lease import Budget, Lease
-    from kagura_agent.membrane.registry_io import load_registry
+    from kagura_agent.membrane.providers import MemoryWriteLocked, StandingSecretRefused
+    from kagura_agent.membrane.registry_io import SecretRefError, load_registry
     from kagura_agent.patterns.continuity import ground_and_run
     from kagura_agent.patterns.erasure import ProvenanceLog
     from kagura_agent.patterns.reinforce import reinforce_after_run
@@ -731,29 +732,39 @@ async def _run_task(  # pragma: no cover - needs SDK + subscription
             assert grants is not None  # a non-empty plan implies --grant was given
             # Build ONLY the granted providers (plan_granted_specs) — an ungranted,
             # possibly deployment-incomplete provider in the registry must never
-            # abort a run that did not ask for it. Wrap the config-construction
-            # ValueErrors (bad registry, unknown granted provider, unsupported
-            # kind) in CredentialSetupError so main() can give a clean exit-2
-            # message WITHOUT swallowing an unrelated ValueError raised later by
-            # the agent run (cockpit.serve / the brain).
+            # abort a run that did not ask for it. Wrap the WHOLE provisioning step
+            # (registry load, secret-ref resolution + broker build, lease acquire,
+            # container-env injection) so EVERY fail-closed credential error becomes a
+            # clean exit-2 CredentialSetupError instead of a raw traceback + exit 1:
+            # a bad registry / unknown granted provider / unsupported kind (ValueError),
+            # an unresolved *_env|*_file|*_keyring reference (SecretRefError), a
+            # static_env without standing_secret consent (StandingSecretRefused), or a
+            # locked memory:write / env-var conflict (MemoryWriteLocked). Deliberately
+            # NARROW (these four types only) so an unrelated ValueError raised LATER by
+            # the agent run (cockpit.serve / the brain) is NOT swallowed here.
             try:
                 specs = plan_granted_specs(load_registry(registry_path), grants)
                 inner = build_broker(specs, clock=time.monotonic)
-            except ValueError as exc:
-                raise CredentialSetupError(str(exc)) from exc
-            broker = GrantedBroker(inner, grants)
-            for req in reqs:
-                leases.append(
-                    await broker.acquire(
-                        req.provider,
-                        scope=req.scope,
-                        ttl=req.ttl,
-                        budget=Budget(req.budget_seconds),
+                broker = GrantedBroker(inner, grants)
+                for req in reqs:
+                    leases.append(
+                        await broker.acquire(
+                            req.provider,
+                            scope=req.scope,
+                            ttl=req.ttl,
+                            budget=Budget(req.budget_seconds),
+                        )
                     )
-                )
-            for key, value in broker.container_env(leases).items():
-                env_restore[key] = os.environ.get(key)
-                os.environ[key] = value
+                for key, value in broker.container_env(leases).items():
+                    env_restore[key] = os.environ.get(key)
+                    os.environ[key] = value
+            except (
+                ValueError,
+                SecretRefError,
+                StandingSecretRefused,
+                MemoryWriteLocked,
+            ) as exc:
+                raise CredentialSetupError(str(exc)) from exc
 
         brain = make_brain(
             os.environ,

@@ -423,3 +423,76 @@ def test_parse_setup_command():
     assert parse_args(["setup"]).topic is None
     assert parse_args(["setup", "memory"]).topic == "memory"
     assert parse_args(["setup", "transport"]).topic == "transport"
+
+
+# --------------------------------------------------------------------------
+# upsert_provider must not silently corrupt or drop sibling sections (#code-review)
+# --------------------------------------------------------------------------
+
+
+def test_upsert_preserves_sibling_section_whose_quoted_name_contains_bracket():
+    # #code-review F3: ["b]c"] is a VALID TOML table (a quoted key may contain ']').
+    # A header detector that stops at the first ']' fails to see it as the next-section
+    # boundary, so upsert_provider absorbs and silently DELETES it — breaking the
+    # documented "other sections are preserved" contract. It must survive a replace.
+    existing = (
+        "[providers.target]\n"
+        'kind = "static_env"\n'
+        'value_env = "A"\n'
+        "standing_secret = true\n"
+        '["b]c"]\n'
+        "x = 1\n"
+        "[keep]\n"
+        "y = 2\n"
+    )
+    new_block = render_provider_block(
+        "target", "static_env", {"value_env": "B", "standing_secret": True}
+    )
+    out = upsert_provider(existing, "target", new_block)
+    data = tomllib.loads(out)
+    assert data["b]c"] == {"x": 1}  # the bracketed-name sibling must NOT be dropped
+    assert data["keep"] == {"y": 2}
+    assert data["providers"]["target"]["value_env"] == "B"
+
+
+def test_upsert_preserves_value_with_unicode_line_separator():
+    # #code-review F4: str.splitlines() splits on U+2028/U+2029/U+0085, which are LEGAL
+    # raw characters inside a TOML basic string. Rejoining with '\n' turns them into
+    # real newlines and corrupts the file into invalid TOML. A provider replace must
+    # leave such a value byte-intact and the file must still parse.
+    sep = " "  # LINE SEPARATOR — legal raw in a TOML basic string
+    existing = (
+        "[notes]\n"
+        f'body = "alpha{sep}beta"\n'
+        "[providers.aws]\n"
+        'kind = "aws_sts"\n'
+        'role_arn = "arn:OLD"\n'
+    )
+    new_block = render_provider_block("aws", "aws_sts", {"role_arn": "arn:NEW"})
+    out = upsert_provider(existing, "aws", new_block)
+    data = tomllib.loads(out)  # must still parse — no corruption
+    assert data["notes"]["body"] == f"alpha{sep}beta"  # separator preserved verbatim
+    assert data["providers"]["aws"]["role_arn"] == "arn:NEW"
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("[providers.aws]", "providers.aws"),
+        ("  [providers.aws]  # note", "providers.aws"),
+        ('["b]c"]', '"b]c"'),  # quoted name containing ']' is a real header
+        ('["a\\"b"]', '"a\\"b"'),  # escaped quote inside the quoted name
+        ('[providers."a.b"]', 'providers."a.b"'),  # quoted dotted segment
+        ("[[arr]]", "arr"),  # array-of-tables header
+        ('["a@x"],', None),  # a multi-line array element is NOT a header
+        ('role_arn = "a[b]"', None),  # a value line is NOT a header
+        ('["abc]', None),  # unterminated quoted name (']' swallowed) → not a header
+        ("[[arr]", None),  # '[[' not closed with ']]' → not a header
+        ("# [commented]", None),
+        ("", None),
+    ],
+)
+def test_header_path_is_quote_aware(line, expected):
+    from kagura_agent.cli.setup import _header_path
+
+    assert _header_path(line) == expected

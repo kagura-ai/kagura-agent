@@ -267,6 +267,23 @@ def test_keyring_reference_must_be_non_empty():
         )
 
 
+def test_env_reference_rejection_does_not_echo_the_pasted_secret_value():
+    # CWE-532 (#code-review F1): when a real secret is pasted into an *_env field, the
+    # env-name-shape guard correctly rejects it — but the rejected VALUE must NOT appear
+    # in the error, because that message is printed to stderr/journald/CI by `doctor`
+    # and the run path. Mirror the value-free discipline of the bare-secret guard.
+    secret = "sk-ant-api03-DEADBEEFdeadbeef0123-SECRET"
+    with pytest.raises(ValueError) as exc:
+        parse_registry(
+            {"cf": {"kind": "cloudflare", "account_id": "a", "parent_token_env": secret}}
+        )
+    msg = str(exc.value)
+    assert secret not in msg  # the secret value must never be echoed
+    # still actionable without the value: names the field + that it must be a NAME
+    assert "parent_token_env" in msg
+    assert "environment variable" in msg
+
+
 def test_ambiguous_secret_env_and_keyring_is_fail_closed():
     with pytest.raises(ValueError, match="ambiguous"):
         parse_registry(

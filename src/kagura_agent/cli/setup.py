@@ -52,10 +52,6 @@ _SECRET_VALUE_RE = re.compile(
 # else (notably ``.``, which TOML reads as a table separator) must be quoted.
 _BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-# A whole-line TOML table / array-of-tables header, optional trailing comment.
-# Deliberately does NOT match a multi-line array element like ``["a", "b"],``.
-_SECTION_HEADER_RE = re.compile(r"^\s*\[\[?[^\]]+\]\]?\s*(#.*)?$")
-
 # Control characters TOML basic strings forbid raw (tab/newline/cr are handled
 # separately as \t/\n/\r); the rest must be \u-escaped.
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -103,15 +99,53 @@ def _header_key(name: str) -> str:
 
 
 def _header_path(line: str) -> str | None:
-    """The dotted path of a TOML section header line, or None if not a header.
+    """The dotted path of a TOML table / array-of-tables header line, or None.
 
-    ``[providers.aws] # note`` → ``providers.aws``; a multi-line array element
-    like ``["a@x"],`` → None (so it is never mistaken for a section boundary).
+    Quote-AWARE: a quoted table name may legally contain ``]`` (e.g. ``["b]c"]``);
+    a regex that stopped at the first ``]`` misread such a header as a non-header, so
+    upsert_provider absorbed and silently DROPPED that section. Scanning with
+    string-awareness fixes it. Examples: ``[providers.aws] # note`` → ``providers.aws``;
+    ``["b]c"]`` → ``"b]c"``; a multi-line array element like ``["a@x"],`` → None (so it
+    is never mistaken for a section boundary).
     """
-    if not _SECTION_HEADER_RE.match(line):
+    s = line.strip()
+    if not s.startswith("["):
         return None
-    inner = re.sub(r"\s*#.*$", "", line).strip()  # drop a trailing comment
-    return inner.strip("[").rstrip("]").strip()
+    double = s.startswith("[[")  # [[array-of-tables]]
+    open_len = 2 if double else 1
+    i = open_len
+    quote: str | None = None  # active string delimiter inside the name, else None
+    while i < len(s):
+        ch = s[i]
+        if quote is not None:
+            if ch == "\\" and quote == '"':
+                i += 2  # skip an escaped char inside a basic string
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "]":
+            break  # first top-level (unquoted) ']' closes the name
+        i += 1
+    else:
+        # Ran off the end with no top-level ']' — not a header. Also covers an
+        # unterminated quoted name: its ']' (if any) is swallowed inside the still-open
+        # string, so the loop never breaks. (After a break, quote is always None,
+        # because ']' only closes the name in the quote-None branch above.)
+        return None
+    inner = s[open_len:i].strip()
+    rest = s[i:]
+    if double:
+        if not rest.startswith("]]"):
+            return None  # '[[' must close with ']]'
+        rest = rest[2:]
+    else:
+        rest = rest[1:]  # consume the single ']'
+    rest = rest.strip()
+    if rest and not rest.startswith("#"):
+        return None  # trailing non-comment content → an array row, not a header
+    return inner or None
 
 
 def _bracket_delta(line: str) -> int:
@@ -184,7 +218,12 @@ def upsert_provider(existing_text: str, name: str, block: str) -> str:
     and comments are preserved; re-running with the same ``block`` is idempotent.
     """
     target = f"providers.{_header_key(name)}"
-    lines = existing_text.splitlines()
+    # Split on '\n' only (NOT str.splitlines()): splitlines() also breaks on U+0085 /
+    # U+2028 / U+2029, which are LEGAL raw characters inside a TOML basic string —
+    # rejoining with '\n' would turn one into a real newline and corrupt the value
+    # into invalid TOML. split('\n') preserves them (and any '\r' rides along on the
+    # line, so CRLF round-trips faithfully).
+    lines = existing_text.split("\n")
     block_lines = block.rstrip("\n").split("\n")
 
     start = next((i for i, ln in enumerate(lines) if _header_path(ln) == target), None)

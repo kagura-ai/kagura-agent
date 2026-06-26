@@ -345,9 +345,15 @@ def _parse_one(name: Any, table: Any) -> ProviderSpec:
                 # An *_env reference must name a host env var, not carry a value —
                 # the NAME-shape check catches a raw secret pasted into the field.
                 if not isinstance(val, str) or not _ENV_NAME_RE.fullmatch(val):
+                    # Deliberately value-FREE: the rejected text is very often the raw
+                    # secret the operator pasted by mistake (that is what this guard
+                    # catches), and this message is printed to stderr/journald/CI by
+                    # doctor and the run path. Echoing it would leak the secret to logs
+                    # (CWE-532). The field name alone is already actionable — matching
+                    # the bare-inline-secret guard above and the _file/_keyring branches.
                     raise ValueError(
                         f"{key} for provider {name!r} must be an environment variable "
-                        f"NAME (e.g. CF_TOKEN), not a value: got {val!r}"
+                        f"NAME (e.g. CF_TOKEN), not a value"
                     )
             elif suf == "_file":
                 if not isinstance(val, str) or not val.strip():
