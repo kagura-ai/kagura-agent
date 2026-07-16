@@ -42,7 +42,7 @@ class Arm(StrEnum):
 
 
 CheckKind = Literal["contains_all", "exact", "regex"]
-VerifiedSource = Literal["objective_check", "host_check", "hitl_approval"]
+VerifiedSource = Literal["objective_check", "trusted_host_check", "hitl_approval"]
 
 
 def _canonical_json(value: object) -> str:
@@ -604,7 +604,7 @@ class OutcomeObservation:
     def __post_init__(self) -> None:
         if not 0.0 <= self.score <= 1.0:
             raise ValueError("outcome score must be in [0, 1]")
-        if self.source not in ("objective_check", "host_check", "hitl_approval"):
+        if self.source not in ("objective_check", "trusted_host_check", "hitl_approval"):
             raise ValueError("feedback requires an independent host-arbitrated source")
 
 
@@ -640,10 +640,12 @@ class BootstrapExperimentBackend(Protocol):
         self,
         handle: ArmHandle,
         *,
-        memory_id: str,
+        logical_memory_id: str,
         query: str,
         helpful: bool,
         verdict_source: VerifiedSource,
+        verdict_reference: str,
+        experiment_id: str,
         note: str,
     ) -> None: ...
 
@@ -667,6 +669,17 @@ class TrialRecord:
     selected_memory_ids: tuple[str, ...]
     declared_probabilities: dict[str, float] | None
     feedback_writes: int
+
+
+@dataclass(frozen=True)
+class _PendingFeedback:
+    """One arm-invariant host label set applied symmetrically after a generation."""
+
+    record_indices: tuple[int, int]
+    logical_memory_ids: tuple[str, ...]
+    query: str
+    gold_memory_id: str
+    verdict_reference: str
 
 
 @dataclass(frozen=True)
@@ -949,17 +962,7 @@ async def run_experiment(
         pair.validate(manifest)
         for generation in range(manifest.generations):
             generation_records: list[TrialRecord] = []
-            pending_feedback: list[
-                tuple[
-                    int,
-                    ArmHandle,
-                    BootstrapEnvelope,
-                    str,
-                    bool,
-                    VerifiedSource,
-                    str,
-                ]
-            ] = []
+            pending_feedback: list[_PendingFeedback] = []
             ordered_tasks = list(tasks)
             random.Random(manifest.seed + generation).shuffle(ordered_tasks)
             for task in ordered_tasks:
@@ -999,25 +1002,11 @@ async def run_experiment(
                     random.Random(seed).shuffle(actor_order)
                     for arm in actor_order:
                         outcomes[arm] = await actor.run(task, envelopes[arm], seed=seed)
+                    record_indices: list[int] = []
                     for arm in (Arm.CONTROL, Arm.TREATMENT):
                         envelope = envelopes[arm]
                         outcome = outcomes[arm]
-                        handle = pair.for_arm(arm)
-                        if not envelope.degraded:
-                            pending_feedback.append(
-                                (
-                                    len(generation_records),
-                                    handle,
-                                    envelope,
-                                    task.query,
-                                    outcome.passed,
-                                    outcome.source,
-                                    (
-                                        f"{manifest.experiment_id}:{task.id}:g{generation}:"
-                                        f"r{repetition}:{outcome.source}"
-                                    ),
-                                )
-                            )
+                        record_indices.append(len(generation_records))
                         generation_records.append(
                             TrialRecord(
                                 task_id=task.id,
@@ -1040,31 +1029,62 @@ async def run_experiment(
                                 feedback_writes=0,
                             )
                         )
+                    # Derive one host-side candidate label set for the paired
+                    # trial, independent of either arm's task outcome. Only
+                    # registered candidates recalled by at least one arm are
+                    # eligible; unrelated memories never receive a global
+                    # reinforce signal. Apply this exact set to both journals.
+                    if not any(envelopes[arm].degraded for arm in (Arm.CONTROL, Arm.TREATMENT)):
+                        selected = {
+                            logical_id
+                            for arm in (Arm.CONTROL, Arm.TREATMENT)
+                            for logical_id in envelopes[arm].selected_logical_ids()
+                        }
+                        logical_memory_ids = tuple(
+                            logical_id
+                            for logical_id in task.candidate_memory_ids
+                            if logical_id in selected
+                        )
+                        if logical_memory_ids:
+                            pending_feedback.append(
+                                _PendingFeedback(
+                                    record_indices=(record_indices[0], record_indices[1]),
+                                    logical_memory_ids=logical_memory_ids,
+                                    query=task.query,
+                                    gold_memory_id=task.gold_memory_id,
+                                    verdict_reference=(
+                                        f"eval://{manifest.experiment_id}/{task.id}/"
+                                        f"g{generation}/r{repetition}"
+                                    ),
+                                )
+                            )
             # A generation is a clean policy snapshot: all tasks are scored before
             # any verified signal can alter the next generation's ranking.
-            for (
-                record_index,
-                handle,
-                envelope,
-                query,
-                helpful,
-                verdict_source,
-                note,
-            ) in pending_feedback:
-                writes = 0
-                for memory_id in envelope.feedback_memory_ids():
-                    await backend.record_verified_feedback(
-                        handle,
-                        memory_id=memory_id,
-                        query=query,
-                        helpful=helpful,
-                        verdict_source=verdict_source,
-                        note=note,
+            for signal in pending_feedback:
+                for arm, record_index in zip(
+                    (Arm.CONTROL, Arm.TREATMENT), signal.record_indices, strict=True
+                ):
+                    writes = 0
+                    for logical_memory_id in signal.logical_memory_ids:
+                        helpful = logical_memory_id == signal.gold_memory_id
+                        await backend.record_verified_feedback(
+                            pair.for_arm(arm),
+                            logical_memory_id=logical_memory_id,
+                            query=signal.query,
+                            helpful=helpful,
+                            verdict_source="objective_check",
+                            verdict_reference=(f"{signal.verdict_reference}/{logical_memory_id}"),
+                            experiment_id=manifest.experiment_id,
+                            note=(
+                                "fixed corpus gold candidate"
+                                if helpful
+                                else "fixed corpus non-gold candidate"
+                            ),
+                        )
+                        writes += 1
+                    generation_records[record_index] = replace(
+                        generation_records[record_index], feedback_writes=writes
                     )
-                    writes += 1
-                generation_records[record_index] = replace(
-                    generation_records[record_index], feedback_writes=writes
-                )
             records.extend(generation_records)
     finally:
         await backend.close(pair)

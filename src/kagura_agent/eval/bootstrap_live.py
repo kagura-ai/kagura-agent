@@ -107,19 +107,35 @@ _SEARCH_CONFIG_FIELDS = (
     "routing_mode",
 )
 
+_SEARCH_CONFIG_READ_ONLY_FIELDS = frozenset(
+    {
+        "context_id",
+        "embedding_model",
+        "embedding_dimensions",
+        "created_at",
+        "updated_at",
+    }
+)
+
 
 def _search_config_payload(raw: Mapping[str, Any], *, enabled: bool) -> dict[str, Any]:
     missing = [field for field in _SEARCH_CONFIG_FIELDS if field not in raw]
     if missing:
         raise ExperimentInvariantError(f"search config lacks required fields: {missing}")
-    payload = {field: raw[field] for field in _SEARCH_CONFIG_FIELDS}
+    # Preserve forward-compatible writable fields so teardown restores the exact
+    # pre-run policy even when memory-cloud grows beyond this client's known set.
+    payload = {
+        field: value for field, value in raw.items() if field not in _SEARCH_CONFIG_READ_ONLY_FIELDS
+    }
     payload["reinforce_enabled"] = enabled
     return payload
 
 
 def _comparable_search_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        field: raw.get(field) for field in _SEARCH_CONFIG_FIELDS if field != "reinforce_enabled"
+        field: value
+        for field, value in raw.items()
+        if field not in _SEARCH_CONFIG_READ_ONLY_FIELDS and field != "reinforce_enabled"
     }
 
 
@@ -198,6 +214,7 @@ class RestBootstrapBackend:
         self.host_feedback_path = host_feedback_path
         self._original_search_configs: dict[Arm, dict[str, Any]] = {}
         self._actual_to_logical: dict[Arm, dict[str, str]] = {}
+        self._logical_to_actual: dict[Arm, dict[str, str]] = {}
 
     async def prepare(self, manifest: ExperimentManifest, snapshot: BootstrapSnapshot) -> ArmPair:
         expected_provenance = "host" if self.feedback_mode == "host" else "agent"
@@ -230,11 +247,24 @@ class RestBootstrapBackend:
                 )
             records = exported["memories"]
             assert isinstance(records, list)
-            self._actual_to_logical[arm] = {
-                str(record["id"]): _memory_logical_id(record)
-                for record in records
-                if isinstance(record, dict) and record.get("id") is not None
-            }
+            actual_to_logical: dict[str, str] = {}
+            logical_to_actual: dict[str, str] = {}
+            for record in records:
+                assert isinstance(record, dict)
+                actual_id = record.get("id")
+                if not isinstance(actual_id, str) or not actual_id:
+                    raise ExperimentInvariantError(
+                        f"{arm.value} context export has a memory without a stable id"
+                    )
+                logical_id = _memory_logical_id(record)
+                if actual_id in actual_to_logical or logical_id in logical_to_actual:
+                    raise ExperimentInvariantError(
+                        f"{arm.value} context export has an ambiguous memory identity"
+                    )
+                actual_to_logical[actual_id] = logical_id
+                logical_to_actual[logical_id] = actual_id
+            self._actual_to_logical[arm] = actual_to_logical
+            self._logical_to_actual[arm] = logical_to_actual
         paths = {
             arm: f"/api/v1/contexts/{pair.for_arm(arm).context_id}/search-config"
             for arm in (Arm.CONTROL, Arm.TREATMENT)
@@ -252,14 +282,14 @@ class RestBootstrapBackend:
                     f"{arm.value} search config resolved outside its isolated context"
                 )
             _search_config_payload(config, enabled=arm is Arm.TREATMENT)
-        if _comparable_search_config(configs[0]) != _comparable_search_config(configs[1]):
-            raise ExperimentInvariantError("A/B search configs differ outside reinforce_enabled")
-        if self.feedback_mode == "host" and not bool(
-            configs[1].get("reinforce_require_host_arbitration")
+        if self.feedback_mode == "host" and any(
+            not bool(config.get("reinforce_require_host_arbitration")) for config in configs
         ):
             raise ExperimentInvariantError(
                 "host feedback experiment requires host arbitration in both contexts"
             )
+        if _comparable_search_config(configs[0]) != _comparable_search_config(configs[1]):
+            raise ExperimentInvariantError("A/B search configs differ outside reinforce_enabled")
         self._original_search_configs = {
             Arm.CONTROL: dict(configs[0]),
             Arm.TREATMENT: dict(configs[1]),
@@ -341,12 +371,19 @@ class RestBootstrapBackend:
         self,
         handle: ArmHandle,
         *,
-        memory_id: str,
+        logical_memory_id: str,
         query: str,
         helpful: bool,
         verdict_source: VerifiedSource,
+        verdict_reference: str,
+        experiment_id: str,
         note: str,
     ) -> None:
+        memory_id = self._logical_to_actual.get(handle.arm, {}).get(logical_memory_id)
+        if memory_id is None:
+            raise ExperimentInvariantError(
+                f"{handle.arm.value} feedback target is outside the registered snapshot"
+            )
         body: dict[str, Any] = {
             "memory_id": memory_id,
             "helpful": helpful,
@@ -359,6 +396,8 @@ class RestBootstrapBackend:
                 agent_id=handle.agent_id, context_id=handle.context_id
             )
             body["verdict_source"] = verdict_source
+            body["verdict_reference"] = verdict_reference
+            body["experiment_id"] = experiment_id
         else:
             path = f"/api/v1/contexts/{handle.context_id}/feedback"
         await self._request("POST", path, body)

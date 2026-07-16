@@ -11,8 +11,12 @@ path. There is deliberately no legacy `recall()` arm.
 - Every search-config field matches except `reinforce_enabled`.
 - Context guide, pinned, upcoming, state, and policy components match for every
   paired trial; only recall ordering may differ.
-- Both arms receive independently checked feedback. A degraded bootstrap is
-  reported but never reinforced.
+- Both arms receive the same independently checked candidate labels. For each
+  paired trial, the host takes the union of registered task candidates recalled
+  by either arm, labels the fixed gold candidate helpful and the fixed decoy
+  unhelpful, then writes that identical stream to both journals. Arm-specific
+  task success never becomes a training-signal difference, unrelated recalled
+  memories are never rated, and a degraded pair is never reinforced.
 - Every generation is evaluated as a frozen batch; verified feedback is applied
   only after all tasks in that generation finish, so task order cannot change
   the measured policy within a generation.
@@ -51,7 +55,8 @@ cloned rows whose database UUIDs differ.
 3. Give both contexts identical search settings and host arbitration posture.
    The runner temporarily sets `reinforce_enabled=false` for control and `true`
    for treatment, then restores both settings in `finally`.
-4. Provide an operator-only host-feedback endpoint in `host_feedback_path`.
+4. Provide the operator-only host-feedback endpoint in `host_feedback_path`
+   (`/api/v1/contexts/{context_id}/host-feedback` for memory-cloud #1305).
    The current public memory-cloud feedback route stamps provenance as `agent`;
    it may be used with `feedback_mode=public` and
    `feedback_provenance=agent` for diagnostics, but such a run is structurally

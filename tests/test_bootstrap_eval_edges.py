@@ -445,22 +445,28 @@ async def test_live_backend_bootstrap_and_host_feedback_use_isolated_identity() 
     )
     handle = ab.ArmHandle(ab.Arm.CONTROL, "agent-a", "context-a", "sha256:x", "journal-a", False)
     backend._actual_to_logical[ab.Arm.CONTROL] = {"actual-1": "logical-1"}
+    backend._logical_to_actual[ab.Arm.CONTROL] = {"logical-1": "actual-1"}
     task = ab.load_default_tasks()[0]
     envelope = await backend.bootstrap(handle, task, session_id="session", recall_k=3)
     assert envelope.agent_id == "agent-a"
     assert envelope.selection_probabilities() == {"logical-1": 0.5}
     await backend.record_verified_feedback(
         handle,
-        memory_id="memory",
+        logical_memory_id="logical-1",
         query="query",
         helpful=True,
-        verdict_source="host_check",
+        verdict_source="trusted_host_check",
+        verdict_reference="eval://experiment/task/g0/r0/logical-1",
+        experiment_id="experiment",
         note="verified",
     )
     assert calls[0][1] == "/api/v1/agents/agent-a/bootstrap"
     assert calls[0][2]["context_id"] == "context-a"
     assert calls[1][1] == "/operator/agent-a/context-a/feedback"
-    assert calls[1][2]["verdict_source"] == "host_check"
+    assert calls[1][2]["memory_id"] == "actual-1"
+    assert calls[1][2]["verdict_source"] == "trusted_host_check"
+    assert calls[1][2]["verdict_reference"] == "eval://experiment/task/g0/r0/logical-1"
+    assert calls[1][2]["experiment_id"] == "experiment"
 
 
 @pytest.mark.asyncio

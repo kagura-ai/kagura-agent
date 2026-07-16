@@ -197,14 +197,16 @@ class _Backend:
         self,
         handle: ArmHandle,
         *,
-        memory_id: str,
+        logical_memory_id: str,
         query: str,
         helpful: bool,
         verdict_source: str,
+        verdict_reference: str,
+        experiment_id: str,
         note: str,
     ) -> None:
-        del query, note
-        self.feedback.append((handle.arm.value, memory_id, helpful, verdict_source))
+        del query, verdict_reference, experiment_id, note
+        self.feedback.append((handle.arm.value, logical_memory_id, helpful, verdict_source))
         self.feedback_at_bootstrap_counts.append(self.bootstrap_calls)
 
     async def close(self, pair: ArmPair) -> None:
@@ -291,6 +293,18 @@ async def test_runner_reports_task_level_ci_long_horizon_metrics_and_green_gate(
         Arm.TREATMENT.value,
     }
     assert all(source == "objective_check" for _a, _m, _h, source in backend.feedback)
+    by_arm = {
+        arm: [
+            (memory_id, helpful, source)
+            for a, memory_id, helpful, source in backend.feedback
+            if a == arm
+        ]
+        for arm in (Arm.CONTROL.value, Arm.TREATMENT.value)
+    }
+    assert by_arm[Arm.CONTROL.value] == by_arm[Arm.TREATMENT.value]
+    assert sum(helpful for _memory_id, helpful, _source in by_arm[Arm.CONTROL.value]) == 90
+    assert sum(not helpful for _memory_id, helpful, _source in by_arm[Arm.CONTROL.value]) == 90
+    assert all(record.feedback_writes == 2 for record in result.trials)
     assert set(backend.feedback_at_bootstrap_counts) == {60, 120, 180}
     assert backend.closed is True
     assert result.schema_version == 2
@@ -406,8 +420,8 @@ async def test_live_adapter_proves_snapshot_pins_only_actuator_and_restores_conf
     treatment = LiveArmConfig("agent-t", "context-t", "journal-t")
     calls: list[tuple[str, str, dict[str, Any] | None]] = []
     configs = {
-        "context-c": _search_config(enabled=True),
-        "context-t": _search_config(enabled=False),
+        "context-c": {**_search_config(enabled=True), "future_ranking_knob": "preserve-me"},
+        "context-t": {**_search_config(enabled=False), "future_ranking_knob": "preserve-me"},
     }
 
     async def request(method: str, path: str, body: dict[str, Any] | None) -> dict[str, Any]:
@@ -438,26 +452,67 @@ async def test_live_adapter_proves_snapshot_pins_only_actuator_and_restores_conf
     assert configs["context-t"]["reinforce_enabled"] is True
     await backend.record_verified_feedback(
         pair.control,
-        memory_id="memory-c",
+        logical_memory_id=snapshot.memories[0].logical_id,
         query="query",
         helpful=True,
         verdict_source="objective_check",
+        verdict_reference="eval://experiment/task/g0/r0/memory-c",
+        experiment_id="experiment",
         note="verified",
     )
     await backend.record_verified_feedback(
         pair.treatment,
-        memory_id="memory-t",
+        logical_memory_id=snapshot.memories[0].logical_id,
         query="query",
         helpful=False,
         verdict_source="objective_check",
+        verdict_reference="eval://experiment/task/g0/r0/memory-t",
+        experiment_id="experiment",
         note="verified",
     )
     await backend.close(pair)
 
     assert configs["context-c"]["reinforce_enabled"] is True
     assert configs["context-t"]["reinforce_enabled"] is False
+    assert configs["context-c"]["future_ranking_knob"] == "preserve-me"
+    assert configs["context-t"]["future_ranking_knob"] == "preserve-me"
     assert any(path.endswith("context-c/feedback") for _method, path, _body in calls)
     assert any(path.endswith("context-t/feedback") for _method, path, _body in calls)
+
+
+@pytest.mark.asyncio
+async def test_live_host_mode_requires_arbitration_in_both_contexts() -> None:
+    snapshot = load_default_snapshot()
+    manifest = _manifest(snapshot)
+    configs = {
+        "context-c": {
+            **_search_config(enabled=False),
+            "reinforce_require_host_arbitration": False,
+        },
+        "context-t": {
+            **_search_config(enabled=True),
+            "reinforce_require_host_arbitration": True,
+        },
+    }
+
+    async def request(method: str, path: str, body: dict[str, Any] | None) -> dict[str, Any]:
+        del body
+        context_id = "context-c" if "context-c" in path else "context-t"
+        if path.endswith("/export"):
+            return _export(snapshot, context_id=context_id)
+        if path.endswith("/search-config") and method == "GET":
+            return dict(configs[context_id])
+        raise AssertionError((method, path))
+
+    backend = RestBootstrapBackend(
+        request=request,
+        control=LiveArmConfig("agent-c", "context-c", "journal-c"),
+        treatment=LiveArmConfig("agent-t", "context-t", "journal-t"),
+        feedback_mode="host",
+        host_feedback_path="/api/v1/contexts/{context_id}/host-feedback",
+    )
+    with pytest.raises(ExperimentInvariantError, match="both contexts"):
+        await backend.prepare(manifest, snapshot)
 
 
 @pytest.mark.asyncio

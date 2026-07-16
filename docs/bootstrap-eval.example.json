@@ -29,7 +29,7 @@
     "base_url": "https://memory.kagura-ai.com",
     "timeout": 30,
     "feedback_mode": "host",
-    "host_feedback_path": "/operator/v1/agents/{agent_id}/contexts/{context_id}/feedback",
+    "host_feedback_path": "/api/v1/contexts/{context_id}/host-feedback",
     "control": {
       "agent_id": "control-agent-uuid",
       "context_id": "control-context-uuid",
