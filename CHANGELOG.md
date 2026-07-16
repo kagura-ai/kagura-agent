@@ -7,6 +7,44 @@ the [README implementation-status table](README.md#implementation-status-v01v07-
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-16
+
+This release adds the trusted-host one-call bootstrap path and the fail-closed outcome A/B
+gate needed to evaluate feedback-influenced ranking. The ranking actuator remains
+**default-OFF**; this release provides the production seam and evidence machinery, not an
+unproven default flip.
+
+### Added
+
+- **One-call cloud bootstrap** — `MemoryClient.get_agent_bootstrap()` with Local/SQLite
+  parity, plus a trusted-host REST adapter backed by `AgentsClient.bootstrap()`. Continuity
+  and cockpit flows now consume the same bootstrap seam while ordinary memory I/O stays on
+  MCP (#187, #190).
+- **Bootstrap ranking A/B gate** — a fixed 30-task / 35-memory corpus, isolated control and
+  treatment contexts, task-level paired confidence intervals, propensity evidence,
+  long-horizon tail/held-out safety checks, a credential-isolated actor adapter, and the
+  `kagura-agent-bootstrap-eval` CLI (#188, #189).
+- **Cloud memory extra** — `pip install 'kagura-agent[memory]'` installs the SDK and MCP
+  dependencies required by the trusted-host bootstrap path (#187, #190).
+
+### Fixed
+
+- Credential setup no longer includes pasted secret values in rejection messages, and all
+  fail-closed provisioning errors now surface as a clean exit-2 error rather than a raw
+  traceback (#185).
+- Provider TOML updates correctly preserve quoted section names containing `]` and raw
+  Unicode line-separator characters inside values (#185).
+
+### Changed
+
+- README now uses the official Kagura AI horizontal logo banner (#184).
+
+### Security
+
+- Bootstrap envelopes strictly validate trusted memory identity/text, propagate task
+  cancellation, sanitize upstream failures, and keep actor subprocesses isolated from
+  memory credentials (#187, #188, #189, #190).
+
 ## [0.6.0] - 2026-06-21
 
 The forge-resistant self-improve loop (milestone v0.8). A host-arbitrated verified outcome
@@ -98,6 +136,8 @@ First public release — Apache-2.0, on PyPI. The implemented skeleton of milest
   and `NOTICE` (#95, #150); and the community-health files — `CONTRIBUTING.md` (DCO),
   `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue/PR templates, and Dependabot (#97).
 
-[Unreleased]: https://github.com/kagura-ai/kagura-agent/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/kagura-ai/kagura-agent/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/kagura-ai/kagura-agent/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/kagura-ai/kagura-agent/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/kagura-ai/kagura-agent/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/kagura-ai/kagura-agent/releases/tag/v0.5.0
