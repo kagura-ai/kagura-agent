@@ -23,6 +23,8 @@
   "repetitions": 3,
   "primary_generation": -1,
   "recall_k": 5,
+  "exploration_floor": 0.01,
+  "candidate_pool_k": 100,
   "seed": 188,
   "feedback_provenance": "host",
   "memory_cloud": {

@@ -46,6 +46,31 @@ def _envelope() -> dict[str, Any]:
     }
 
 
+def _selection_policy(*, seed: int = 188, reinforce_enabled: bool = False) -> dict[str, Any]:
+    return {
+        "name": "deterministic_uniform_mixture_v1",
+        "version": 1,
+        "evaluation_seed": seed,
+        "replay_identity": f"bootstrap-recall-v1:{seed}",
+        "exploration_floor": 0.01,
+        "uniform_mixture_probability": 0.5,
+        "candidate_pool_k": 100,
+        "eligible_count": 50,
+        "selected_count": 5,
+        "minimum_selection_probability": 0.01,
+        "ranking_policy": {
+            "name": "production_hybrid_recall_v1",
+            "search_mode": "hybrid",
+            "use_rerank": False,
+            "reinforce_enabled": reinforce_enabled,
+            "reinforce_require_host_arbitration": True,
+            "graph_boost_enabled": False,
+            "graph_boost_max": 0.15,
+            "trust_filter": "trusted",
+        },
+    }
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -113,6 +138,63 @@ def test_bootstrap_envelope_uses_context_fallback_and_record_probabilities() -> 
 
     raw["components"]["recall"]["results"][0]["selection_probability"] = False
     assert ab.BootstrapEnvelope(raw).selection_probabilities() is None
+
+
+def test_selection_policy_must_match_registered_seed_floor_pool_and_arm() -> None:
+    raw = _envelope()
+    raw["components"]["recall"]["selection_policy"] = _selection_policy()
+    envelope = ab.BootstrapEnvelope(raw)
+    manifest = ab.ExperimentManifest(
+        experiment_id="policy",
+        snapshot_fingerprint="sha256:x",
+        versions=ab.VersionStamp("code", "model", "actor", "api", "rank"),
+        generations=2,
+        repetitions=1,
+    )
+    handle = ab.ArmHandle(ab.Arm.CONTROL, "a", "c", "sha256:x", "j", False)
+
+    validated = ab._validated_selection_policy(envelope, handle, manifest, seed=188)
+    assert validated is not None
+    selector, ranking = validated
+    assert selector["exploration_floor"] == 0.01
+    assert "reinforce_enabled" not in ranking
+
+    raw["components"]["recall"]["selection_policy"] = _selection_policy(seed=189)
+    with pytest.raises(ab.ExperimentInvariantError, match="seed"):
+        ab._validated_selection_policy(ab.BootstrapEnvelope(raw), handle, manifest, seed=188)
+
+
+def test_failed_recall_must_not_claim_positivity_evidence() -> None:
+    raw = _envelope()
+    raw["degraded"] = True
+    recall = raw["components"]["recall"]
+    recall["status"] = "error"
+    recall["selection_policy"] = _selection_policy()
+    manifest = ab.ExperimentManifest(
+        experiment_id="failed-policy",
+        snapshot_fingerprint="sha256:x",
+        versions=ab.VersionStamp("code", "model", "actor", "api", "rank"),
+        generations=2,
+        repetitions=1,
+    )
+    handle = ab.ArmHandle(ab.Arm.CONTROL, "a", "c", "sha256:x", "j", False)
+
+    with pytest.raises(ab.ExperimentInvariantError, match="must not claim"):
+        ab._validated_selection_policy(ab.BootstrapEnvelope(raw), handle, manifest, seed=188)
+
+
+def test_manifest_rejects_an_infeasible_registered_floor() -> None:
+    with pytest.raises(ValueError, match="recall_k/candidate_pool_k"):
+        ab.ExperimentManifest(
+            experiment_id="floor",
+            snapshot_fingerprint="sha256:x",
+            versions=ab.VersionStamp("code", "model", "actor", "api", "rank"),
+            generations=2,
+            repetitions=1,
+            recall_k=2,
+            candidate_pool_k=100,
+            exploration_floor=0.03,
+        )
 
 
 def test_low_level_memory_record_validation_fails_closed() -> None:
@@ -447,7 +529,15 @@ async def test_live_backend_bootstrap_and_host_feedback_use_isolated_identity() 
     backend._actual_to_logical[ab.Arm.CONTROL] = {"actual-1": "logical-1"}
     backend._logical_to_actual[ab.Arm.CONTROL] = {"logical-1": "actual-1"}
     task = ab.load_default_tasks()[0]
-    envelope = await backend.bootstrap(handle, task, session_id="session", recall_k=3)
+    envelope = await backend.bootstrap(
+        handle,
+        task,
+        session_id="session",
+        recall_k=3,
+        evaluation_seed=188,
+        exploration_floor=0.01,
+        candidate_pool_k=100,
+    )
     assert envelope.agent_id == "agent-a"
     assert envelope.selection_probabilities() == {"logical-1": 0.5}
     await backend.record_verified_feedback(
@@ -462,6 +552,11 @@ async def test_live_backend_bootstrap_and_host_feedback_use_isolated_identity() 
     )
     assert calls[0][1] == "/api/v1/agents/agent-a/bootstrap"
     assert calls[0][2]["context_id"] == "context-a"
+    assert calls[0][2]["recall_evaluation"] == {
+        "seed": 188,
+        "exploration_floor": 0.01,
+        "candidate_pool_k": 100,
+    }
     assert calls[1][1] == "/operator/agent-a/context-a/feedback"
     assert calls[1][2]["memory_id"] == "actual-1"
     assert calls[1][2]["verdict_source"] == "trusted_host_check"
@@ -524,4 +619,6 @@ def test_result_json_contains_manifest_and_arm_bindings() -> None:
 
     payload = json.loads(result.to_json())
     assert payload["manifest"]["seed"] == 188
+    assert payload["manifest"]["exploration_floor"] == 0.01
+    assert payload["manifest"]["candidate_pool_k"] == 100
     assert payload["arms"]["control"]["context_id"] == "c-c"

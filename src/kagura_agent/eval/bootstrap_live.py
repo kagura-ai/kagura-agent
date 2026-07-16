@@ -342,6 +342,9 @@ class RestBootstrapBackend:
         *,
         session_id: str,
         recall_k: int,
+        evaluation_seed: int,
+        exploration_floor: float,
+        candidate_pool_k: int,
     ) -> BootstrapEnvelope:
         raw = await self._request(
             "POST",
@@ -351,6 +354,11 @@ class RestBootstrapBackend:
                 "session_id": session_id,
                 "query": task.query,
                 "recall_k": recall_k,
+                "recall_evaluation": {
+                    "seed": evaluation_seed,
+                    "exploration_floor": exploration_floor,
+                    "candidate_pool_k": candidate_pool_k,
+                },
                 "include": ["pinned", "recall", "upcoming", "state", "policy"],
             },
         )

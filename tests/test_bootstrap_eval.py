@@ -126,8 +126,10 @@ class _Backend:
         *,
         session_id: str,
         recall_k: int,
+        evaluation_seed: int,
+        exploration_floor: float,
+        candidate_pool_k: int,
     ) -> BootstrapEnvelope:
-        del recall_k
         self.bootstrap_calls += 1
         assert self._snapshot is not None
         by_id = {memory.logical_id: memory for memory in self._snapshot.memories}
@@ -162,10 +164,33 @@ class _Backend:
             "results": [record(memory) for memory in ordered],
             "trust_filter": "trusted",
         }
-        if not self.missing_probabilities:
+        if not self.degraded:
+            recall["selection_policy"] = {
+                "name": "deterministic_top_k_v1",
+                "version": 1,
+                "evaluation_seed": evaluation_seed,
+                "replay_identity": f"bootstrap-recall-v1:{evaluation_seed}",
+                "exploration_floor": exploration_floor,
+                "uniform_mixture_probability": 0.0,
+                "candidate_pool_k": candidate_pool_k,
+                "eligible_count": 2,
+                "selected_count": min(recall_k, 2),
+                "minimum_selection_probability": 1.0,
+                "ranking_policy": {
+                    "name": "production_hybrid_recall_v1",
+                    "search_mode": "hybrid",
+                    "use_rerank": False,
+                    "reinforce_enabled": handle.feedback_influence,
+                    "reinforce_require_host_arbitration": True,
+                    "graph_boost_enabled": False,
+                    "graph_boost_max": 0.15,
+                    "trust_filter": "trusted",
+                },
+            }
+        if not self.degraded and not self.missing_probabilities:
             recall["selection_probabilities"] = {
-                gold.logical_id: 0.55,
-                decoy.logical_id: 0.45,
+                gold.logical_id: 1.0,
+                decoy.logical_id: 1.0,
             }
         state_value = "changed" if self.mismatch_state and handle.arm is Arm.TREATMENT else "same"
         return BootstrapEnvelope(
@@ -286,7 +311,7 @@ async def test_runner_reports_task_level_ci_long_horizon_metrics_and_green_gate(
     assert result.gate.goodhart_detected is False
     assert len(result.generations) == 6
     assert all(metric.degraded_rate == 0.0 for metric in result.generations)
-    assert all(metric.minimum_declared_probability == 0.45 for metric in result.generations)
+    assert all(metric.minimum_declared_probability == 1.0 for metric in result.generations)
     # Both arms receive the same host-verified feedback stream; only ranking influence differs.
     assert {arm for arm, _memory, _helpful, _source in backend.feedback} == {
         Arm.CONTROL.value,

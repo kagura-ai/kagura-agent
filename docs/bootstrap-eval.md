@@ -62,9 +62,12 @@ cloned rows whose database UUIDs differ.
    `feedback_provenance=agent` for diagnostics, but such a run is structurally
    blocked from authorizing default-ON. The upstream transport dependency is
    [memory-cloud#1305](https://github.com/kagura-ai/memory-cloud/issues/1305).
-   Truthful per-candidate propensity/exploration-floor evidence is tracked in
+   Truthful per-candidate propensity/exploration-floor evidence is provided by
    [memory-cloud#1306](https://github.com/kagura-ai/memory-cloud/issues/1306);
-   missing evidence also blocks the gate.
+   missing or incomplete evidence blocks the gate. The registered
+   `exploration_floor` and `candidate_pool_k` are sent with the same per-trial
+   deterministic seed to both arms; the runner verifies the response policy
+   stamps and permits only `reinforce_enabled` to differ.
 5. Use an actor adapter that reads one JSON object from stdin and writes only the
    answer text to stdout. Its input contains `task`, `bootstrap_context`, and a
    deterministic `seed`; it never contains the gold check. The runner strips

@@ -140,6 +140,8 @@ async def _run(config: Mapping[str, Any]) -> tuple[str, bool]:
         generations=_integer(config.get("generations", 5), field="generations"),
         repetitions=_integer(config.get("repetitions", 3), field="repetitions"),
         recall_k=_integer(config.get("recall_k", 5), field="recall_k"),
+        exploration_floor=_number(config.get("exploration_floor", 0.01), field="exploration_floor"),
+        candidate_pool_k=_integer(config.get("candidate_pool_k", 100), field="candidate_pool_k"),
         seed=_integer(config.get("seed", 188), field="seed"),
         primary_generation=_integer(
             config.get("primary_generation", -1), field="primary_generation"

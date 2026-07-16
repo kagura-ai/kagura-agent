@@ -282,6 +282,8 @@ class ExperimentManifest:
     generations: int = 5
     repetitions: int = 3
     recall_k: int = 5
+    exploration_floor: float = 0.01
+    candidate_pool_k: int = 100
     seed: int = 188
     primary_generation: int = -1
     feedback_provenance: Literal["host", "agent"] = "host"
@@ -297,6 +299,17 @@ class ExperimentManifest:
             raise ValueError("repetitions must be positive")
         if not 1 <= self.recall_k <= 100:
             raise ValueError("recall_k must be in [1, 100]")
+        if not self.recall_k <= self.candidate_pool_k <= 100:
+            raise ValueError("candidate_pool_k must be in [recall_k, 100]")
+        maximum_registered_floor = self.recall_k / self.candidate_pool_k
+        if (
+            not math.isfinite(self.exploration_floor)
+            or not 0.0 <= self.exploration_floor <= maximum_registered_floor
+        ):
+            raise ValueError(
+                "exploration_floor must be finite and in "
+                f"[0, recall_k/candidate_pool_k={maximum_registered_floor:g}]"
+            )
         if self.primary_generation != -1 and not 0 <= self.primary_generation < self.generations:
             raise ValueError("primary_generation must be -1 (last) or a valid generation")
         if self.feedback_provenance not in ("host", "agent"):
@@ -529,6 +542,10 @@ class BootstrapEnvelope:
             out[_memory_logical_id(record)] = probability
         return out
 
+    def selection_policy(self) -> dict[str, Any] | None:
+        policy = self.components["recall"].get("selection_policy")
+        return dict(policy) if isinstance(policy, dict) else None
+
     def non_ranking_payload(self) -> dict[str, object]:
         """Canonical bootstrap data that must be identical between cloned arms."""
         context = self.raw.get("context")
@@ -634,6 +651,9 @@ class BootstrapExperimentBackend(Protocol):
         *,
         session_id: str,
         recall_k: int,
+        evaluation_seed: int,
+        exploration_floor: float,
+        candidate_pool_k: int,
     ) -> BootstrapEnvelope: ...
 
     async def record_verified_feedback(
@@ -668,6 +688,7 @@ class TrialRecord:
     component_failures: tuple[str, ...]
     selected_memory_ids: tuple[str, ...]
     declared_probabilities: dict[str, float] | None
+    selection_policy: dict[str, Any] | None
     feedback_writes: int
 
 
@@ -944,6 +965,49 @@ def _gate(
     )
 
 
+def _validated_selection_policy(
+    envelope: BootstrapEnvelope,
+    handle: ArmHandle,
+    manifest: ExperimentManifest,
+    *,
+    seed: int,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Verify the server replay stamp and isolate the one allowed arm delta."""
+    policy = envelope.selection_policy()
+    if envelope.components["recall"].get("status") != "ok":
+        if policy is not None or envelope.selection_probabilities() is not None:
+            raise ExperimentInvariantError(
+                "failed bootstrap recall must not claim selection evidence"
+            )
+        return None
+    if policy is None:
+        raise ExperimentInvariantError("bootstrap recall has no selection-policy stamp")
+    if policy.get("evaluation_seed") != seed:
+        raise ExperimentInvariantError("bootstrap recall selection seed does not match the trial")
+    floor = policy.get("exploration_floor")
+    if (
+        isinstance(floor, bool)
+        or not isinstance(floor, (int, float))
+        or not math.isfinite(float(floor))
+        or not math.isclose(float(floor), manifest.exploration_floor, abs_tol=1e-12)
+    ):
+        raise ExperimentInvariantError("bootstrap recall exploration floor is not registered")
+    if policy.get("candidate_pool_k") != manifest.candidate_pool_k:
+        raise ExperimentInvariantError("bootstrap recall candidate pool is not registered")
+
+    ranking = policy.get("ranking_policy")
+    if not isinstance(ranking, dict):
+        raise ExperimentInvariantError("bootstrap recall has no ranking-policy stamp")
+    if ranking.get("reinforce_enabled") is not handle.feedback_influence:
+        raise ExperimentInvariantError(
+            f"{handle.arm.value} ranking stamp disagrees with feedback influence"
+        )
+
+    selector = {key: value for key, value in policy.items() if key != "ranking_policy"}
+    common_ranking = {key: value for key, value in ranking.items() if key != "reinforce_enabled"}
+    return selector, common_ranking
+
+
 async def run_experiment(
     manifest: ExperimentManifest,
     snapshot: BootstrapSnapshot,
@@ -980,6 +1044,9 @@ async def run_experiment(
                             task,
                             session_id=session_id,
                             recall_k=manifest.recall_k,
+                            evaluation_seed=seed,
+                            exploration_floor=manifest.exploration_floor,
+                            candidate_pool_k=manifest.candidate_pool_k,
                         )
                         if (
                             envelope.agent_id != handle.agent_id
@@ -989,6 +1056,24 @@ async def run_experiment(
                                 f"{arm.value} bootstrap resolved outside its isolated agent/context"
                             )
                         envelopes[arm] = envelope
+                    selection_contracts = {
+                        arm: _validated_selection_policy(
+                            envelopes[arm], pair.for_arm(arm), manifest, seed=seed
+                        )
+                        for arm in (Arm.CONTROL, Arm.TREATMENT)
+                    }
+                    comparable_contracts = [
+                        contract
+                        for contract in selection_contracts.values()
+                        if contract is not None
+                    ]
+                    if len(comparable_contracts) == 2 and (
+                        comparable_contracts[0] != comparable_contracts[1]
+                    ):
+                        raise ExperimentInvariantError(
+                            "bootstrap arms use different selection or ranking policies "
+                            "outside reinforce_enabled"
+                        )
                     if (
                         envelopes[Arm.CONTROL].non_ranking_fingerprint()
                         != envelopes[Arm.TREATMENT].non_ranking_fingerprint()
@@ -1026,6 +1111,7 @@ async def run_experiment(
                                 component_failures=envelope.component_failures(),
                                 selected_memory_ids=envelope.selected_logical_ids(),
                                 declared_probabilities=envelope.selection_probabilities(),
+                                selection_policy=envelope.selection_policy(),
                                 feedback_writes=0,
                             )
                         )
