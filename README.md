@@ -819,6 +819,15 @@ that depends on it" call.
 
 ---
 
+## Bootstrap ranking evaluation
+
+The outcome-level gate for feedback-influenced bootstrap ranking is documented
+in [docs/bootstrap-eval.md](docs/bootstrap-eval.md). It uses a committed fixed
+corpus, isolated memory-cloud contexts, and a task-level paired confidence
+interval; retrieval-only lift cannot authorize a default change.
+
+---
+
 ## Repository layout
 
 The structure the design above maps onto — **as built** (v0.1–v0.7):
@@ -829,6 +838,7 @@ kagura-agent/
 ├── docs/
 │   ├── operations.md               # incident runbook (hijack / key rotation, cred lifecycle)
 │   ├── extending.md                # new API hands (custom MCP / egress / cred + secret backend)
+│   ├── bootstrap-eval.md           # #188 outcome A/B + long-horizon ranking safety gate
 │   ├── legal.md                    # ToS + self-responsibility posture
 │   └── architecture.svg            # architecture diagram
 ├── pyproject.toml                  # extras: claude · brain · slack · discord · aws/gcp/github/cloudflare · keyring

@@ -58,6 +58,7 @@ dev = [
 
 [project.scripts]
 kagura-agent = "kagura_agent.cli.main:main"
+kagura-agent-bootstrap-eval = "kagura_agent.eval.bootstrap_cli:main"
 
 [build-system]
 requires = ["hatchling"]
