@@ -20,9 +20,9 @@ cockpit wrap it. Driven from a CLI: `run` / `repl` / `serve` / `doctor` / `setup
 > [PyPI](https://pypi.org/project/kagura-agent/)._
 
 **Status — implemented skeleton, runnable.** The pure-Python core of every design
-milestone (v0.1–v0.7; package version `0.6.0`) — brain seam, security membrane, credential
+milestone (v0.1–v0.7; package version `0.7.0`) — brain seam, security membrane, credential
 leasing, cockpit + HITL, capability graduation, egress-sealed brain-in-container — is built
-and tested (50 test modules, `mypy --strict`, ≥95% coverage). The infrastructure edges
+and tested (57 test modules, `mypy --strict`, ≥95% coverage). The infrastructure edges
 (real Docker, cloud STS/Cloudflare, the Slack/Discord/SDK clients) sit behind protocol
 seams. **Everything below the Quickstart is the canonical design document** — architecture,
 the security membrane, capability graduation, and the per-milestone
