@@ -594,28 +594,34 @@ def test_make_memory_client_blank_db_env_is_in_memory() -> None:
 
 
 _MEMORY_CTX_UUID = "550e8400-e29b-41d4-a716-446655440000"
+_MEMORY_AGENT_UUID = "550e8400-e29b-41d4-a716-446655440001"
 _MCP_ENV = {
+    "KAGURA_AGENT_ID": _MEMORY_AGENT_UUID,
     "KAGURA_AGENT_MEMORY_MCP_CONTEXT": _MEMORY_CTX_UUID,
+    "KAGURA_AGENT_MEMORY_API_KEY": "agent-member-key",
     "KAGURA_AGENT_MEMORY_MCP_SERVER": "kagura-memory-mcp",
 }
 
 
 def test_make_memory_client_uses_mcp_cloud_when_context_configured() -> None:
-    # #111: KAGURA_AGENT_MEMORY_MCP_CONTEXT (a valid UUID) + server → the trust-aware
-    # MCP cloud backbone, the strongest tier. Construction is lazy (no mcp SDK / no
-    # connection here), so this just asserts the selection.
+    # #187: memory I/O stays on MCP, but the returned full client routes bootstrap
+    # through trusted-host REST with an agent-bound key.
     from kagura_agent.mcp.mcp_memory import McpMemoryClient
+    from kagura_agent.mcp.rest_bootstrap import RestBootstrapMemoryClient
 
-    assert isinstance(make_memory_client(env=dict(_MCP_ENV)), McpMemoryClient)
+    client = make_memory_client(env=dict(_MCP_ENV))
+    assert isinstance(client, RestBootstrapMemoryClient)
+    assert client._agent_id == _MEMORY_AGENT_UUID
+    assert isinstance(client._inner, McpMemoryClient)
 
 
 def test_make_memory_client_mcp_cloud_outranks_sqlite(tmp_path) -> None:
     # Strongest configured wins: with BOTH the cloud context and a DB path set, the
     # MCP cloud tier is chosen.
-    from kagura_agent.mcp.mcp_memory import McpMemoryClient
+    from kagura_agent.mcp.rest_bootstrap import RestBootstrapMemoryClient
 
     client = make_memory_client(env={**_MCP_ENV, "KAGURA_AGENT_MEMORY_DB": str(tmp_path / "m.db")})
-    assert isinstance(client, McpMemoryClient)
+    assert isinstance(client, RestBootstrapMemoryClient)
 
 
 def test_make_memory_client_fails_closed_on_malformed_mcp_context() -> None:
@@ -623,6 +629,49 @@ def test_make_memory_client_fails_closed_on_malformed_mcp_context() -> None:
     # back to a weaker tier and drop the trust-aware backbone the operator asked for.
     with pytest.raises(RuntimeError, match="not a valid context UUID"):
         make_memory_client(env={"KAGURA_AGENT_MEMORY_MCP_CONTEXT": "not-a-uuid"})
+
+
+def test_make_memory_client_requires_valid_agent_identity_for_cloud() -> None:
+    without_agent = {
+        "KAGURA_AGENT_MEMORY_MCP_CONTEXT": _MEMORY_CTX_UUID,
+        "KAGURA_AGENT_MEMORY_MCP_SERVER": "kagura-memory-mcp",
+    }
+    with pytest.raises(RuntimeError, match="KAGURA_AGENT_ID is not"):
+        make_memory_client(env=without_agent)
+    with pytest.raises(RuntimeError, match="not a valid agent UUID"):
+        make_memory_client(env={**without_agent, "KAGURA_AGENT_ID": "not-a-uuid"})
+
+
+def test_make_memory_client_requires_agent_bound_rest_key() -> None:
+    without_key = {
+        key: value for key, value in _MCP_ENV.items() if key != "KAGURA_AGENT_MEMORY_API_KEY"
+    }
+    with pytest.raises(RuntimeError, match="KAGURA_AGENT_MEMORY_API_KEY is not"):
+        make_memory_client(env=without_key)
+
+
+def test_make_memory_client_wires_rest_sdk_key_and_url(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from kagura_agent.mcp import rest_bootstrap
+
+    captured: dict[str, object] = {}
+
+    def fake_builder(*, api_key: str, mcp_url: str | None = None):  # type: ignore[no-untyped-def]
+        captured.update(api_key=api_key, mcp_url=mcp_url)
+
+        async def call(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("not called during construction")
+
+        return call
+
+    monkeypatch.setattr(rest_bootstrap, "build_agents_bootstrap_call", fake_builder)
+    client = make_memory_client(
+        env={**_MCP_ENV, "KAGURA_AGENT_MEMORY_MCP_URL": "https://memory.example.test/mcp"}
+    )
+    assert captured == {
+        "api_key": "agent-member-key",
+        "mcp_url": "https://memory.example.test/mcp",
+    }
+    assert client._agent_id == _MEMORY_AGENT_UUID
 
 
 def test_make_memory_client_config_error_is_a_cli_handled_type() -> None:
@@ -653,7 +702,13 @@ def test_make_memory_client_fails_closed_when_mcp_server_missing() -> None:
     # A valid cloud context but no server command → fail closed with a clear message
     # at construction, not an opaque stdio spawn error deep in the run loop.
     with pytest.raises(RuntimeError, match="MCP server command"):
-        make_memory_client(env={"KAGURA_AGENT_MEMORY_MCP_CONTEXT": _MEMORY_CTX_UUID})
+        make_memory_client(
+            env={
+                "KAGURA_AGENT_ID": _MEMORY_AGENT_UUID,
+                "KAGURA_AGENT_MEMORY_MCP_CONTEXT": _MEMORY_CTX_UUID,
+                "KAGURA_AGENT_MEMORY_API_KEY": "agent-member-key",
+            }
+        )
 
 
 def test_make_memory_client_fails_closed_on_unusable_db(tmp_path) -> None:

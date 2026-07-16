@@ -32,8 +32,10 @@ from kagura_agent.mcp.memory_cloud import (
     ALWAYS_DELIVERY,
     RERANK_BOUND,
     TRUSTED_TIER,
+    AgentBootstrap,
     FeedbackRecord,
     Memory,
+    compose_agent_bootstrap,
 )
 
 _SCHEMA = """
@@ -187,6 +189,17 @@ class SqliteMemoryClient:
         # call. No query, no ranking, no trust filter — pinned guardrails are
         # host-curated and load whole (#88).
         return [m for m in self._all_memories() if m.delivery_mode == ALWAYS_DELIVERY]
+
+    async def get_agent_bootstrap(
+        self,
+        *,
+        session_id: str,
+        query: str,
+        recall_k: int = 5,
+    ) -> AgentBootstrap:
+        return await compose_agent_bootstrap(
+            self, session_id=session_id, query=query, recall_k=recall_k
+        )
 
     async def create_edge(self, src_id: str, dst_id: str, *, type: str) -> None:
         # Append-only journal (like LocalMemoryClient's list): dst is stored as-is,

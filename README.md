@@ -105,6 +105,34 @@ The exact first-run failures and their fixes:
 Contributors install from a clone: `git clone` + `pip install -e '.[dev]'`, then `pytest`
 and `mypy` (strict) — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+### One-call cloud bootstrap
+
+Install the cloud-memory extra, then configure one registered agent, its bound
+context, a dedicated agent-bound member key, and the host-side MCP server command:
+
+```bash
+pip install 'kagura-agent[memory]'
+export KAGURA_AGENT_ID='agent-uuid'
+export KAGURA_AGENT_MEMORY_MCP_CONTEXT='context-uuid'
+export KAGURA_AGENT_MEMORY_API_KEY='agent-bound-member-key'
+export KAGURA_AGENT_MEMORY_MCP_SERVER='kagura-memory-mcp'
+# Optional for self-hosted deployments; the SDK otherwise uses production:
+# export KAGURA_AGENT_MEMORY_MCP_URL='https://memory.example.com/mcp'
+```
+
+The member key must be bound to the configured agent/context. `run`, `repl`, and
+the cockpit then call the SDK's `AgentsClient.bootstrap()` once over REST per task
+to obtain the context guide, trusted pinned/recall/upcoming memories, and
+agent-state. Ordinary recall/write operations remain on the existing MCP memory
+transport. The model never receives the key or correlation/audit metadata. A total
+identity/contract failure aborts the task; component failures stay fail-soft and
+are logged from the response's `degraded` status.
+
+Bootstrap agent-state is advisory cross-session context. Session resume continues
+to use the existing `CheckpointStore`; bootstrap never overwrites a checkpoint.
+Local and SQLite backends expose the same method and return explicit empty
+upcoming/state/policy lanes, so callers use one grounding path in every tier.
+
 ---
 
 ## What kagura-agent is — and is not
@@ -905,7 +933,7 @@ that speaks to Docker.
 | [`kagura-ai/kagura-engineer`](https://github.com/kagura-ai/kagura-engineer) | Coding-specialized actor (shipping) | **Independent sibling agent** sharing the memory+actor thesis (not a platform/instance) — see "kagura-agent and kagura-engineer" above. Where shared primitives get proven first. |
 | [`kagura-ai/kagura-code-reviewer`](https://github.com/kagura-ai/kagura-code-reviewer) | Review subagent | Ollama-powered code reviewer with a green/yellow/red verdict; launched by kagura-engineer's `review`. A model for the agent's own sub-agent dispatch. |
 | [`kagura-ai/memory-cloud`](https://github.com/kagura-ai/memory-cloud) | Persistence + MCP server | **The backbone.** Agent's primary MCP. |
-| [`kagura-ai/kagura-memory-python-sdk`](https://github.com/kagura-ai/kagura-memory-python-sdk) | Primitive SDK | Used by the memory MCP client wrapper inside the agent. |
+| [`kagura-ai/kagura-memory-python-sdk`](https://github.com/kagura-ai/kagura-memory-python-sdk) | Primitive SDK | Used by the trusted host for one-call REST agent bootstrap. |
 
 ---
 

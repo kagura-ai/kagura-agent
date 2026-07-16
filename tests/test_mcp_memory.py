@@ -23,7 +23,6 @@ from kagura_agent.mcp.memory_cloud import (
     QUARANTINE_TIER,
     TRUSTED_TIER,
     Memory,
-    MemoryClient,
 )
 
 _CTX = "ctx-uuid-1"
@@ -44,13 +43,6 @@ class _FakeMcp:
 def _client(results: dict[str, Any] | None = None) -> tuple[McpMemoryClient, _FakeMcp]:
     fake = _FakeMcp(results)
     return McpMemoryClient(fake, context_id=_CTX), fake
-
-
-def test_is_a_memory_client_protocol():
-    # The factory returns this as a MemoryClient; pin the structural conformance so
-    # a renamed/changed protocol method is caught here, not deep in a real run.
-    client, _ = _client()
-    assert isinstance(client, MemoryClient)
 
 
 async def test_to_memory_does_not_split_a_scalar_string_tag():

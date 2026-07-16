@@ -96,6 +96,26 @@ async def test_load_pinned_returns_complete_always_set_in_order(tmp_path):
     assert all(m.delivery_mode == ALWAYS_DELIVERY for m in pinned)
 
 
+async def test_bootstrap_composes_same_trusted_lanes_as_local_backend(tmp_path):
+    client = SqliteMemoryClient(_db(tmp_path))
+    pin = await client.remember(
+        "approved guardrail",
+        trust_tier=TRUSTED_TIER,
+        delivery_mode=ALWAYS_DELIVERY,
+    )
+    await client.remember(
+        "untrusted guardrail",
+        trust_tier=QUARANTINE_TIER,
+        delivery_mode=ALWAYS_DELIVERY,
+    )
+    recall = await client.remember("bounded retry", trust_tier=TRUSTED_TIER)
+
+    bootstrap = await client.get_agent_bootstrap(session_id="session", query="retry", recall_k=5)
+
+    assert [item.id for item in bootstrap.pinned] == [pin]
+    assert [item.id for item in bootstrap.recall] == [recall]
+
+
 # --------------------------------------------------------------------------
 # edges + host-side admin verbs (drop-in parity with LocalMemoryClient)
 # --------------------------------------------------------------------------

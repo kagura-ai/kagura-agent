@@ -1,12 +1,13 @@
 """The agent runtime's view of memory-cloud — deliberately narrow.
 
 The runtime gets append (`remember`), scoped read (`recall`, with a trust-tier
-filter), and `create_edge` (to record `prevents` relationships for failure
-learning). It gets **no admin** (delete/forget/merge/rollback/schema): a
+filter), one-call session start (`get_agent_bootstrap`), and `create_edge` (to
+record `prevents` relationships for failure learning). It gets **no admin**
+(delete/forget/merge/rollback/schema): a
 prompt-injected agent must not be able to amplify a hijack into destructive
 writes. `LocalMemoryClient` is the self-host backend (here in-memory; SQLite in
-deployment); a real deployment swaps in an MCP-backed client with the same
-surface.
+deployment); a real deployment composes MCP memory I/O with trusted-host REST
+bootstrap behind the same surface.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 #: The tier an agent's writes land in by default (#15). Read-side recall filters
 #: it out of the trusted backbone (``trusted_only=True``), so a quarantined write
@@ -45,6 +46,32 @@ class Memory:
     tags: tuple[str, ...] = ()
     trust_tier: str = TRUSTED_TIER
     delivery_mode: str = ON_RECALL_DELIVERY
+
+
+@dataclass(frozen=True)
+class AgentBootstrap:
+    """Normalized, model-safe session-start context from ``get_agent_bootstrap``.
+
+    Transport/audit metadata stays outside this object.  Every memory here is
+    already proven to come from a trusted bootstrap lane; component failures are
+    retained separately so callers can use the healthy fail-soft components while
+    recording degradation.
+
+    ``state`` is agent-scoped advisory context.  It never replaces the
+    session-scoped :class:`CheckpointStore` used by ``Session`` resume.
+    """
+
+    agent_id: str | None
+    context_id: str | None
+    instructions: str
+    pinned: tuple[Memory, ...]
+    recall: tuple[Memory, ...]
+    upcoming: tuple[Memory, ...]
+    state: dict[str, Any]
+    policy: dict[str, Any] | None
+    degraded: bool
+    component_failures: tuple[str, ...]
+    component_statuses: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -86,6 +113,21 @@ class MemoryClient(Protocol):
         Guardrail / critical-policy memories load this way so they are never missed
         by probabilistic ``recall`` (the structural flaw deterministic delivery
         closes). Mirrors the SDK's ``load_pinned`` (kagura-memory-python-sdk#172)."""
+        ...
+
+    async def get_agent_bootstrap(
+        self,
+        *,
+        session_id: str,
+        query: str,
+        recall_k: int = 5,
+    ) -> AgentBootstrap:
+        """Return one normalized session-start bundle.
+
+        Cloud implementations call the production agent bootstrap REST endpoint
+        once from the trusted host. Local implementations compose the same trusted
+        pinned/recall lanes behind this method so callers never fan out themselves.
+        """
         ...
 
     async def create_edge(self, src_id: str, dst_id: str, *, type: str) -> None: ...
@@ -196,6 +238,17 @@ class LocalMemoryClient:
         # call. No query, no ranking, no trust filter — pinned guardrails are
         # host-curated and load whole (#88).
         return [m for m in self._memories.values() if m.delivery_mode == ALWAYS_DELIVERY]
+
+    async def get_agent_bootstrap(
+        self,
+        *,
+        session_id: str,
+        query: str,
+        recall_k: int = 5,
+    ) -> AgentBootstrap:
+        return await compose_agent_bootstrap(
+            self, session_id=session_id, query=query, recall_k=recall_k
+        )
 
     async def create_edge(self, src_id: str, dst_id: str, *, type: str) -> None:
         self._edges.setdefault(src_id, []).append((dst_id, type))
@@ -327,8 +380,65 @@ class QuarantinedMemoryClient:
         # exposing it to the confined agent is safe and is how guardrails reach it.
         return await self._inner.load_pinned()
 
+    async def get_agent_bootstrap(
+        self,
+        *,
+        session_id: str,
+        query: str,
+        recall_k: int = 5,
+    ) -> AgentBootstrap:
+        # Read-only, server-trusted bootstrap data; confinement remains solely on
+        # writes, exactly like recall/load_pinned.
+        return await self._inner.get_agent_bootstrap(
+            session_id=session_id, query=query, recall_k=recall_k
+        )
+
     async def create_edge(self, src_id: str, dst_id: str, *, type: str) -> None:
         await self._inner.create_edge(src_id, dst_id, type=type)
+
+
+async def compose_agent_bootstrap(
+    memory: MemoryClient,
+    *,
+    session_id: str,
+    query: str,
+    recall_k: int = 5,
+) -> AgentBootstrap:
+    """Local/SQLite parity implementation of the server bootstrap contract.
+
+    This helper is deliberately behind ``MemoryClient.get_agent_bootstrap``.  A
+    runtime caller still performs one method call; only the cloud adapter turns it
+    into one network request.  Local backends have no agent-state/upcoming/policy
+    stores, so those components are explicit healthy-empty/skipped lanes.
+    """
+    del session_id  # correlation-only on the production service
+    if not 1 <= recall_k <= 100:
+        raise ValueError("recall_k must be in [1, 100]")
+    pinned = tuple(
+        memory_item
+        for memory_item in await memory.load_pinned()
+        if memory_item.trust_tier == TRUSTED_TIER
+    )
+    recalled = tuple((await memory.recall(query, trusted_only=True))[:recall_k])
+    return AgentBootstrap(
+        agent_id=None,
+        context_id=None,
+        instructions="",
+        pinned=pinned,
+        recall=recalled,
+        upcoming=(),
+        state={},
+        policy=None,
+        degraded=False,
+        component_failures=(),
+        component_statuses=(
+            ("pinned", "ok"),
+            ("recall", "ok"),
+            ("upcoming", "ok"),
+            ("state", "ok"),
+            ("policy", "skipped"),
+        ),
+    )
 
 
 class MemoryUnreachableError(RuntimeError):

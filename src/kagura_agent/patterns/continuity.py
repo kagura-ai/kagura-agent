@@ -19,12 +19,21 @@ in-memory stores):
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import re
 from collections.abc import Callable, Iterable
 
 from kagura_agent.core.brain.base import BrainProvider, Task
 from kagura_agent.core.session import Session, SessionResult
-from kagura_agent.mcp.memory_cloud import QUARANTINE_TIER, TRUSTED_TIER, Memory, MemoryClient
+from kagura_agent.mcp.memory_cloud import (
+    QUARANTINE_TIER,
+    TRUSTED_TIER,
+    AgentBootstrap,
+    Memory,
+    MemoryClient,
+)
 from kagura_agent.patterns.checkpoint import CheckpointStore
 from kagura_agent.patterns.erasure import ProvenanceLog
 
@@ -33,6 +42,9 @@ log = logging.getLogger(__name__)
 #: How many recalled memories to inject as prior context (keeps the preamble
 #: bounded so grounding never crowds out the actual task).
 _MAX_GROUNDING = 5
+
+_BOOTSTRAP_QUERY_MAX = 1024
+_BOOTSTRAP_SESSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 #: Lines that end a REPL session.
 _REPL_QUIT = frozenset({"/exit", "/quit"})
@@ -149,6 +161,105 @@ async def remember_outcome(
     )
 
 
+def _bootstrap_correlation_id(session_id: str) -> str:
+    """Return a server-valid opaque bootstrap correlation id.
+
+    Transport thread ids are not guaranteed to use the bootstrap contract's
+    restricted character set.  Preserve already-valid ids; otherwise send a
+    stable digest, never a lossy/ambiguous character replacement.
+    """
+    if _BOOTSTRAP_SESSION_RE.fullmatch(session_id):
+        return session_id
+    digest = hashlib.sha256(session_id.encode()).hexdigest()[:32]
+    return f"session-{digest}"
+
+
+def _dedupe_memories(*groups: tuple[Memory, ...]) -> list[Memory]:
+    seen: set[str] = set()
+    out: list[Memory] = []
+    for group in groups:
+        for memory in group:
+            if memory.id not in seen:
+                seen.add(memory.id)
+                out.append(memory)
+    return out
+
+
+def _render_bootstrap_prompt(bootstrap: AgentBootstrap, prompt: str) -> str:
+    blocks: list[str] = []
+    seen_memory_ids: set[str] = set()
+
+    def unique(group: tuple[Memory, ...]) -> list[Memory]:
+        lane: list[Memory] = []
+        for memory in group:
+            if memory.id not in seen_memory_ids:
+                seen_memory_ids.add(memory.id)
+                lane.append(memory)
+        return lane
+
+    if bootstrap.instructions.strip():
+        blocks.append(f"Bootstrap instructions:\n{bootstrap.instructions.strip()}")
+    pinned = unique(bootstrap.pinned)
+    recalled = unique(bootstrap.recall)
+    upcoming = unique(bootstrap.upcoming)
+    if pinned:
+        blocks.append(
+            "Standing guardrails (always apply):\n"
+            + "\n".join(f"- {memory.text}" for memory in pinned)
+        )
+    if recalled:
+        blocks.append(
+            "Relevant context from prior work:\n"
+            + "\n".join(f"- {memory.text}" for memory in recalled)
+        )
+    if upcoming:
+        blocks.append(
+            "Upcoming time memories:\n"
+            + "\n".join(f"- {memory.text}" for memory in upcoming)
+        )
+    if bootstrap.state:
+        blocks.append(
+            "Agent state (advisory; session checkpoint remains authoritative):\n"
+            + json.dumps(
+                bootstrap.state,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    if not blocks:
+        return prompt
+    return "\n\n".join((*blocks, f"Task:\n{prompt}"))
+
+
+async def prepare_bootstrap_prompt(
+    memory: MemoryClient,
+    *,
+    session_id: str,
+    prompt: str,
+) -> tuple[str, list[Memory], AgentBootstrap]:
+    """Fetch one session-start bundle and render only its model-safe fields.
+
+    The complete user prompt still reaches the brain. Only the recall query is
+    bounded to the server contract's 1024 characters. Component errors are
+    fail-soft and logged; total identity/contract errors raised by the client stay
+    fail-closed and abort the task.
+    """
+    bootstrap = await memory.get_agent_bootstrap(
+        session_id=_bootstrap_correlation_id(session_id),
+        query=prompt[:_BOOTSTRAP_QUERY_MAX],
+        recall_k=_MAX_GROUNDING,
+    )
+    if bootstrap.degraded:
+        log.warning(
+            "agent bootstrap degraded for session %s (components=%s)",
+            session_id,
+            ",".join(bootstrap.component_failures),
+        )
+    used = _dedupe_memories(bootstrap.pinned, bootstrap.recall, bootstrap.upcoming)
+    return _render_bootstrap_prompt(bootstrap, prompt), used, bootstrap
+
+
 async def ground_and_run(
     brain: BrainProvider,
     store: CheckpointStore,
@@ -161,9 +272,9 @@ async def ground_and_run(
 ) -> SessionResult:
     """``drive_task`` wrapped in B's memory grounding.
 
-    Guardrails (deterministic, pinned — #88) → recall (probabilistic) → run/resume →
-    remember. The two read lanes are distinct: ``load_guardrails`` always loads the
-    complete pinned set; ``ground_prompt`` recalls only *relevant* trusted context.
+    One ``get_agent_bootstrap`` read (context guide + trusted pinned/recall/upcoming
+    + agent-state) → run/resume → remember. Local backends compose the same lanes
+    behind that method; cloud performs one trusted-host REST call.
 
     ``memory`` is **always present** (#104): ``make_memory_client`` never returns
     ``None`` — the seam never disappears, only its backend strength differs
@@ -183,22 +294,14 @@ async def ground_and_run(
     raised — otherwise a backbone hiccup would surface a *completed* run as failed
     and a retry would needlessly resume (re-execute) the finished turn.
     """
-    guardrails = await load_guardrails(memory)
-    grounded, used = await _grounded_with_sources(memory, prompt)
+    effective, used, _bootstrap = await prepare_bootstrap_prompt(
+        memory, session_id=session_id, prompt=prompt
+    )
     if provenance is not None and used:
         # Record which source memories (and their tiers) fed this session: the tier
         # capture is the host evidence for the run's input_trust, and the memory ids
         # let a later erasure of any of them cascade to this run's derived artifacts.
         provenance.record_grounding(session_id, [(m.id, m.trust_tier) for m in used])
-    if guardrails:
-        # Fence the task so guardrail bullets never run straight into it.
-        # ``ground_prompt`` returns the bare prompt on a recall miss (no "Task:"
-        # label); add the fence in that case so the host/task boundary is consistent
-        # whether or not recall hit.
-        body = grounded if grounded != prompt else f"Task:\n{prompt}"
-        effective = f"{guardrails}\n\n{body}"
-    else:
-        effective = grounded
     result = await drive_task(
         brain, store, session_id=session_id, prompt=effective, on_message=on_message
     )
