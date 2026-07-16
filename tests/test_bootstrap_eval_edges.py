@@ -15,6 +15,17 @@ from kagura_agent.eval import bootstrap_cli as cli
 from kagura_agent.eval import bootstrap_live as live
 
 
+def test_trial_seed_is_stable_signed_64_bit() -> None:
+    values = {
+        ab._trial_seed(188, f"task-{index}", index % 5, index % 3)
+        for index in range(100)
+    }
+
+    assert len(values) == 100
+    assert all(-(2**63) <= value < 2**63 for value in values)
+    assert ab._trial_seed(188, "task-17", 2, 1) == ab._trial_seed(188, "task-17", 2, 1)
+
+
 def _envelope() -> dict[str, Any]:
     return {
         "status": "success",
@@ -540,6 +551,7 @@ async def test_live_backend_bootstrap_and_host_feedback_use_isolated_identity() 
     )
     assert envelope.agent_id == "agent-a"
     assert envelope.selection_probabilities() == {"logical-1": 0.5}
+    assert envelope.selected_logical_ids() == ("logical-1",)
     await backend.record_verified_feedback(
         handle,
         logical_memory_id="logical-1",

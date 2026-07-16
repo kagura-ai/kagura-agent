@@ -250,6 +250,8 @@ def test_committed_corpus_is_stratified_non_leaking_and_fixed() -> None:
     assert sum(task.tail for task in tasks) == 10
     assert sum(task.held_out for task in tasks) == 5
     assert snapshot.fingerprint.startswith("sha256:")
+    by_id = {memory.logical_id: memory for memory in snapshot.memories}
+    assert all(task.check.score(by_id[task.gold_memory_id].summary) == 1.0 for task in tasks)
 
 
 def test_arm_pair_requires_isolated_agents_contexts_journals_and_snapshot() -> None:

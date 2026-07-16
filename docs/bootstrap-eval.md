@@ -40,6 +40,8 @@ and five are held out for the long-horizon gold monitor. Objective answers are
 stored only in host-side checks and the snapshot; they are not sent in the actor
 payload. Corpus validation rejects prompt leakage, missing gold memories,
 duplicate gold use, missing strata, and an absent tail/held-out population.
+The fixed memories use answer-bearing L1 summaries because the production
+bootstrap exposes summary/context-summary grounding, not L3 memory content.
 
 When provisioning each disposable context, copy every memory from
 `src/kagura_agent/eval/fixtures/bootstrap_snapshot.json` and preserve its

@@ -366,9 +366,25 @@ class RestBootstrapBackend:
         if isinstance(components, dict):
             recall_component = components.get("recall")
             if isinstance(recall_component, dict):
+                identity_map = self._actual_to_logical.get(handle.arm, {})
+                records = recall_component.get("results")
+                if not isinstance(records, list):
+                    records = recall_component.get("memories")
+                if isinstance(records, list):
+                    for record in records:
+                        if not isinstance(record, dict):
+                            continue
+                        actual_id = record.get("memory_id", record.get("id"))
+                        logical_id = identity_map.get(str(actual_id))
+                        if logical_id is None:
+                            continue
+                        details = record.get("details")
+                        record["details"] = {
+                            **(details if isinstance(details, dict) else {}),
+                            "eval_id": logical_id,
+                        }
                 probabilities = recall_component.get("selection_probabilities")
                 if isinstance(probabilities, dict):
-                    identity_map = self._actual_to_logical.get(handle.arm, {})
                     recall_component["selection_probabilities"] = {
                         identity_map.get(str(memory_id), str(memory_id)): probability
                         for memory_id, probability in probabilities.items()

@@ -1,6 +1,6 @@
 {
   "experiment_id": "bootstrap-ab-20260716",
-  "snapshot_fingerprint": "sha256:3ca7b863ce2a08074ac7f11c279a50b7452cbe33055ab75cd437266a017e817b",
+  "snapshot_fingerprint": "sha256:8358d1b39e9defba60e0c39feb78b11a54de9b6b40713983f5268daea53649fa",
   "versions": {
     "code": "git-sha-here",
     "actor_model": "actor-model-id",

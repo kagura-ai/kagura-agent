@@ -763,7 +763,9 @@ class ExperimentResult:
 
 def _trial_seed(base: int, task_id: str, generation: int, repetition: int) -> int:
     value = f"{base}:{task_id}:{generation}:{repetition}".encode()
-    return int.from_bytes(hashlib.sha256(value).digest()[:8], "big")
+    # memory-cloud's replay contract accepts signed 64-bit seeds.  Preserve all
+    # 64 digest bits while decoding them in that exact wire domain.
+    return int.from_bytes(hashlib.sha256(value).digest()[:8], "big", signed=True)
 
 
 def _mean(values: Sequence[float]) -> float:
@@ -1225,15 +1227,12 @@ def validate_corpus(snapshot: BootstrapSnapshot, tasks: Sequence[TaskSpec]) -> N
             raise CorpusError(f"gold memory reused across tasks: {task.gold_memory_id}")
         gold_ids.add(task.gold_memory_id)
         gold_memory = by_id[task.gold_memory_id]
-        gold_text = f"{gold_memory.summary}\n{gold_memory.content}".casefold()
-        absent = [
-            value
-            for value in task.check.values
-            if task.check.kind != "regex" and value.casefold() not in gold_text
-        ]
-        if absent:
+        # Production bootstrap exposes L1/L2 grounding, not L3 content.  The
+        # registered task must therefore be answerable from the gold summary
+        # alone; otherwise a live actor cannot possibly satisfy the objective.
+        if task.check.score(gold_memory.summary) != 1.0:
             raise CorpusError(
-                f"{task.id}: gold memory does not contain objective evidence: {absent}"
+                f"{task.id}: gold summary does not satisfy the objective check"
             )
 
 
