@@ -1,0 +1,48 @@
+{
+  "experiment_id": "bootstrap-ab-20260716",
+  "snapshot_fingerprint": "sha256:3ca7b863ce2a08074ac7f11c279a50b7452cbe33055ab75cd437266a017e817b",
+  "versions": {
+    "code": "git-sha-here",
+    "actor_model": "actor-model-id",
+    "actor": "actor-wrapper-v1",
+    "bootstrap_api": "memory-cloud-v0.49.0",
+    "ranking_policy": "reinforce-v1",
+    "judge": null
+  },
+  "thresholds": {
+    "delta_min": 0.02,
+    "confidence": 0.95,
+    "bootstrap_resamples": 5000,
+    "max_degraded_rate": 0.0,
+    "max_tail_regression": 0.02,
+    "max_entropy_drop": 0.1,
+    "utility_flat_tolerance": 0.01,
+    "max_goodhart_decline": 0.02
+  },
+  "generations": 5,
+  "repetitions": 3,
+  "primary_generation": -1,
+  "recall_k": 5,
+  "seed": 188,
+  "feedback_provenance": "host",
+  "memory_cloud": {
+    "base_url": "https://memory.kagura-ai.com",
+    "timeout": 30,
+    "feedback_mode": "host",
+    "host_feedback_path": "/operator/v1/agents/{agent_id}/contexts/{context_id}/feedback",
+    "control": {
+      "agent_id": "control-agent-uuid",
+      "context_id": "control-context-uuid",
+      "feedback_journal": "bootstrap-ab-20260716-control"
+    },
+    "treatment": {
+      "agent_id": "treatment-agent-uuid",
+      "context_id": "treatment-context-uuid",
+      "feedback_journal": "bootstrap-ab-20260716-treatment"
+    }
+  },
+  "actor": {
+    "command": ["python", "path/to/actor_adapter.py"],
+    "timeout": 300
+  }
+}
