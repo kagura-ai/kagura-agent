@@ -9,6 +9,7 @@ credentials or raw SDK response objects.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol
 
@@ -82,15 +83,18 @@ def _trusted_component_memories(
     for record in records:
         raw_tags = record.get("tags")
         tags = tuple(str(tag) for tag in raw_tags) if isinstance(raw_tags, (list, tuple)) else ()
+        memory_id = _first_str_field(record, "memory id", "memory_id", "id")
+        text = _first_str_field(
+            record,
+            "memory text",
+            "summary",
+            "text",
+            "content",
+            "details",
+        )
         memory = Memory(
-            id=str(record.get("memory_id") or record.get("id") or ""),
-            text=str(
-                record.get("summary")
-                or record.get("text")
-                or record.get("content")
-                or record.get("details")
-                or ""
-            ),
+            id=memory_id,
+            text=text,
             tags=tags,
             # These compact rows intentionally omit trust_tier. Trust is asserted
             # by the server bootstrap lane, with recall additionally proven below.
@@ -101,6 +105,18 @@ def _trusted_component_memories(
             raise BootstrapContractError("bootstrap memory has no stable id/text")
         memories.append(memory)
     return tuple(memories)
+
+
+def _first_str_field(record: Mapping[str, Any], label: str, *keys: str) -> str:
+    """Read the first supplied compact field without coercing unsafe values."""
+    for key in keys:
+        value = record.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise BootstrapContractError(f"bootstrap {label} is not a non-empty string")
+        return value
+    return ""
 
 
 def _parse_agent_bootstrap(result: Any) -> AgentBootstrap:
@@ -278,8 +294,10 @@ class RestBootstrapMemoryClient:
                 recall_k=recall_k,
                 include=list(_BOOTSTRAP_COMPONENTS),
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            raise MemoryUnreachableError(f"agent bootstrap REST request failed: {exc}") from exc
+            raise MemoryUnreachableError("agent bootstrap REST request failed") from exc
         bootstrap = _parse_agent_bootstrap(result)
         if bootstrap.agent_id != self._agent_id:
             raise BootstrapContractError("bootstrap resolved outside the configured agent")

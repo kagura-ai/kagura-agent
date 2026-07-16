@@ -258,6 +258,8 @@ class Cockpit:
                     prompt=event.text,
                     result=result.text,
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 # The task/checkpoint succeeded; preserve cockpit liveness and the
                 # same best-effort outcome-write posture as ground_and_run.
@@ -351,8 +353,7 @@ class Cockpit:
                 self._registry.close(event.thread_id)
                 await self._transport.send(
                     event.thread_id,
-                    f"session {event.thread_id}: container kill FAILED (see logs); "
-                    "session closed",
+                    f"session {event.thread_id}: container kill FAILED (see logs); session closed",
                 )
                 return
         self._registry.close(event.thread_id)

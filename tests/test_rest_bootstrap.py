@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from typing import Any
 
@@ -67,7 +68,7 @@ class _FakeBootstrap:
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
         self.calls.append((args, kwargs))
-        if isinstance(self.result, Exception):
+        if isinstance(self.result, BaseException):
             raise self.result
         return self.result
 
@@ -175,6 +176,18 @@ async def test_rest_bootstrap_preserves_fail_soft_component_errors_and_policy() 
             ),
             "stable id/text",
         ),
+        (
+            lambda raw: raw["components"]["pinned"]["memories"][0].update(
+                memory_id={"unexpected": "object"}
+            ),
+            "memory id is not a non-empty string",
+        ),
+        (
+            lambda raw: raw["components"]["recall"]["results"][0].update(
+                summary=["unexpected", "list"]
+            ),
+            "memory text is not a non-empty string",
+        ),
     ],
 )
 async def test_rest_bootstrap_rejects_inconsistent_contract(mutate, message) -> None:
@@ -213,8 +226,16 @@ async def test_rest_bootstrap_rejects_identity_mismatch_and_invalid_k() -> None:
 
 
 async def test_rest_bootstrap_wraps_transport_failure_as_memory_unreachable() -> None:
-    client, _ = _client(OSError("network down"))
-    with pytest.raises(MemoryUnreachableError, match="REST request failed"):
+    client, _ = _client(OSError("network down: Authorization=Bearer secret-key"))
+    with pytest.raises(MemoryUnreachableError, match="REST request failed") as exc:
+        await client.get_agent_bootstrap(session_id="s", query="q")
+    assert "secret-key" not in str(exc.value)
+    assert isinstance(exc.value.__cause__, OSError)
+
+
+async def test_rest_bootstrap_propagates_cancellation() -> None:
+    client, _ = _client(asyncio.CancelledError())
+    with pytest.raises(asyncio.CancelledError):
         await client.get_agent_bootstrap(session_id="s", query="q")
 
 

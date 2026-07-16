@@ -4,9 +4,14 @@ This is the milestone's Definition of Done: a CLI thread can launch a brain,
 get a result, and continue the same session with state carried across.
 """
 
+import asyncio
 from collections.abc import AsyncIterator
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from kagura_agent.cockpit.core import Cockpit
+from kagura_agent.cockpit.intent import Intent
 from kagura_agent.cockpit.transports.base import Event
 from kagura_agent.cockpit.transports.cli import CliTransport
 from kagura_agent.core.brain.base import BrainCaps, BrainEvent, Checkpoint, DoneEvent, Task
@@ -49,9 +54,7 @@ async def test_walking_skeleton_launch_then_continue() -> None:
 
 
 async def test_reply_without_prior_session_launches_fresh() -> None:
-    transport = CliTransport(
-        inbox=[Event(thread_id="t5", text="huh?", is_thread_reply=True)]
-    )
+    transport = CliTransport(inbox=[Event(thread_id="t5", text="huh?", is_thread_reply=True)])
     cockpit = Cockpit(
         transport=transport,
         brain=CountingBrain(),
@@ -88,3 +91,20 @@ async def test_cockpit_task_uses_bootstrap_grounding_and_remembers_outcome() -> 
     assert len(summaries) == 1 and summaries[0].trust_tier == "quarantine"
     checkpoint = await checkpoints.load("t1")
     assert checkpoint is not None and checkpoint.state == {"turn": 1}
+
+
+async def test_cockpit_outcome_write_propagates_cancellation() -> None:
+    cockpit = Cockpit(
+        transport=CliTransport(),
+        brain=CountingBrain(),
+        checkpoints=InMemoryCheckpointStore(),
+        memory=LocalMemoryClient(),
+    )
+    event = Event(thread_id="t1", text="deploy", is_thread_reply=False)
+
+    with patch(
+        "kagura_agent.cockpit.core.remember_outcome",
+        new=AsyncMock(side_effect=asyncio.CancelledError()),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await cockpit._handle_task(event, Intent.LAUNCH)
