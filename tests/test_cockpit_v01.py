@@ -10,6 +10,7 @@ from kagura_agent.cockpit.core import Cockpit
 from kagura_agent.cockpit.transports.base import Event
 from kagura_agent.cockpit.transports.cli import CliTransport
 from kagura_agent.core.brain.base import BrainCaps, BrainEvent, Checkpoint, DoneEvent, Task
+from kagura_agent.mcp.memory_cloud import ALWAYS_DELIVERY, LocalMemoryClient
 from kagura_agent.patterns.checkpoint import InMemoryCheckpointStore
 
 
@@ -60,3 +61,30 @@ async def test_reply_without_prior_session_launches_fresh() -> None:
     await cockpit.serve()
 
     assert transport.sent == [("t5", "turn 1: huh?")]
+
+
+async def test_cockpit_task_uses_bootstrap_grounding_and_remembers_outcome() -> None:
+    transport = CliTransport(inbox=[Event(thread_id="t1", text="deploy", is_thread_reply=False)])
+    checkpoints = InMemoryCheckpointStore()
+    memory = LocalMemoryClient()
+    await memory.remember(
+        "Require operator approval",
+        trust_tier="trusted",
+        delivery_mode=ALWAYS_DELIVERY,
+    )
+    cockpit = Cockpit(
+        transport=transport,
+        brain=CountingBrain(),
+        checkpoints=checkpoints,
+        memory=memory,
+    )
+
+    await cockpit.serve()
+
+    assert (
+        "Standing guardrails (always apply):\n- Require operator approval" in (transport.sent[0][1])
+    )
+    summaries = await memory.recall("deploy", tags=("task-summary",))
+    assert len(summaries) == 1 and summaries[0].trust_tier == "quarantine"
+    checkpoint = await checkpoints.load("t1")
+    assert checkpoint is not None and checkpoint.state == {"turn": 1}

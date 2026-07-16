@@ -37,6 +37,9 @@ brain = ["kagura-brain>=0.6.0,<0.7"]
 # Cockpit transports — pure additions on top of the Transport protocol.
 slack = ["slack-bolt>=1.18"]
 discord = ["discord.py>=2.3"]
+# Cloud memory transport + trusted-host agent bootstrap (#187). Optional so the
+# local/SQLite tiers and core test suite stay dependency-free.
+memory = ["kagura-memory>=0.37,<0.38", "mcp>=1,<2"]
 # Cloud cred provider transports (membrane/cloud_transports.py) — the deployment
 # edge wiring the injected provider callables to real SDKs. Optional so the core
 # + tests stay dependency-free.
@@ -92,7 +95,7 @@ packages = ["kagura_agent"]
 # (which strict's warn_unused_ignores flips to an error wherever a dep happens to
 # be present). The claude SDK stays on its own inline ignore by design.
 [[tool.mypy.overrides]]
-module = ["boto3", "google.*", "jwt", "httpx", "requests.*", "discord", "discord.*", "slack_bolt", "slack_bolt.*", "mcp", "mcp.*", "keyring", "kagura_brain", "kagura_brain.*"]
+module = ["boto3", "google.*", "jwt", "httpx", "requests.*", "discord", "discord.*", "slack_bolt", "slack_bolt.*", "mcp", "mcp.*", "keyring", "kagura_brain", "kagura_brain.*", "kagura_memory", "kagura_memory.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]

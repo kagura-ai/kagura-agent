@@ -12,7 +12,12 @@ from kagura_agent.core.brain.base import (
     MessageEvent,
     Task,
 )
-from kagura_agent.mcp.memory_cloud import ALWAYS_DELIVERY, LocalMemoryClient
+from kagura_agent.mcp.memory_cloud import (
+    ALWAYS_DELIVERY,
+    AgentBootstrap,
+    LocalMemoryClient,
+    Memory,
+)
 from kagura_agent.patterns.checkpoint import InMemoryCheckpointStore
 from kagura_agent.patterns.continuity import (
     drive_task,
@@ -68,6 +73,27 @@ class _RememberFailsClient(LocalMemoryClient):
         raise RuntimeError("backbone down")
 
 
+class _BootstrapOnlyMemory(LocalMemoryClient):
+    """Proves continuity calls the composed seam, never legacy read fan-out."""
+
+    def __init__(self, bootstrap: AgentBootstrap) -> None:
+        super().__init__()
+        self.bootstrap = bootstrap
+        self.calls: list[tuple[str, str, int]] = []
+
+    async def get_agent_bootstrap(
+        self, *, session_id: str, query: str, recall_k: int = 5
+    ) -> AgentBootstrap:
+        self.calls.append((session_id, query, recall_k))
+        return self.bootstrap
+
+    async def recall(self, *_args: object, **_kwargs: object) -> list[Memory]:
+        raise AssertionError("continuity must not fan out to recall")
+
+    async def load_pinned(self) -> list[Memory]:
+        raise AssertionError("continuity must not fan out to load_pinned")
+
+
 # --- A: drive_task — launch fresh vs resume ----------------------------------
 
 
@@ -121,6 +147,57 @@ async def test_drive_task_loads_checkpoint_only_once_on_resume() -> None:
 
 
 # --- B: ground_prompt / remember_outcome -------------------------------------
+
+
+async def test_ground_and_run_uses_one_bootstrap_and_renders_all_safe_components() -> None:
+    bootstrap = AgentBootstrap(
+        agent_id="agent",
+        context_id="context",
+        instructions="Use only verified project facts.",
+        pinned=(Memory("pin", "Never deploy without approval", delivery_mode="always"),),
+        recall=(
+            Memory("pin", "Never deploy without approval"),
+            Memory("recall", "Use decorrelated jitter"),
+        ),
+        upcoming=(Memory("time", "Rotate the key tomorrow"),),
+        state={"phase": {"value": "verify"}},
+        policy=None,
+        degraded=False,
+        component_failures=(),
+        component_statuses=(
+            ("pinned", "ok"),
+            ("recall", "ok"),
+            ("upcoming", "ok"),
+            ("state", "ok"),
+            ("policy", "skipped"),
+        ),
+    )
+    memory = _BootstrapOnlyMemory(bootstrap)
+    brain = FakeBrain()
+    prompt = "P" * 1100
+
+    await ground_and_run(
+        brain,
+        InMemoryCheckpointStore(),
+        memory,
+        session_id="thread id/with spaces",
+        prompt=prompt,
+    )
+
+    assert len(memory.calls) == 1
+    correlation, query, recall_k = memory.calls[0]
+    assert correlation.startswith("session-") and " " not in correlation
+    assert query == prompt[:1024] and recall_k == 5
+    effective = brain.calls[0][0]
+    assert "Bootstrap instructions:\nUse only verified project facts." in effective
+    assert "Standing guardrails (always apply):\n- Never deploy without approval" in effective
+    assert effective.count("Never deploy without approval") == 1
+    assert "Relevant context from prior work:\n- Use decorrelated jitter" in effective
+    assert "Upcoming time memories:\n- Rotate the key tomorrow" in effective
+    assert (
+        'Agent state (advisory; session checkpoint remains authoritative):\n{"phase"' in effective
+    )
+    assert effective.endswith(f"Task:\n{prompt}")
 
 
 async def test_ground_prompt_prepends_trusted_context() -> None:

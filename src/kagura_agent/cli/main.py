@@ -534,6 +534,15 @@ _MEMORY_MCP_CONTEXT_ENV = "KAGURA_AGENT_MEMORY_MCP_CONTEXT"
 #: Env var naming the kagura-memory MCP server command (stdio). Required when the
 #: cloud context is set — read by build_mcp_call_tool.
 _MEMORY_MCP_SERVER_ENV = "KAGURA_AGENT_MEMORY_MCP_SERVER"
+#: Registered memory-cloud agent UUID. Required with the cloud context so the
+#: host bootstrap request is bound to one agent identity (RFC-0002 F1/F2).
+_MEMORY_AGENT_ID_ENV = "KAGURA_AGENT_ID"
+#: Agent-bound member key used only by trusted-host REST bootstrap. It is kept
+#: separate from a workspace/operator credential and never forwarded to the brain.
+_MEMORY_AGENT_API_KEY_ENV = "KAGURA_AGENT_MEMORY_API_KEY"
+#: Optional cloud MCP URL from which the SDK derives the REST base URL. Blank uses
+#: the SDK's production default.
+_MEMORY_MCP_URL_ENV = "KAGURA_AGENT_MEMORY_MCP_URL"
 
 #: #165 S3: opt-in flag for the bounded recall re-rank by verified feedback. DEFAULT-OFF
 #: (unset/falsy) — recall is byte-for-byte unchanged. Applies to the host-side sync
@@ -571,13 +580,12 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
     Backend selection (strongest configured wins; all honour ``trusted_only`` so
     grounding stays provenance-safe):
 
-    - ``KAGURA_AGENT_MEMORY_MCP_CONTEXT`` set → :class:`McpMemoryClient`, the
-      **trust-aware MCP cloud** backbone (#111): cross-host persistence + the real
-      ``recall(trusted_only=True)`` so an externally-ingested / quarantined memory
-      is never fed back as behaviour-influencing context (the membrane provenance
-      rule). **Fail-closed**: a malformed context (not a UUID) raises rather than
-      silently degrading. The connection itself is lazy — a missing ``mcp`` SDK /
-      unreachable server fails closed on first use, not a silent memory-less run.
+    - ``KAGURA_AGENT_MEMORY_MCP_CONTEXT`` set → :class:`RestBootstrapMemoryClient`:
+      regular memory I/O stays on the trust-aware MCP cloud backbone (#111), while
+      session-start grounding calls ``AgentsClient.bootstrap`` once over REST from
+      the trusted host (#187). ``KAGURA_AGENT_ID`` and a dedicated agent-bound
+      ``KAGURA_AGENT_MEMORY_API_KEY`` are required. Identity/configuration is
+      fail-closed; component errors inside a valid bootstrap remain fail-soft.
     - else ``KAGURA_AGENT_MEMORY_DB`` set → :class:`SqliteMemoryClient`, the
       **durable** middle tier (#107): persists across separate process invocations
       with no network/extra dependency. **Fail-closed** on an unopenable DB path.
@@ -596,15 +604,37 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
         import uuid
 
         from kagura_agent.mcp.mcp_memory import McpMemoryClient, build_mcp_call_tool
+        from kagura_agent.mcp.rest_bootstrap import (
+            RestBootstrapMemoryClient,
+            build_agents_bootstrap_call,
+        )
 
         try:
-            uuid.UUID(mcp_context)
+            mcp_context = str(uuid.UUID(mcp_context))
         except ValueError as exc:
             # Fail-closed: a misconfigured cloud context must refuse, not fall back.
             raise MemoryUnreachableError(
                 f"{_MEMORY_MCP_CONTEXT_ENV}={mcp_context!r} is not a valid context UUID "
                 f"— fix it or unset {_MEMORY_MCP_CONTEXT_ENV}"
             ) from exc
+        agent_id = environ.get(_MEMORY_AGENT_ID_ENV, "").strip()
+        if not agent_id:
+            raise MemoryUnreachableError(
+                f"{_MEMORY_MCP_CONTEXT_ENV} is set but {_MEMORY_AGENT_ID_ENV} is not — "
+                "set the registered memory-cloud agent UUID and use its bound credential"
+            )
+        try:
+            agent_id = str(uuid.UUID(agent_id))
+        except ValueError as exc:
+            raise MemoryUnreachableError(
+                f"{_MEMORY_AGENT_ID_ENV}={agent_id!r} is not a valid agent UUID"
+            ) from exc
+        api_key = environ.get(_MEMORY_AGENT_API_KEY_ENV, "").strip()
+        if not api_key:
+            raise MemoryUnreachableError(
+                f"{_MEMORY_MCP_CONTEXT_ENV} is set but {_MEMORY_AGENT_API_KEY_ENV} is not — "
+                "set an agent-bound member key for trusted-host REST bootstrap"
+            )
         if not environ.get(_MEMORY_MCP_SERVER_ENV, "").strip():
             # Fail-closed with a clear message at construction, not an opaque stdio
             # spawn error on the first recall/remember deep in the run loop.
@@ -612,7 +642,14 @@ def make_memory_client(env: Mapping[str, str] | None = None) -> MemoryClient:
                 f"{_MEMORY_MCP_CONTEXT_ENV} is set but {_MEMORY_MCP_SERVER_ENV} (the "
                 "kagura-memory MCP server command) is not — set it or unset the context"
             )
-        return McpMemoryClient(build_mcp_call_tool(environ), context_id=mcp_context)
+        mcp_memory = McpMemoryClient(build_mcp_call_tool(environ), context_id=mcp_context)
+        mcp_url = environ.get(_MEMORY_MCP_URL_ENV, "").strip() or None
+        return RestBootstrapMemoryClient(
+            mcp_memory,
+            build_agents_bootstrap_call(api_key=api_key, mcp_url=mcp_url),
+            agent_id=agent_id,
+            context_id=mcp_context,
+        )
     db_path = environ.get(_MEMORY_DB_ENV, "").strip()
     if db_path:
         import sqlite3

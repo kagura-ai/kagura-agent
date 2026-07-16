@@ -25,6 +25,7 @@ from kagura_agent.core.session import Session
 from kagura_agent.mcp.memory_cloud import MemoryClient
 from kagura_agent.membrane.launcher import LaunchSpec, validate_spec
 from kagura_agent.patterns.checkpoint import CheckpointStore
+from kagura_agent.patterns.continuity import prepare_bootstrap_prompt, remember_outcome
 
 log = logging.getLogger(__name__)
 
@@ -220,12 +221,21 @@ class Cockpit:
         # the moment the container starts (so /kill works mid-run); the in-process
         # LAUNCH registers after the run (no container id) — today's behaviour.
         brain = self._brain if self._container is None else self._container_brain(event.thread_id)
+        effective_prompt = event.text
+        if self._memory is not None:
+            effective_prompt, _used, _bootstrap = await prepare_bootstrap_prompt(
+                self._memory,
+                session_id=event.thread_id,
+                prompt=event.text,
+            )
         session = Session(brain, self._checkpoints)
         try:
             if intent is Intent.CONTINUE:
-                result = await session.resume(event.thread_id, prompt=event.text)
+                result = await session.resume(event.thread_id, prompt=effective_prompt)
             else:  # LAUNCH
-                result = await session.run(Task(prompt=event.text, session_id=event.thread_id))
+                result = await session.run(
+                    Task(prompt=effective_prompt, session_id=event.thread_id)
+                )
                 if self._container is None:
                     self._registry.add(event.thread_id)
         except Exception:
@@ -240,6 +250,21 @@ class Cockpit:
             if self._container is not None:
                 self._registry.close(event.thread_id)
             raise
+        if self._memory is not None:
+            try:
+                await remember_outcome(
+                    self._memory,
+                    session_id=event.thread_id,
+                    prompt=event.text,
+                    result=result.text,
+                )
+            except Exception:
+                # The task/checkpoint succeeded; preserve cockpit liveness and the
+                # same best-effort outcome-write posture as ground_and_run.
+                log.exception(
+                    "cockpit outcome memory write failed for thread %s",
+                    event.thread_id,
+                )
         await self._transport.send(event.thread_id, result.text)
 
     async def _handle_status(self, event: Event) -> None:
