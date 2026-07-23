@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -29,20 +30,107 @@ from kagura_agent.eval.bootstrap_ab import (
 
 JsonRequest = Callable[[str, str, dict[str, Any] | None], Awaitable[dict[str, Any]]]
 FeedbackMode = Literal["host", "public"]
+#: A bearer source. Called with ``force=True`` after a 401 to demand a freshly
+#: rotated token; ``force=False`` returns the currently valid token (which the
+#: provider may still refresh on its own expiry clock).
+TokenProvider = Callable[[bool], str]
 
 
 class LiveEvalError(RuntimeError):
     """A live bootstrap experiment failed before it could produce valid evidence."""
 
 
-class BearerJsonClient:
-    """Minimal async JSON client that never stores the API key as a public attribute."""
+class KaguraCliTokenProvider:  # pragma: no cover - shells out to the `kagura` CLI
+    """A refreshing bearer sourced from the ``kagura`` CLI's OAuth session.
 
-    def __init__(self, base_url: str, api_key: str, *, timeout: float = 30.0) -> None:
-        if not api_key:
-            raise ValueError("KAGURA_API_KEY is required for a live bootstrap eval")
+    The owner OAuth access token is the only credential that satisfies the
+    operator-only host-feedback endpoint on a single-owner workspace, but it
+    lives only ~1h — far short of a full 5-generation gate run. This provider
+    rotates it via ``kagura auth refresh`` (proactively once per
+    ``refresh_interval_s``, and on demand when the client reports a 401) and
+    emits the current token via ``kagura auth token``, so the run inherits a
+    continuously-valid owner bearer without the runner re-reading anything.
+
+    Kept out of unit coverage precisely because it shells the external CLI; the
+    recoverable-401 and refresh contract it feeds is fully tested at the
+    :class:`BearerJsonClient` seam with an injected provider.
+    """
+
+    def __init__(
+        self,
+        *,
+        kagura_bin: str = "kagura",
+        refresh_interval_s: float = 2400.0,
+        timeout: float = 60.0,
+    ) -> None:
+        self._bin = kagura_bin
+        self._refresh_interval_s = refresh_interval_s
+        self._timeout = timeout
+        self._token: str | None = None
+        self._last_refresh = 0.0
+
+    def __call__(self, force: bool) -> str:
+        import subprocess  # local: only the live path pays the import
+
+        now = time.monotonic()
+        stale = self._token is None or (now - self._last_refresh) >= self._refresh_interval_s
+        if force or stale:
+            subprocess.run(
+                [self._bin, "auth", "refresh"],
+                check=True,
+                capture_output=True,
+                timeout=self._timeout,
+            )
+            emitted = subprocess.run(
+                [self._bin, "auth", "token"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+            )
+            token = emitted.stdout.strip()
+            if not token:
+                raise LiveEvalError("`kagura auth token` returned an empty access token")
+            self._token = token
+            self._last_refresh = now
+        assert self._token is not None
+        return self._token
+
+
+class BearerJsonClient:
+    """Minimal async JSON client that never stores the API key as a public attribute.
+
+    Two robustness seams keep a **multi-hour** gate run (~3600 REST calls behind
+    900 serial actor turns) from aborting on a recoverable fault:
+
+    - ``token_provider`` — a refreshing bearer source. A live run outlives the
+      ~1h OAuth access token, but the runner reads the bearer once, so a fixed
+      key would 401 mid-run. When a provider is supplied the Authorization header
+      is rebuilt from it per request, and a 401 triggers exactly one forced
+      refresh + retry (the provider rotates the token). A fixed-key client (no
+      provider) is unchanged: a 401 surfaces immediately.
+    - ``retries`` — a bounded retry on *transient* faults (dropped connection /
+      5xx) with linear backoff, so one blip over thousands of calls does not
+      discard the run and its fresh 70-memory re-provision. A 4xx (other than the
+      401-refresh case) is a request bug, not transient, and is never retried.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        *,
+        timeout: float = 30.0,
+        token_provider: TokenProvider | None = None,
+        retries: int = 0,
+        retry_backoff_s: float = 0.5,
+    ) -> None:
+        if not api_key and token_provider is None:
+            raise ValueError("KAGURA_API_KEY (or a token_provider) is required for a live eval")
         if timeout <= 0.0:
             raise ValueError("memory-cloud timeout must be positive")
+        if retries < 0:
+            raise ValueError("memory-cloud retries must be non-negative")
         stripped = base_url.rstrip("/")
         if not stripped.startswith("https://") and not (
             stripped.startswith("http://127.0.0.1") or stripped.startswith("http://localhost")
@@ -50,8 +138,20 @@ class BearerJsonClient:
             raise ValueError("memory-cloud base URL must use HTTPS (loopback HTTP is allowed)")
         self.base_url = stripped
         self.timeout = timeout
-        self._headers = {
-            "Authorization": f"Bearer {api_key}",
+        self._static_key = api_key
+        self._token_provider = token_provider
+        self._retries = retries
+        self._retry_backoff_s = retry_backoff_s
+
+    def _bearer(self, *, refresh: bool) -> str:
+        """The current bearer — from the provider (optionally forced) or the fixed key."""
+        if self._token_provider is not None:
+            return self._token_provider(refresh)
+        return self._static_key
+
+    def _headers(self, *, refresh: bool) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._bearer(refresh=refresh)}",
             "Content-Type": "application/json",
             "User-Agent": "kagura-agent-bootstrap-eval/1",
         }
@@ -65,22 +165,47 @@ class BearerJsonClient:
         if not path.startswith("/"):
             raise LiveEvalError("memory-cloud request path must be absolute")
         data = None if body is None else json.dumps(body).encode()
-        request = urllib.request.Request(
-            f"{self.base_url}{path}",
-            data=data,
-            headers=self._headers,
-            method=method,
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310
-                raw_payload = response.read()
-        except urllib.error.HTTPError as exc:
-            # Never include response bodies: an upstream regression could reflect a bearer.
-            raise LiveEvalError(
-                f"memory-cloud {method} {path} failed with HTTP {exc.code}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise LiveEvalError(f"memory-cloud {method} {path} connection failed") from exc
+        refreshed_after_401 = False
+        # attempt 0..retries are the transient-retry budget; the 401 forced-refresh
+        # retry is granted once ON TOP of that (an expiry is not a "transient" but a
+        # recoverable credential fault), so it never consumes the transient budget.
+        attempt = 0
+        while True:
+            request = urllib.request.Request(
+                f"{self.base_url}{path}",
+                data=data,
+                headers=self._headers(refresh=refreshed_after_401),
+                method=method,
+            )
+            try:
+                with urllib.request.urlopen(  # noqa: S310
+                    request, timeout=self.timeout
+                ) as response:
+                    raw_payload = response.read()
+                break
+            except urllib.error.HTTPError as exc:
+                # A 401 with a refreshing provider means the bearer expired: force a
+                # rotation and retry exactly once before giving up (fail closed on a
+                # genuinely unauthorized credential, never loop).
+                if exc.code == 401 and self._token_provider is not None and not refreshed_after_401:
+                    refreshed_after_401 = True
+                    continue
+                # 5xx is transient (upstream hiccup); a 4xx is a request bug. Retry
+                # only the former, within the bounded budget.
+                if exc.code >= 500 and attempt < self._retries:
+                    attempt += 1
+                    time.sleep(self._retry_backoff_s * attempt)
+                    continue
+                # Never include response bodies: an upstream regression could reflect a bearer.
+                raise LiveEvalError(
+                    f"memory-cloud {method} {path} failed with HTTP {exc.code}"
+                ) from exc
+            except urllib.error.URLError as exc:
+                if attempt < self._retries:
+                    attempt += 1
+                    time.sleep(self._retry_backoff_s * attempt)
+                    continue
+                raise LiveEvalError(f"memory-cloud {method} {path} connection failed") from exc
         try:
             payload = raw_payload.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -468,13 +593,19 @@ class CommandObjectiveActor(ObjectiveActor):
         *,
         timeout: float = 300.0,
         env: Mapping[str, str] | None = None,
+        retries: int = 0,
+        retry_backoff_s: float = 2.0,
     ) -> None:
         if not command or any(not item for item in command):
             raise ValueError("actor command must be a non-empty argv sequence")
         if timeout <= 0.0:
             raise ValueError("actor timeout must be positive")
+        if retries < 0:
+            raise ValueError("actor retries must be non-negative")
         self.command = tuple(command)
         self.timeout = timeout
+        self.retries = retries
+        self.retry_backoff_s = retry_backoff_s
         source_env = os.environ if env is None else env
         self.env = {
             key: value
@@ -490,6 +621,22 @@ class CommandObjectiveActor(ObjectiveActor):
             "bootstrap_context": bootstrap.model_context(),
             "seed": seed,
         }
+        # The 900 serial codex turns are the run's most failure-prone surface: a
+        # transient (network blip / momentary rate throttle) fails one trial, which
+        # would otherwise abort the whole multi-hour run. Retry the invocation a
+        # bounded number of times with linear backoff before surfacing the error.
+        # The actor is a pure, idempotent one-shot Q&A, so a retry is safe.
+        attempt = 0
+        while True:
+            try:
+                return await self._invoke_once(task, payload)
+            except LiveEvalError:
+                if attempt >= self.retries:
+                    raise
+                attempt += 1
+                await asyncio.sleep(self.retry_backoff_s * attempt)
+
+    async def _invoke_once(self, task: TaskSpec, payload: dict[str, Any]) -> OutcomeObservation:
         process = await asyncio.create_subprocess_exec(
             *self.command,
             stdin=asyncio.subprocess.PIPE,
