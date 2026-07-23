@@ -46,7 +46,8 @@ the security membrane, capability graduation, and the per-milestone
   changes only *where* memories are stored, not this gate.
 - **A brain.** The default `sdk` brain needs the `claude` extra **and** the Claude Code CLI
   signed in to your Pro/Max plan (or `ANTHROPIC_API_KEY`, which overrides subscription
-  auth). The bare core ships with **no brain** — you pick an extra.
+  auth). The `brain` extra's **codex** backend likewise inherits your **ChatGPT
+  subscription** via `codex login`. The bare core ships with **no brain** — you pick an extra.
 - **Docker** — only for `serve --container` and the live membrane.
 
 ### Get running
@@ -61,6 +62,8 @@ pip install 'kagura-agent[claude]'    # default — Claude Agent SDK
 kagura auth login                 # Kagura Memory Cloud — the separate `kagura` CLI
 claude                            # sign the Claude Code CLI into your plan…
 # export ANTHROPIC_API_KEY=sk-…   # …or bring your own key (overrides subscription)
+# codex login                     # [brain] extra + KAGURA_AGENT_BRAIN_BACKEND=codex —
+#                                 # the codex brain runs on your ChatGPT subscription
 
 # 3. Preflight — reports exactly what is still missing:
 kagura-agent doctor
@@ -263,7 +266,14 @@ deploy by `KAGURA_AGENT_BRAIN` (`sdk`, the default, or `kagura-brain`):
   whose `KAGURA_AGENT_BRAIN_BACKEND` picks **claude** or **codex**, with
   `KAGURA_AGENT_BRAIN_MODEL` to pin a model and `KAGURA_AGENT_BRAIN_LOCAL_PROVIDER`
   for a **local `--oss` ollama/lmstudio** brain (or `KAGURA_AGENT_BRAIN_ENDPOINT`
-  + key for a BYO OpenAI-compatible gateway such as Ollama Cloud).
+  + key for a BYO OpenAI-compatible gateway such as Ollama Cloud). Both of its
+  backends are **subscription-first**, matching the sdk path: claude inherits the
+  Pro/Max login, and codex inherits the **ChatGPT subscription** written by
+  `codex login` (`~/.codex/auth.json`) — the adapter strips `OPENAI_*`/`CODEX_*`
+  from the child env so an ambient API key or base-URL can never silently switch
+  billing or reroute a subscription run. BYO is the explicit opt-out and must be
+  fully paired: `KAGURA_AGENT_BRAIN_ENDPOINT` **and** `KAGURA_BRAIN_API_KEY`, both
+  or neither (a half-set pair fails closed before the run).
 
 **`KAGURA_AGENT_PERMISSION_MODE`** (sdk backend only) sets the Agent SDK's headless
 tool-approval policy: `default` | `acceptEdits` | `plan` | `bypassPermissions` |
