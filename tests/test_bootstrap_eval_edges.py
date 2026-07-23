@@ -16,10 +16,7 @@ from kagura_agent.eval import bootstrap_live as live
 
 
 def test_trial_seed_is_stable_signed_64_bit() -> None:
-    values = {
-        ab._trial_seed(188, f"task-{index}", index % 5, index % 3)
-        for index in range(100)
-    }
+    values = {ab._trial_seed(188, f"task-{index}", index % 5, index % 3) for index in range(100)}
 
     assert len(values) == 100
     assert all(-(2**63) <= value < 2**63 for value in values)
@@ -306,7 +303,65 @@ async def test_cli_run_builds_registered_experiment(monkeypatch: pytest.MonkeyPa
     assert captured["manifest"].resolved_primary_generation == 1
     assert captured["backend"].feedback_mode == "public"
     assert captured["actor"].command == ("actor",)
+    assert captured["actor"].retries == 0  # default: unchanged behavior
     assert len(captured["tasks"]) == 30
+
+
+@pytest.mark.asyncio
+async def test_cli_run_wires_token_refresh_and_bounded_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A multi-hour run configures the refreshing owner bearer and bounded retries;
+    # the CLI must thread those onto the client and the actor.
+    built: dict[str, Any] = {}
+
+    class _Client:
+        def __init__(self, base_url: str, api_key: str, **kwargs: Any) -> None:
+            built["api_key"] = api_key
+            built["client_kwargs"] = kwargs
+
+        async def request(self, *_a: Any, **_k: Any) -> dict[str, Any]:
+            return {}
+
+    async def fake_run(manifest: Any, snapshot: Any, tasks: Any, backend: Any, actor: Any) -> Any:
+        built["actor_retries"] = actor.retries
+        return SimpleNamespace(
+            to_json=lambda: "{}\n", gate=SimpleNamespace(default_on_allowed=False)
+        )
+
+    monkeypatch.setattr(cli, "BearerJsonClient", _Client)
+    monkeypatch.setattr(cli, "run_experiment", fake_run)
+    monkeypatch.delenv("KAGURA_API_KEY", raising=False)
+
+    config = _cli_config()
+    config["memory_cloud"].update(token_refresh=True, retries=4, retry_backoff_s=0.0)
+    config["actor"].update(retries=3, retry_backoff_s=0.0)
+
+    await cli._run(config)
+
+    # No static key when refreshing; a provider + bounded retries are threaded through.
+    assert built["api_key"] == ""
+    assert built["client_kwargs"]["retries"] == 4
+    assert callable(built["client_kwargs"]["token_provider"])
+    assert built["actor_retries"] == 3
+
+
+@pytest.mark.asyncio
+async def test_cli_run_captures_actor_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_run(manifest: Any, snapshot: Any, tasks: Any, backend: Any, actor: Any) -> Any:
+        captured["actor"] = actor
+        return SimpleNamespace(
+            to_json=lambda: "{}\n", gate=SimpleNamespace(default_on_allowed=False)
+        )
+
+    monkeypatch.setattr(cli, "run_experiment", fake_run)
+    monkeypatch.setenv("KAGURA_API_KEY", "secret")
+    config = _cli_config()
+    config["actor"].update(retries=2)
+    await cli._run(config)
+    assert captured["actor"].retries == 2
 
 
 @pytest.mark.asyncio
@@ -380,6 +435,38 @@ def test_cli_main_distinguishes_config_and_invalid_evidence(
     assert "bootstrap eval invalid" in capsys.readouterr().err
 
 
+def _minimal_envelope(task: Any) -> Any:
+    """A schema-valid, non-degraded bootstrap envelope carrying the gold fact."""
+    return ab.BootstrapEnvelope(
+        {
+            "status": "success",
+            "degraded": False,
+            "agent": {
+                "agent_id": "agent",
+                "binding": {"context_id": "context", "is_default": True},
+            },
+            "context": {"id": "context", "usage_guide": "fixture"},
+            "instructions": "Use the supplied memory.",
+            "components": {
+                "pinned": {"status": "ok", "memories": []},
+                "recall": {
+                    "status": "ok",
+                    "results": [
+                        {
+                            "id": "memory",
+                            "external_id": task.gold_memory_id,
+                            "content": "4 attempts decorrelated jitter",
+                        }
+                    ],
+                },
+                "upcoming": {"status": "ok", "results": []},
+                "state": {"status": "ok", "states": {}},
+                "policy": {"status": "skipped", "reason": "no_policy_bundle"},
+            },
+        }
+    )
+
+
 class _Response:
     def __init__(self, payload: bytes) -> None:
         self.payload = payload
@@ -420,6 +507,13 @@ def test_bearer_json_client_validates_transport_and_parses_json(
         client._request_sync("GET", "relative", None)
 
 
+def test_negative_retries_fail_closed_on_client_and_actor() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        live.BearerJsonClient("https://memory.test", "key", retries=-1)
+    with pytest.raises(ValueError, match="non-negative"):
+        live.CommandObjectiveActor(("actor",), retries=-1)
+
+
 @pytest.mark.parametrize(
     ("effect", "message"),
     [
@@ -453,6 +547,172 @@ def test_bearer_json_client_redacts_http_error(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(live.LiveEvalError, match="HTTP 403") as caught:
         client._request_sync("GET", "/path", None)
     assert "key" not in str(caught.value)
+
+
+def test_bearer_json_client_requires_a_static_key_or_a_token_provider() -> None:
+    # An empty static key with no refreshing provider still fails closed…
+    with pytest.raises(ValueError, match="required"):
+        live.BearerJsonClient("https://memory.test", "")
+    # …but a token_provider is an accepted credential source in its place.
+    client = live.BearerJsonClient("https://memory.test", "", token_provider=lambda _force: "tok")
+    assert client._bearer(refresh=False) == "tok"
+
+
+def test_bearer_json_client_uses_provider_token_per_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A multi-hour run outlives the ~1h OAuth token; the runner reads the bearer
+    # once, so a fixed key would 401 mid-run. The provider is re-invoked per
+    # request, so a rotated token flows without reconstructing the client.
+    tokens = iter(["t0", "t1"])
+    seen: list[str] = []
+
+    def urlopen(request: Any, *, timeout: float) -> _Response:
+        seen.append(request.get_header("Authorization"))
+        return _Response(b'{"ok":true}')
+
+    monkeypatch.setattr(live.urllib.request, "urlopen", urlopen)
+    client = live.BearerJsonClient(
+        "https://memory.test", "", token_provider=lambda _force: next(tokens)
+    )
+    assert client._request_sync("GET", "/a", None) == {"ok": True}
+    assert client._request_sync("GET", "/b", None) == {"ok": True}
+    assert seen == ["Bearer t0", "Bearer t1"]
+
+
+def test_bearer_json_client_force_refreshes_and_retries_once_on_401(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 401 means the bearer expired; with a provider present the client asks it
+    # for a FORCED refresh and retries exactly once, so an expiry mid-run is
+    # recovered rather than aborting the whole gate.
+    forced: list[bool] = []
+
+    def provider(force: bool) -> str:
+        forced.append(force)
+        return "fresh" if force else "stale"
+
+    calls = {"n": 0}
+
+    def urlopen(request: Any, *, timeout: float) -> _Response:
+        calls["n"] += 1
+        if request.get_header("Authorization") == "Bearer stale":
+            raise urllib.error.HTTPError("https://memory.test", 401, "expired", {}, None)
+        return _Response(b'{"ok":true}')
+
+    monkeypatch.setattr(live.urllib.request, "urlopen", urlopen)
+    client = live.BearerJsonClient("https://memory.test", "", token_provider=provider)
+    assert client._request_sync("GET", "/path", None) == {"ok": True}
+    assert forced == [False, True]  # first normal, then forced after the 401
+    assert calls["n"] == 2  # exactly one retry
+
+
+def test_bearer_json_client_gives_up_after_one_401_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # If the freshly refreshed token is ALSO rejected, fail closed (redacted) —
+    # do not loop forever against a genuinely unauthorized credential.
+    def urlopen(*_args: object, **_kwargs: object) -> _Response:
+        raise urllib.error.HTTPError("https://memory.test", 401, "expired", {}, None)
+
+    monkeypatch.setattr(live.urllib.request, "urlopen", urlopen)
+    client = live.BearerJsonClient(
+        "https://memory.test", "", token_provider=lambda _force: "secret-tok"
+    )
+    with pytest.raises(live.LiveEvalError, match="HTTP 401") as caught:
+        client._request_sync("GET", "/path", None)
+    assert "secret-tok" not in str(caught.value)
+
+
+def test_bearer_json_client_401_without_provider_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Backward compatible: a fixed-key client (no provider) has nothing to refresh,
+    # so a 401 surfaces immediately, exactly as before this seam existed.
+    calls = {"n": 0}
+
+    def urlopen(*_args: object, **_kwargs: object) -> _Response:
+        calls["n"] += 1
+        raise urllib.error.HTTPError("https://memory.test", 401, "expired", {}, None)
+
+    monkeypatch.setattr(live.urllib.request, "urlopen", urlopen)
+    client = live.BearerJsonClient("https://memory.test", "key")
+    with pytest.raises(live.LiveEvalError, match="HTTP 401"):
+        client._request_sync("GET", "/path", None)
+    assert calls["n"] == 1
+
+
+def test_bearer_json_client_retries_transient_errors_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Over ~3600 REST calls in a multi-hour run a transient blip (5xx / dropped
+    # connection) is near-certain; a bounded retry keeps one blip from discarding
+    # the whole run + a fresh 70-memory re-provision.
+    effects: list[object] = [
+        urllib.error.URLError("reset"),
+        urllib.error.HTTPError("https://memory.test", 503, "unavailable", {}, None),
+        _Response(b'{"ok":true}'),
+    ]
+
+    def urlopen(*_args: object, **_kwargs: object) -> _Response:
+        effect = effects.pop(0)
+        if isinstance(effect, BaseException):
+            raise effect
+        assert isinstance(effect, _Response)
+        return effect
+
+    monkeypatch.setattr(live.urllib.request, "urlopen", urlopen)
+    client = live.BearerJsonClient("https://memory.test", "key", retries=2, retry_backoff_s=0.0)
+    assert client._request_sync("GET", "/path", None) == {"ok": True}
+    assert effects == []  # all three attempts consumed
+
+
+def test_bearer_json_client_does_not_retry_a_4xx_client_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 4xx (other than the 401 refresh case) is a request bug, not a transient —
+    # retrying would just burn attempts, so it fails closed immediately.
+    calls = {"n": 0}
+
+    def urlopen(*_args: object, **_kwargs: object) -> _Response:
+        calls["n"] += 1
+        raise urllib.error.HTTPError("https://memory.test", 422, "unprocessable", {}, None)
+
+    monkeypatch.setattr(live.urllib.request, "urlopen", urlopen)
+    client = live.BearerJsonClient("https://memory.test", "key", retries=3, retry_backoff_s=0.0)
+    with pytest.raises(live.LiveEvalError, match="HTTP 422"):
+        client._request_sync("GET", "/path", None)
+    assert calls["n"] == 1
+
+
+async def test_command_actor_retries_a_transient_failure_then_succeeds(
+    tmp_path: Path,
+) -> None:
+    # An actor command that fails N-1 times then succeeds must not abort the run
+    # when retries cover it — the 900 serial codex calls are the run's most
+    # failure-prone surface.
+    task = ab.load_default_tasks()[0]
+    envelope = _minimal_envelope(task)
+    counter = tmp_path / "attempts"
+    code = (
+        "import json,sys,pathlib; json.load(sys.stdin); "
+        f"p=pathlib.Path({str(counter)!r}); "
+        "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); "
+        "sys.exit(1) if n < 2 else print('4 attempts decorrelated jitter')"
+    )
+    actor = live.CommandObjectiveActor((sys.executable, "-c", code), retries=2, retry_backoff_s=0.0)
+    outcome = await actor.run(task, envelope, seed=1)
+    assert outcome.passed is True
+    assert counter.read_text() == "3"  # failed twice, succeeded on the third
+
+
+async def test_command_actor_exhausts_retries_then_raises(tmp_path: Path) -> None:
+    task = ab.load_default_tasks()[0]
+    envelope = _minimal_envelope(task)
+    code = "import json,sys; json.load(sys.stdin); sys.exit(7)"
+    actor = live.CommandObjectiveActor((sys.executable, "-c", code), retries=2, retry_backoff_s=0.0)
+    with pytest.raises(live.LiveEvalError, match="exited 7"):
+        await actor.run(task, envelope, seed=1)
 
 
 def test_live_helpers_validate_search_config_snapshot_and_host_path() -> None:

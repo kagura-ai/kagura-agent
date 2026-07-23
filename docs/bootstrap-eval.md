@@ -80,15 +80,40 @@ cloned rows whose database UUIDs differ.
    optionally pinning `KAGURA_EVAL_ACTOR_MODEL` / `KAGURA_EVAL_ACTOR_TIMEOUT` in the
    host env — stamp the pinned model in `versions.actor_model`.
 
+### Surviving a multi-hour run
+
+A full 5-generation × 3-repetition gate is ~900 serial actor turns behind ~3600
+REST calls — hours of wall-clock. Two `memory_cloud` knobs keep a recoverable
+fault from discarding the whole run (both default off/zero, so a short run is
+unchanged):
+
+- `"token_refresh": true` — source the owner bearer from the `kagura` CLI's
+  OAuth session instead of a fixed `KAGURA_API_KEY`. The static access token
+  lives only ~1h and the runner reads it once, so a long run would 401 mid-flight;
+  with this set, the runner rotates the token (`kagura auth refresh`) proactively
+  and again on any 401, then retries that request once. Use this on a single-owner
+  workspace where the owner OAuth token is the only credential the operator-only
+  host-feedback endpoint accepts. `KAGURA_API_KEY` may be left unset.
+- `"retries": N` (+ optional `"retry_backoff_s"`) — bounded retry on *transient*
+  REST faults (dropped connection / 5xx). A 4xx is a request bug and is never
+  retried. `"actor": {"retries": N}` does the same for the actor subprocess (the
+  most failure-prone surface); the codex actor is an idempotent one-shot, so a
+  retry is safe.
+
 Copy [bootstrap-eval.example.json](bootstrap-eval.example.json), freeze every
-version and threshold, export the API key only in the trusted host process, then
-run:
+version and threshold, then run. On a single-owner workspace prefer the refreshing
+provider (no `KAGURA_API_KEY` needed); otherwise export the API key only in the
+trusted host process:
 
 ```bash
-export KAGURA_API_KEY='...'
+# refreshing owner bearer (token_refresh: true in the config) — nothing to export
 kagura-agent-bootstrap-eval \
   --config bootstrap-eval.json \
   --output bootstrap-eval-result.json
+
+# …or a fixed key for a short run / a long-lived member key:
+export KAGURA_API_KEY='...'
+kagura-agent-bootstrap-eval --config bootstrap-eval.json --output result.json
 ```
 
 Exit status is `0` only when default-ON is allowed, `1` for a scientifically

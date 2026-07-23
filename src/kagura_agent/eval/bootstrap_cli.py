@@ -24,10 +24,18 @@ from kagura_agent.eval.bootstrap_ab import (
 from kagura_agent.eval.bootstrap_live import (
     BearerJsonClient,
     CommandObjectiveActor,
+    KaguraCliTokenProvider,
     LiveArmConfig,
     LiveEvalError,
     RestBootstrapBackend,
+    TokenProvider,
 )
+
+
+def _bool(value: object, *, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean")
+    return value
 
 
 def _object(value: object, *, field: str) -> dict[str, Any]:
@@ -159,10 +167,21 @@ async def _run(config: Mapping[str, Any]) -> tuple[str, bool]:
     host_feedback_path = cloud.get("host_feedback_path")
     if host_feedback_path is not None and not isinstance(host_feedback_path, str):
         raise ValueError("memory_cloud.host_feedback_path must be a string or null")
+    # Robustness knobs for a multi-hour run (default off/zero → behavior unchanged):
+    #  - token_refresh: source the owner bearer from a refreshing `kagura` CLI
+    #    provider (the static ~1h OAuth token would 401 mid-run).
+    #  - retries/retry_backoff_s: bounded retry on transient REST faults.
+    token_refresh = _bool(cloud.get("token_refresh", False), field="memory_cloud.token_refresh")
+    token_provider: TokenProvider | None = KaguraCliTokenProvider() if token_refresh else None
     client = BearerJsonClient(
         _derive_base_url(cloud),
         os.environ.get("KAGURA_API_KEY", ""),
         timeout=_number(cloud.get("timeout", 30.0), field="memory_cloud.timeout"),
+        token_provider=token_provider,
+        retries=_integer(cloud.get("retries", 0), field="memory_cloud.retries"),
+        retry_backoff_s=_number(
+            cloud.get("retry_backoff_s", 0.5), field="memory_cloud.retry_backoff_s"
+        ),
     )
     backend = RestBootstrapBackend(
         request=client.request,
@@ -178,6 +197,10 @@ async def _run(config: Mapping[str, Any]) -> tuple[str, bool]:
     actor = CommandObjectiveActor(
         command,
         timeout=_number(actor_config.get("timeout", 300.0), field="actor.timeout"),
+        retries=_integer(actor_config.get("retries", 0), field="actor.retries"),
+        retry_backoff_s=_number(
+            actor_config.get("retry_backoff_s", 2.0), field="actor.retry_backoff_s"
+        ),
     )
     result = await run_experiment(manifest, snapshot, tasks, backend, actor)
     return result.to_json(), result.gate.default_on_allowed
