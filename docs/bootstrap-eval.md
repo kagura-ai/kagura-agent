@@ -74,7 +74,11 @@ cloned rows whose database UUIDs differ.
    answer text to stdout. Its input contains `task`, `bootstrap_context`, and a
    deterministic `seed`; it never contains the gold check. The runner strips
    `KAGURA_API_KEY`, `KAGURA_MCP_URL`, agent identity, and memory-context variables
-   from the child environment.
+   from the child environment. A committed reference actor drives OpenAI's Codex
+   CLI on ChatGPT-subscription auth (`codex login`; needs the `brain` extra):
+   set `actor.command` to `["<venv>/bin/python", "-m", "kagura_agent.eval.actor_codex"]`,
+   optionally pinning `KAGURA_EVAL_ACTOR_MODEL` / `KAGURA_EVAL_ACTOR_TIMEOUT` in the
+   host env — stamp the pinned model in `versions.actor_model`.
 
 Copy [bootstrap-eval.example.json](bootstrap-eval.example.json), freeze every
 version and threshold, export the API key only in the trusted host process, then
