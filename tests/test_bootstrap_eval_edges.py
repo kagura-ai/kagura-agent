@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import json
 import sys
+import threading
+import time
 import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
@@ -512,6 +514,62 @@ def test_negative_retries_fail_closed_on_client_and_actor() -> None:
         live.BearerJsonClient("https://memory.test", "key", retries=-1)
     with pytest.raises(ValueError, match="non-negative"):
         live.CommandObjectiveActor(("actor",), retries=-1)
+
+
+def test_kagura_token_provider_serializes_concurrent_refreshes() -> None:
+    # The runner gathers the two arms' bootstrap/export calls concurrently, so on
+    # the very first request N worker threads all see an empty token cache at once.
+    # Without serialization each shells `kagura auth refresh` simultaneously and the
+    # rotated refresh-token races (the second refresh fails, exit 1) — the exact
+    # failure that aborted the first full-gate launch at preflight. Exactly one
+    # refresh must run and every caller must get that one token.
+    calls = {"n": 0}
+    barrier = threading.Barrier(8)
+
+    def slow_refresh() -> str:
+        calls["n"] += 1
+        time.sleep(0.05)  # hold long enough that all 8 threads pile onto the lock
+        return f"tok{calls['n']}"
+
+    provider = live.KaguraCliTokenProvider(refresh_fn=slow_refresh)
+    results: list[str] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        barrier.wait()  # release all threads into the provider at the same instant
+        token = provider(False)
+        with lock:
+            results.append(token)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert calls["n"] == 1  # one refresh despite 8 concurrent first-calls
+    assert set(results) == {"tok1"}  # every caller got the single fresh token
+
+
+def test_kagura_token_provider_caches_then_force_refreshes() -> None:
+    calls = {"n": 0}
+
+    def refresh() -> str:
+        calls["n"] += 1
+        return f"tok{calls['n']}"
+
+    provider = live.KaguraCliTokenProvider(refresh_fn=refresh)
+    assert provider(False) == "tok1"  # first call refreshes
+    assert provider(False) == "tok1"  # still fresh → cached, no new refresh
+    assert calls["n"] == 1
+    assert provider(True) == "tok2"  # a 401 forces a rotation
+    assert calls["n"] == 2
+
+
+def test_kagura_token_provider_rejects_an_empty_token() -> None:
+    provider = live.KaguraCliTokenProvider(refresh_fn=lambda: "   ")
+    with pytest.raises(live.LiveEvalError, match="empty"):
+        provider(False)
 
 
 @pytest.mark.parametrize(
