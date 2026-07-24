@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/kagura-ai-logo.png" alt="Kagura AI" width="420">
+  <img src="https://raw.githubusercontent.com/kagura-ai/kagura-agent/main/docs/kagura-ai-logo.png" alt="Kagura AI" width="420">
 </p>
 
 # kagura-agent
 
 [![CI](https://github.com/kagura-ai/kagura-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/kagura-ai/kagura-agent/actions/workflows/ci.yml)
-![Coverage](docs/coverage.svg)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+![Coverage](https://raw.githubusercontent.com/kagura-ai/kagura-agent/main/docs/coverage.svg)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/kagura-ai/kagura-agent/blob/main/LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 
 **A memory-backed autonomous AI agent.** It combines a pluggable agentic brain,
@@ -52,7 +52,8 @@ kagura-agent run "summarize the repository layout"
 
 `ANTHROPIC_API_KEY` can replace the Claude subscription login. For the
 `kagura-brain` Claude/Codex/Ollama backend, chat transports, Docker mode, Windows
-activation, and first-run troubleshooting, see [Getting started](docs/getting-started.md).
+activation, and first-run troubleshooting, see
+[Getting started](https://github.com/kagura-ai/kagura-agent/blob/main/docs/getting-started.md).
 
 ## Main commands
 
@@ -71,26 +72,27 @@ specific model SDK. The selected brain owns its agentic tool loop; Kagura Memory
 Cloud provides durable context; the host-side membrane controls filesystem,
 network, and credential access.
 
-![kagura-agent architecture](docs/architecture.svg)
+![kagura-agent architecture](https://raw.githubusercontent.com/kagura-ai/kagura-agent/main/docs/architecture.svg)
 
 The full rationale, provider boundary, capability model, security membrane, and
-cockpit protocol live in the [design document](docs/design.md).
+cockpit protocol live in the
+[design document](https://github.com/kagura-ai/kagura-agent/blob/main/docs/design.md).
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
-| [Documentation index](docs/README.md) | Map of all project documentation |
-| [Getting started](docs/getting-started.md) | Installation, authentication, commands, bootstrap, troubleshooting |
-| [Design](docs/design.md) | Scope, architecture, capabilities, security membrane, cockpit internals |
-| [Project status and scope](docs/project-status.md) | Current boundary, roadmap, repository map, milestone coverage |
-| [Extending](docs/extending.md) | Custom MCP tools, egress, credential leasing, secret handling |
-| [Operations](docs/operations.md) | Incident response and credential rotation runbooks |
-| [Bootstrap evaluation](docs/bootstrap-eval.md) | Ranking evaluation and rollout gate |
-| [Legal notes](docs/legal.md) | Open terms-of-service and operator-responsibility questions |
-| [Contributing](CONTRIBUTING.md) | Development workflow and contribution guide |
-| [Security policy](SECURITY.md) | Supported versions and vulnerability reporting |
-| [Changelog](CHANGELOG.md) | Release history |
+| [Documentation index](https://github.com/kagura-ai/kagura-agent/blob/main/docs/README.md) | Map of all project documentation |
+| [Getting started](https://github.com/kagura-ai/kagura-agent/blob/main/docs/getting-started.md) | Installation, authentication, commands, bootstrap, troubleshooting |
+| [Design](https://github.com/kagura-ai/kagura-agent/blob/main/docs/design.md) | Scope, architecture, capabilities, security membrane, cockpit internals |
+| [Project status and scope](https://github.com/kagura-ai/kagura-agent/blob/main/docs/project-status.md) | Current boundary, roadmap, repository map, milestone coverage |
+| [Extending](https://github.com/kagura-ai/kagura-agent/blob/main/docs/extending.md) | Custom MCP tools, egress, credential leasing, secret handling |
+| [Operations](https://github.com/kagura-ai/kagura-agent/blob/main/docs/operations.md) | Incident response and credential rotation runbooks |
+| [Bootstrap evaluation](https://github.com/kagura-ai/kagura-agent/blob/main/docs/bootstrap-eval.md) | Ranking evaluation and rollout gate |
+| [Legal notes](https://github.com/kagura-ai/kagura-agent/blob/main/docs/legal.md) | Open terms-of-service and operator-responsibility questions |
+| [Contributing](https://github.com/kagura-ai/kagura-agent/blob/main/CONTRIBUTING.md) | Development workflow and contribution guide |
+| [Security policy](https://github.com/kagura-ai/kagura-agent/blob/main/SECURITY.md) | Supported versions and vulnerability reporting |
+| [Changelog](https://github.com/kagura-ai/kagura-agent/blob/main/CHANGELOG.md) | Release history |
 
 ## Development
 
@@ -102,7 +104,9 @@ pytest
 mypy
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
+See
+[CONTRIBUTING.md](https://github.com/kagura-ai/kagura-agent/blob/main/CONTRIBUTING.md)
+for the full development workflow.
 
 ## Related repositories
 
@@ -115,5 +119,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
 
 ## License
 
-[Apache License 2.0](LICENSE) — © 2026 Kagura AI. See [NOTICE](NOTICE) for
-attribution.
+[Apache License 2.0](https://github.com/kagura-ai/kagura-agent/blob/main/LICENSE) —
+© 2026 Kagura AI. See
+[NOTICE](https://github.com/kagura-ai/kagura-agent/blob/main/NOTICE) for attribution.
