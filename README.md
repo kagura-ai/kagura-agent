@@ -19,7 +19,7 @@ The default brain is Claude through the
 [`kagura-brain`](https://github.com/kagura-ai/kagura-brain) backend adds Claude,
 Codex, and Ollama-compatible providers behind the same interface.
 
-> **Status:** alpha, package version `0.7.0`. The v0.1–v0.7 pure-Python skeleton is
+> **Status:** alpha, package version `0.7.1`. The v0.1–v0.7 pure-Python skeleton is
 > implemented and tested with strict typing and at least 95% coverage. Live Docker,
 > cloud credential, and chat-transport edges remain deployment-specific.
 

@@ -7,6 +7,34 @@ the [implementation-status table](docs/project-status.md#implementation-status-v
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-24
+
+This patch release hardens long-running bootstrap ranking evaluations and makes the
+package documentation portable to PyPI.
+
+### Added
+
+- **Codex objective actor** — a credential-isolated adapter lets the bootstrap A/B runner
+  use Codex with ChatGPT subscription authentication, with explicit payload validation,
+  timeouts, and fail-closed output handling (#193).
+
+### Fixed
+
+- **Refreshing evaluation bearer** — multi-hour runs can renew the Kagura CLI OAuth token,
+  retry once after an HTTP 401, and apply bounded retries to transient REST and actor
+  failures instead of losing an entire experiment to one recoverable fault (#194).
+- **Thread-safe token rotation** — concurrent control/treatment requests now serialize and
+  deduplicate the initial OAuth refresh, preventing refresh-token races (#195).
+- **PyPI README links** — repository documents, licenses, and images now use absolute URLs,
+  so they no longer resolve to missing paths under `pypi.org` (#197).
+
+### Changed
+
+- Reorganized the root README into a concise package overview backed by focused setup,
+  design, and project-status documents (#196), and documented Codex subscription auth for
+  the alternate brain backend (#192).
+- Updated the publish workflow to `astral-sh/setup-uv` 8.3.2 (#186).
+
 ## [0.7.0] - 2026-07-16
 
 This release adds the trusted-host one-call bootstrap path and the fail-closed outcome A/B
@@ -136,7 +164,8 @@ First public release — Apache-2.0, on PyPI. The implemented skeleton of milest
   and `NOTICE` (#95, #150); and the community-health files — `CONTRIBUTING.md` (DCO),
   `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue/PR templates, and Dependabot (#97).
 
-[Unreleased]: https://github.com/kagura-ai/kagura-agent/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/kagura-ai/kagura-agent/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/kagura-ai/kagura-agent/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/kagura-ai/kagura-agent/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/kagura-ai/kagura-agent/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/kagura-ai/kagura-agent/compare/v0.5.0...v0.5.1
