@@ -28,7 +28,7 @@ kagura-agent's threat model centers on **agent hijack via prompt injection** and
 - memory-provenance / trust-tier bypasses (treating untrusted, externally-ingested memory as trusted);
 - secret leakage (a credential reaching a log, error message, checkpoint, or process output).
 
-Out of scope: the documented **self-host single-user** trust model where Docker is a convenience boundary (a kernel 0-day defeating container isolation is an accepted residual risk for that mode — see the README's *Container hardening* note). A shared/SaaS lane would require microVM-class isolation and is a separate threat model.
+Out of scope: the documented **self-host single-user** trust model where Docker is a convenience boundary (a kernel 0-day defeating container isolation is an accepted residual risk for that mode — see the design document's [Container hardening](docs/design.md#container-hardening) note). A shared/SaaS lane would require microVM-class isolation and is a separate threat model.
 
 ## Supported versions
 

@@ -1,6 +1,6 @@
 # Legal posture (self-host v1)
 
-> Legal companion to the canonical design doc (`../README.md`).
+> Legal companion to the canonical [design document](design.md).
 >
 > ⚠️ This document **flags questions for qualified legal review** — it is not
 > legal advice and reaches no binding conclusion. Verify against the _current_
@@ -15,8 +15,7 @@ CLI inside an autonomous self-hosted agent fall within Anthropic's Consumer
 Terms / Usage Policy / any Claude Code terms governing automated or programmatic
 use? This is **open and must be verified**, not assumed.
 
-**The commercial context sharpens the risk.** The README states this is "part of
-the Kagura Memory Cloud commercial offering." Pro/Max are **consumer** products.
+**A commercial deployment sharpens the risk.** Pro/Max are **consumer** products.
 Powering a commercial offering with a consumer subscription — or shipping a
 product that requires the *customer* to plug in their own Pro/Max — risks
 (a) the customer breaching Consumer Terms, and (b) Kagura **inducing** that
@@ -29,7 +28,7 @@ programmatic invocation.
 - The **subscription path is the operator's own personal use, at their own
   risk — not a capability Kagura provides or supports commercially.**
 - The **commercial lane Kagura sells is BYOK API keys only** (Commercial Terms;
-  already the design — see README "Auth model"). This distinction matters for
+  already the design — see [Auth model](design.md#auth-model)). This distinction matters for
   liability and inducement, not just cost.
 - single subscriber = single operator; **never share one subscription across
   users** (the clearest line not to cross).
@@ -42,7 +41,8 @@ v2 / SDK *distributions* carry additional terms that may restrict redistribution
 and the base image (Debian/Ubuntu) bundles GPL components requiring
 attribution/source.
 
-→ **Mitigation = ship Dockerfiles, not prebuilt images** (README image section).
+→ **Mitigation = ship Dockerfiles, not prebuilt images** (see
+[Image composition](design.md#image-composition-bake-tools-inject-secrets)).
 The operator builds locally, pulling upstream directly, which shifts
 redistribution exposure to operator/upstream and matches the self-host model.
 Carry `NOTICE`/attribution for whatever *is* baked.
@@ -63,8 +63,8 @@ agent reads (`recall`) and may act on, transmit, or derive new memories from.
 That chat contains **third parties' personal data** whose authors never consented
 to Kagura — so the operator/Kagura takes on processor/controller obligations
 (GDPR/CCPA), and the agent **inherits** them by processing and potentially
-exfiltrating that data (the legal face of CSO finding C1 / README "Memory
-provenance").
+exfiltrating that data (the legal face of CSO finding C1 /
+[Memory provenance](design.md#the-membrane-what-crosses-what-does-not)).
 
 - **Erasure must cascade.** A `forget` has to reach derived artifacts —
   embeddings, edges, checkpoints — not just the primary memory.

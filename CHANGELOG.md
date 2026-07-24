@@ -3,7 +3,7 @@
 All notable changes to **kagura-agent** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The per-milestone module map is
-the [README implementation-status table](README.md#implementation-status-v01v07-skeleton).
+the [implementation-status table](docs/project-status.md#implementation-status-v01v07-skeleton).
 
 ## [Unreleased]
 
