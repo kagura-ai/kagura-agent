@@ -1,8 +1,9 @@
 # Operations — incident runbook: hijack & key rotation (self-host v1)
 
-> Ops companion to the canonical design doc (`../README.md`). Read the
-> **Security membrane** section there first — this runbook is the residual
-> detection + rotation layer that sits on top of the membrane.
+> Ops companion to the canonical [design document](design.md). Read the
+> [Security membrane](design.md#security-membrane-self-host-v1) section first —
+> this runbook is the residual detection + rotation layer that sits on top of
+> the membrane.
 
 This runbook is short **because the membrane already bounds blast radius** (no
 standing creds, project-root FS, egress allowlist). Detection + rotation is the
@@ -46,8 +47,8 @@ a rule that alerts on a non-allowlisted SNI is enough.
 > ⚠️ Even an allowlisted destination can be an exfil channel (push to an
 > attacker repo via an over-broad `gh` token, write to an allowed bucket). Pair
 > the allowlist with **minimum-scope leases** (e.g. `contents:write` on the
-> target repo only, no gist/repo-create) — see the launcher's `CredentialBroker`
-> in the README.
+> target repo only, no gist/repo-create) — see the
+> [launcher's `CredentialBroker`](design.md#the-launcher-per-run-capability-binding).
 
 ## Response — contain → rotate → investigate → eradicate → recover
 
@@ -88,8 +89,8 @@ that actually matters:
 
 ## Per-provider short-lived credential feasibility
 
-The launcher's per-task mint-and-expire model (README "The launcher") depends on
-each provider issuing short-lived, scoped creds. Verified feasibility:
+The [launcher's per-task mint-and-expire model](design.md#the-launcher-per-run-capability-binding)
+depends on each provider issuing short-lived, scoped creds. Verified feasibility:
 
 | Provider | Mechanism | TTL | Scoping | Verdict |
 |---|---|---|---|---|
@@ -136,8 +137,8 @@ leases, with no one routing their output or able to kill them.
 
 ## Credential lifecycle operations
 
-The `CredentialBroker` / `Lease` model (README "The launcher") needs a durable
-backing store so a crash can't leak live cloud credentials:
+The [`CredentialBroker` / `Lease` model](design.md#the-launcher-per-run-capability-binding)
+needs a durable backing store so a crash can't leak live cloud credentials:
 
 - **Lease ledger** — an append-only durable record
   `{lease_id, provider, container_id, expires_at, revoke_handle}`. Written on
@@ -162,8 +163,9 @@ backing store so a crash can't leak live cloud credentials:
 6. Fail-closed timeout for pending HITL approvals on restart
 
 CI/CD is out of scope while the repo is a placeholder; at first code the image
-build ties to the README's digest/lockfile pinning and the "ship Dockerfiles,
-not prebuilt images" decision in `docs/legal.md`.
+build ties to the design document's
+[digest/lockfile pinning](design.md#image-composition-bake-tools-inject-secrets)
+and the "ship Dockerfiles, not prebuilt images" decision in [legal.md](legal.md).
 
 ## Credential onboarding (v0.6 / v0.7)
 

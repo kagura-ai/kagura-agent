@@ -1,7 +1,8 @@
 # Extending — giving the agent new API hands (self-host v1)
 
-> Companion to the canonical design doc (`../README.md`) and the ops runbook
-> (`operations.md`). Read the **Security membrane** section of the README first —
+> Companion to the canonical [design document](design.md) and the
+> [operations runbook](operations.md). Read the
+> [Security membrane](design.md#security-membrane-self-host-v1) section first —
 > everything here operates *inside* that membrane, not around it.
 
 "Let the agent operate an API for me" has three supported shapes, in increasing
@@ -91,8 +92,8 @@ Two constraints make this safe — neither is optional:
 
 > ⚠️ An allowlisted destination can still be an exfil channel (e.g. pushing to an
 > attacker repo via an over-broad `gh` token). Pair the allowlist with
-> **minimum-scope leases** — see shape C and the launcher's `CredentialBroker`
-> in the README.
+> **minimum-scope leases** — see shape C and the
+> [launcher's `CredentialBroker`](design.md#the-launcher-per-run-capability-binding).
 
 ---
 
