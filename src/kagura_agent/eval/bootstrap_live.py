@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -40,7 +41,7 @@ class LiveEvalError(RuntimeError):
     """A live bootstrap experiment failed before it could produce valid evidence."""
 
 
-class KaguraCliTokenProvider:  # pragma: no cover - shells out to the `kagura` CLI
+class KaguraCliTokenProvider:
     """A refreshing bearer sourced from the ``kagura`` CLI's OAuth session.
 
     The owner OAuth access token is the only credential that satisfies the
@@ -51,9 +52,13 @@ class KaguraCliTokenProvider:  # pragma: no cover - shells out to the `kagura` C
     emits the current token via ``kagura auth token``, so the run inherits a
     continuously-valid owner bearer without the runner re-reading anything.
 
-    Kept out of unit coverage precisely because it shells the external CLI; the
-    recoverable-401 and refresh contract it feeds is fully tested at the
-    :class:`BearerJsonClient` seam with an injected provider.
+    **Thread-safe.** The runner gathers both arms' REST calls concurrently, so the
+    first request fans out to N worker threads that all see an empty cache at once.
+    A lock + re-check serializes them to a SINGLE ``kagura auth refresh``: two
+    simultaneous refreshes would race on the rotated refresh-token and the loser
+    exits non-zero (the failure that aborted the first full-gate launch). Only the
+    external ``refresh_fn`` (the CLI shell-out) is left out of coverage; the
+    locking/dedup contract is unit-tested via an injected ``refresh_fn``.
     """
 
     def __init__(
@@ -62,39 +67,52 @@ class KaguraCliTokenProvider:  # pragma: no cover - shells out to the `kagura` C
         kagura_bin: str = "kagura",
         refresh_interval_s: float = 2400.0,
         timeout: float = 60.0,
+        refresh_fn: Callable[[], str] | None = None,
     ) -> None:
         self._bin = kagura_bin
         self._refresh_interval_s = refresh_interval_s
         self._timeout = timeout
+        self._refresh_fn = refresh_fn if refresh_fn is not None else self._cli_refresh
         self._token: str | None = None
         self._last_refresh = 0.0
+        self._lock = threading.Lock()
 
-    def __call__(self, force: bool) -> str:
+    def _cli_refresh(self) -> str:  # pragma: no cover - shells out to the `kagura` CLI
+        """Rotate the OAuth session and emit the fresh access token."""
         import subprocess  # local: only the live path pays the import
 
-        now = time.monotonic()
-        stale = self._token is None or (now - self._last_refresh) >= self._refresh_interval_s
-        if force or stale:
-            subprocess.run(
-                [self._bin, "auth", "refresh"],
-                check=True,
-                capture_output=True,
-                timeout=self._timeout,
-            )
-            emitted = subprocess.run(
-                [self._bin, "auth", "token"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-            )
-            token = emitted.stdout.strip()
-            if not token:
-                raise LiveEvalError("`kagura auth token` returned an empty access token")
-            self._token = token
-            self._last_refresh = now
-        assert self._token is not None
-        return self._token
+        subprocess.run(
+            [self._bin, "auth", "refresh"],
+            check=True,
+            capture_output=True,
+            timeout=self._timeout,
+        )
+        emitted = subprocess.run(
+            [self._bin, "auth", "token"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=self._timeout,
+        )
+        return emitted.stdout
+
+    def __call__(self, force: bool) -> str:
+        # Hold the lock across the (rare) refresh so concurrent worker threads can
+        # never issue two `kagura auth refresh` calls at once; the re-check inside
+        # means only the first of a concurrent burst actually refreshes and the rest
+        # return the token it just cached. Non-refreshing calls take the lock only
+        # briefly to read the cache.
+        with self._lock:
+            now = time.monotonic()
+            stale = self._token is None or (now - self._last_refresh) >= self._refresh_interval_s
+            if force or stale:
+                token = (self._refresh_fn() or "").strip()
+                if not token:
+                    raise LiveEvalError("`kagura auth token` returned an empty access token")
+                self._token = token
+                self._last_refresh = now
+            assert self._token is not None
+            return self._token
 
 
 class BearerJsonClient:
