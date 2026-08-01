@@ -39,7 +39,7 @@ slack = ["slack-bolt>=1.18"]
 discord = ["discord.py>=2.3"]
 # Cloud memory transport + trusted-host agent bootstrap (#187). Optional so the
 # local/SQLite tiers and core test suite stay dependency-free.
-memory = ["kagura-memory>=0.37,<0.38", "mcp>=1,<2"]
+memory = ["kagura-memory>=0.37,<0.38", "mcp>=1,<3"]
 # Cloud cred provider transports (membrane/cloud_transports.py) — the deployment
 # edge wiring the injected provider callables to real SDKs. Optional so the core
 # + tests stay dependency-free.
